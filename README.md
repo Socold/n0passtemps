@@ -22,6 +22,14 @@ authenticator that proves identity as well as possession, in one gesture.
 The W3C work on that is in draft. Until it stabilises, building this means
 building on a moving target.
 
+## Constraints, if it happens
+
+- on-premise, self-hosted, no dependency on a hosted identity provider
+- data stays with the operator
+- the credential belongs to the customer, not to this service, so leaving costs
+  nothing
+- simple enough that a company without a platform team can run it
+
 ## Status
 
-An idea. Nothing to see yet.
+Thinking, not building. See docs/notes/.
