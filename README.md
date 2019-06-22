@@ -1,35 +1,48 @@
 # n0passtemps
 
-Notes towards an on-premise passwordless authentication service.
+An on-premise passwordless authentication service. Design phase.
 
-## Why
+## What changed
 
-Small companies do not have a password strength problem. They have a password
-lifecycle problem: accounts that outlive the employee, resets that route through
-a weaker mailbox, shared logins created because provisioning a real one was too
-much work. A stronger hash addresses none of that.
+WebAuthn Level 1 became a W3C Recommendation in March 2019. User verification is
+now a first class part of the ceremony, which means one gesture can prove both
+possession of an authenticator and the identity of the person holding it. That
+is the condition the 2017 note set: passwordless stops being a slogan.
 
-U2F is the first thing that changes the shape of the problem rather than its
-difficulty: the private key never leaves the token, so there is nothing to
-screenshot and nothing to share.
+## Shape
 
-## Why not yet
+A service the calling application talks to, not one users are redirected to.
 
-U2F is a second factor. The specification assumes a password underneath, so it
-adds a step rather than removing the reset path. What would remove it is an
-authenticator that proves identity as well as possession, in one gesture.
+The application keeps its own origin and its own sessions. This service verifies
+a factor and returns a result the application can check. A credential registered
+against the customer's domain stays useful to them if they stop using this,
+which is the point of not being a hosted identity provider.
 
-The W3C work on that is in draft. Until it stabilises, building this means
-building on a moving target.
+## Scope
 
-## Constraints, if it happens
+In:
 
-- on-premise, self-hosted, no dependency on a hosted identity provider
-- data stays with the operator
-- the credential belongs to the customer, not to this service, so leaving costs
-  nothing
-- simple enough that a company without a platform team can run it
+- WebAuthn registration and assertion
+- TOTP, as a fallback for users without an authenticator
+- single-use recovery codes
+- an audit trail
+- administration for the handful of things an operator actually does
+
+Out:
+
+- SAML and OIDC. This verifies a factor, it is not an identity provider.
+- session management. The application already has sessions.
+- anything hosted.
+
+## Open questions
+
+- retention and erasure against an append-only audit trail, which pull in
+  opposite directions
+- attestation verification without network egress
+- how much of the configuration can be validated before the listener starts
+
+See docs/notes/ for the working through.
 
 ## Status
 
-Thinking, not building. See docs/notes/.
+Design. No implementation.
