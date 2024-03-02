@@ -1,0 +1,69 @@
+# Build output
+/bin/
+/dist/
+/n0passtemps-server
+/n0passtemps-wizard
+*.exe
+*.so
+*.dylib
+
+# Test and coverage output
+coverage.out
+coverage.html
+*.test
+*.prof
+*.out
+
+# Local configuration. Only the .example files are tracked: a real config.toml
+# carries the relying party identifier and the database connection string of a
+# live deployment.
+config.toml
+docker-compose.override.yml
+# Written by "make setup-wizard" at the repository root. The tracked compose
+# files live under deploy/, which this anchored pattern does not reach.
+/docker-compose.yml
+
+# Environment files. .env holds the database password and is written by the
+# setup wizard; only .env.example belongs in the repository.
+.env
+.env.*
+!.env.example
+!*.env.example
+
+# Key encryption keyring. Losing it makes the sealed secrets unrecoverable and
+# leaking it makes them readable, so it must never reach a remote. Every name
+# the wizard and the documented layouts can produce is listed.
+keyring.json
+kek.json
+kek.txt
+*.kek
+/kek/
+/deploy/kek/
+*.keyring
+
+# SQLite database and its sidecar files. The write-ahead log and the shared
+# memory file hold committed rows that have not been checkpointed yet, so they
+# are as sensitive as the database itself.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite3-journal
+/data/
+
+# Editors and tooling
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Local tool caches
+/.golangci-cache/
+/tmp/
+
+# Python bytecode from the examples
+__pycache__/
+*.pyc

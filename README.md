@@ -1,48 +1,47 @@
 # n0passtemps
 
-An on-premise passwordless authentication service. Design phase.
+On-premise passwordless authentication: WebAuthn/FIDO2, TOTP and single-use
+recovery codes. One static binary, SQLite or PostgreSQL.
 
-## What changed
+Implementation in progress.
 
-WebAuthn Level 1 became a W3C Recommendation in March 2019. User verification is
-now a first class part of the ceremony, which means one gesture can prove both
-possession of an authenticator and the identity of the person holding it. That
-is the condition the 2017 note set: passwordless stops being a slogan.
+## What it is
 
-## Shape
+A service the calling application talks to. It verifies an authentication factor
+and returns a short-lived signed result the application exchanges for its own
+session.
 
-A service the calling application talks to, not one users are redirected to.
+The application remains the WebAuthn relying party from its users' point of
+view: credentials are registered against the origins the operator configures, so
+nothing is tied to this service's domain.
 
-The application keeps its own origin and its own sessions. This service verifies
-a factor and returns a result the application can check. A credential registered
-against the customer's domain stays useful to them if they stop using this,
-which is the point of not being a hosted identity provider.
+## What it is not
 
-## Scope
+Not an identity provider. There is no SAML, no OIDC, no session management and
+no user directory. It answers one question, whether this person just proved a
+factor, and it answers it verifiably.
 
-In:
+## Design decisions
 
-- WebAuthn registration and assertion
-- TOTP, as a fallback for users without an authenticator
-- single-use recovery codes
-- an audit trail
-- administration for the handful of things an operator actually does
+The implementation deviates from the original specification on several points,
+each recorded in `docs/adr/` with the reasoning. The ones worth knowing up
+front:
 
-Out:
-
-- SAML and OIDC. This verifies a factor, it is not an identity provider.
-- session management. The application already has sessions.
-- anything hosted.
-
-## Open questions
-
-- retention and erasure against an append-only audit trail, which pull in
-  opposite directions
-- attestation verification without network egress
-- how much of the configuration can be validated before the listener starts
-
-See docs/notes/ for the working through.
+- every call to the public API requires a key. An unauthenticated registration
+  endpoint is an authentication bypass, not a missing hardening measure.
+- a successful ceremony returns a signed assertion, not a bare 200, so the
+  caller does not have to trust the network path.
+- recovery codes are hashed, not encrypted. Losing the encryption key therefore
+  does not invalidate them.
+- WebAuthn public keys are stored in clear. They are public keys.
+- the audit log is hash chained. That makes tampering detectable, not
+  impossible, and the documentation says so.
 
 ## Status
 
-Design. No implementation.
+Under construction. The schema, the configuration layer and the cryptographic
+core are in place. Not usable yet.
+
+## Licence
+
+MIT.
