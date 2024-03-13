@@ -12,3 +12,4 @@ superseded by a new record rather than edited in place. See
 | # | Title | Status |
 |---|---|---|
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | accepted |
+| [0002](0002-authenticate-every-call-to-the-public-api-surface.md) | Authenticate every call to the public API surface | accepted |
