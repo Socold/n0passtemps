@@ -13,3 +13,4 @@ superseded by a new record rather than edited in place. See
 |---|---|---|
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | accepted |
 | [0002](0002-authenticate-every-call-to-the-public-api-surface.md) | Authenticate every call to the public API surface | accepted |
+| [0003](0003-the-service-is-the-webauthn-relying-party.md) | The service is the WebAuthn relying party, and the relying party identifier is server configuration | accepted |
