@@ -17,3 +17,4 @@ superseded by a new record rather than edited in place. See
 | [0004](0004-return-a-signed-assertion-result.md) | Return a signed assertion rather than a bare 200 | accepted |
 | [0005](0005-hash-recovery-codes-do-not-encrypt-them.md) | Hash recovery codes, do not encrypt them | accepted |
 | [0006](0006-store-webauthn-public-keys-in-clear.md) | Store WebAuthn public keys in clear | accepted |
+| [0007](0007-chain-the-audit-log.md) | Chain the audit log; do not rely on triggers alone | accepted |
