@@ -19,3 +19,4 @@ superseded by a new record rather than edited in place. See
 | [0006](0006-store-webauthn-public-keys-in-clear.md) | Store WebAuthn public keys in clear | accepted |
 | [0007](0007-chain-the-audit-log.md) | Chain the audit log; do not rely on triggers alone | accepted |
 | [0008](0008-split-the-health-endpoint.md) | Split the health endpoint | accepted |
+| [0009](0009-refuse-a-kek-inside-the-data-directory.md) | Refuse to load a key encryption key stored inside the data directory | accepted |
