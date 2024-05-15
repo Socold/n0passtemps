@@ -21,3 +21,4 @@ superseded by a new record rather than edited in place. See
 | [0008](0008-split-the-health-endpoint.md) | Split the health endpoint | accepted |
 | [0009](0009-refuse-a-kek-inside-the-data-directory.md) | Refuse to load a key encryption key stored inside the data directory | accepted |
 | [0010](0010-revocation-is-final.md) | Revocation is final | accepted |
+| [0011](0011-drop-hotp.md) | Drop HOTP | accepted |
