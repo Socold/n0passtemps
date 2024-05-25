@@ -103,13 +103,18 @@ func Generate(n int) ([]Code, error) {
 
 		verifier := raw[selectorLen:]
 
+		// The displayed form is built before raw is zeroized. verifier is a
+		// slice of raw, so zeroizing first would leave Display holding null
+		// bytes and every issued code would be unusable.
+		display := format(selector + string(verifier))
+
 		hash, err := hashVerifier(verifier)
 		zeroize.Bytes(raw)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, Code{
-			Display:  format(selector + strings.ToUpper(string(verifier))),
+			Display:  display,
 			Selector: selector,
 			Hash:     hash,
 		})
