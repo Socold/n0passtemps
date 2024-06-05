@@ -22,3 +22,4 @@ superseded by a new record rather than edited in place. See
 | [0009](0009-refuse-a-kek-inside-the-data-directory.md) | Refuse to load a key encryption key stored inside the data directory | accepted |
 | [0010](0010-revocation-is-final.md) | Revocation is final | accepted |
 | [0011](0011-drop-hotp.md) | Drop HOTP | accepted |
+| [0012](0012-server-rendered-administration-interface.md) | Server-rendered administration interface instead of a single-page application | accepted |
