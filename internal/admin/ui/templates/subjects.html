@@ -1,0 +1,69 @@
+{{define "title"}}People{{end}}
+
+{{define "content"}}
+{{with .Data}}
+<h1>People</h1>
+
+{{if .LookupOffered}}
+<section class="card">
+  <h2>Find one person</h2>
+  <p>You can only find someone by the exact reference the application uses for
+  them. That reference is stored encrypted, so the service cannot look through
+  the list for part of a name or an address. Ask the application which reference
+  it sends, and paste it here exactly.</p>
+  <form method="get" action="/admin/subjects" class="row">
+    <label for="reference">Exact reference</label>
+    <input id="reference" name="reference" type="text" value="{{.Reference}}"
+           autocapitalize="off" spellcheck="false">
+    <button type="submit">Find</button>
+  </form>
+</section>
+{{end}}
+
+<section class="card">
+  <h2>The list</h2>
+  <form method="get" action="/admin/subjects" class="row" data-autosubmit>
+    <label for="status">Show</label>
+    <select id="status" name="status">
+      <option value="">Everyone</option>
+      <option value="active"{{if eq .Status "active"}} selected{{end}}>Only those who can sign in</option>
+      <option value="locked"{{if eq .Status "locked"}} selected{{end}}>Only those who are blocked</option>
+      <option value="pending_deletion"{{if eq .Status "pending_deletion"}} selected{{end}}>Only those waiting to be deleted</option>
+    </select>
+    <button type="submit">Apply</button>
+  </form>
+
+  {{if .Rows}}
+  <table>
+    <caption class="visually-hidden">People this deployment authenticates</caption>
+    <thead>
+      <tr><th scope="col">Name</th><th scope="col">Status</th><th scope="col">Added</th><th scope="col"></th></tr>
+    </thead>
+    <tbody>
+      {{range .Rows}}
+      <tr>
+        <td>{{if .DisplayName}}{{.DisplayName}}{{else}}<span class="hint">No name recorded</span>{{end}}</td>
+        <td>{{.StatusLabel}}{{if .Deleted}} <span class="hint">(record marked for deletion)</span>{{end}}</td>
+        <td>{{datetime .CreatedAt}}</td>
+        <td><a href="/admin/subjects/{{.ID}}">Open</a></td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+
+  {{if .NextAfter}}
+  <p class="paging">
+    <a href="/admin/subjects?status={{.Status}}&amp;after={{.NextAfter}}">Show the next {{.Limit}}</a>
+    <a class="quiet-link" href="/admin/subjects?status={{.Status}}">Back to the beginning</a>
+  </p>
+  {{end}}
+
+  {{else if .Searched}}
+  <p class="calm">Nobody in this deployment uses that reference. Check it with the
+  application that sent it, including any upper and lower case.</p>
+  {{else}}
+  <p class="calm">There is nobody to show here yet.</p>
+  {{end}}
+</section>
+{{end}}
+{{end}}

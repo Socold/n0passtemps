@@ -1,0 +1,73 @@
+{{define "title"}}Alerts{{end}}
+
+{{define "content"}}
+{{with .Data}}
+<h1>Alerts</h1>
+
+<p class="summary">Open now: {{.Counts.Critical}} need attention now,
+{{.Counts.Warning}} worth a look, {{.Counts.Info}} for information.</p>
+
+<section class="card">
+  <h2>Filter</h2>
+  <form method="get" action="/admin/alerts" class="row" data-autosubmit>
+    <label for="severity">Show</label>
+    <select id="severity" name="severity">
+      <option value="">Everything</option>
+      {{range .SeverityOptions}}
+      <option value="{{.Value}}"{{if eq .Value $.Data.Severity}} selected{{end}}>{{.Label}}</option>
+      {{end}}
+    </select>
+    <label class="checkbox"><input type="checkbox" name="include_acknowledged" value="yes"
+      {{if .IncludeAcknowledged}}checked{{end}}> Include the ones already seen</label>
+    <button type="submit">Apply</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>{{if .Rows}}{{len .Rows}} alert{{if ne (len .Rows) 1}}s{{end}}{{else}}Nothing to show{{end}}</h2>
+  {{if .Rows}}
+  <ul class="alerts">
+    {{range .Rows}}
+    <li class="alert {{.Severity}}{{if .Acknowledged}} seen{{end}}">
+      <p class="headline">{{.Summary}}</p>
+      <p class="meta">{{.SeverityLabel}}. Seen {{.Occurrences}} time{{if ne .Occurrences 1}}s{{end}},
+      first {{datetime .FirstSeenAt}}, most recently {{datetime .LastSeenAt}}.</p>
+      {{if .SubjectID}}<p class="meta"><a href="/admin/subjects/{{.SubjectID}}">The person this is about</a></p>{{end}}
+      {{if .Fields}}
+      <details>
+        <summary>More</summary>
+        <dl class="pairs small">
+          {{range .Fields}}<dt>{{.Name}}</dt><dd>{{.Value}}</dd>{{end}}
+        </dl>
+      </details>
+      {{end}}
+      {{if .Acknowledged}}
+      <p class="meta">Marked as seen {{datetime .AcknowledgedAt}}{{if .AcknowledgedBy}} by {{.AcknowledgedBy}}{{end}}.</p>
+      {{else if $.Can.AcknowledgeAlert}}
+      <form method="post" action="/admin/alerts/{{.ID}}/acknowledge">
+        <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+        <button type="submit" class="quiet">Mark as seen</button>
+      </form>
+      {{end}}
+    </li>
+    {{end}}
+  </ul>
+
+  {{if .NextAfter}}
+  <p class="paging">
+    <a href="/admin/alerts?severity={{.Severity}}{{if .IncludeAcknowledged}}&amp;include_acknowledged=yes{{end}}&amp;after={{.NextAfter}}">Show the next {{.Limit}}</a>
+    <a class="quiet-link" href="/admin/alerts?severity={{.Severity}}{{if .IncludeAcknowledged}}&amp;include_acknowledged=yes{{end}}">Back to the beginning</a>
+  </p>
+  {{end}}
+
+  {{else}}
+  <p class="calm">No alerts match that filter.</p>
+  {{end}}
+</section>
+
+{{if not $.Can.AcknowledgeAlert}}
+<p class="hint">Your sign-in can read alerts but not mark them as seen. That is
+deliberate: whoever reviews the record should not be able to clear it.</p>
+{{end}}
+{{end}}
+{{end}}

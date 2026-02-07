@@ -1,0 +1,41 @@
+{{define "layout"}}<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>{{template "title" .}} | {{.Tenant}}</title>
+<link rel="stylesheet" href="{{.Assets.CSS}}">
+</head>
+<body>
+<a class="skip" href="#main">Skip to the content</a>
+<header class="topbar">
+  <p class="brand">{{.Tenant}}</p>
+  {{if .SignedIn}}
+  <nav class="screens" aria-label="Screens">
+    <a href="/admin/"{{if eq .Path "/admin/"}} aria-current="page"{{end}}>Overview</a>
+    <a href="/admin/subjects"{{if eq .Path "/admin/subjects"}} aria-current="page"{{end}}>People</a>
+    <a href="/admin/audit"{{if eq .Path "/admin/audit"}} aria-current="page"{{end}}>History</a>
+    <a href="/admin/alerts"{{if eq .Path "/admin/alerts"}} aria-current="page"{{end}}>Alerts</a>
+    <a href="/admin/approvals"{{if eq .Path "/admin/approvals"}} aria-current="page"{{end}}>Requests</a>
+  </nav>
+  <form class="whoami" method="post" action="/admin/sign-out">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <span class="operator">{{.Operator.TokenName}}<span class="role">{{.Operator.RoleLabel}}</span></span>
+    <button type="submit" class="quiet">Sign out</button>
+  </form>
+  {{end}}
+</header>
+
+<main id="main">
+{{if .Notice}}<p class="banner notice" role="status">{{.Notice}}</p>{{end}}
+{{if .Problem}}<p class="banner problem" role="alert">{{.Problem}}</p>{{end}}
+{{template "content" .}}
+</main>
+
+<footer class="footer">
+  <p>Administration interface. Every action on this screen is recorded in the history.</p>
+</footer>
+<script src="{{.Assets.JS}}" defer></script>
+</body>
+</html>{{end}}

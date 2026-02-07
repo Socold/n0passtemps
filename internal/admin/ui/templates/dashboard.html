@@ -1,0 +1,57 @@
+{{define "title"}}Overview{{end}}
+
+{{define "content"}}
+{{with .Data}}
+<h1>Overview</h1>
+
+<section class="grid">
+  <article class="card">
+    <h2>Service</h2>
+    <dl class="pairs">
+      <dt>Can people sign in</dt>
+      <dd>{{if .Health.DatabaseReachable}}Yes{{else}}No, the database cannot be reached{{end}}</dd>
+      <dt>Storage</dt>
+      <dd>{{.Health.Engine}}, answered in {{.Health.LatencyMS}} ms</dd>
+      <dt>History</dt>
+      <dd>{{if .Health.HistoryReadable}}{{.Health.HistoryEntries}} entries recorded{{else}}Cannot be read{{end}}</dd>
+      <dt>Operators signed in</dt>
+      <dd>{{.Sessions}}</dd>
+    </dl>
+  </article>
+
+  <article class="card">
+    <h2>Needs attention</h2>
+    {{if eq .Alerts.Total 0}}
+    <p class="calm">Nothing is waiting. No open alerts.</p>
+    {{else}}
+    <ul class="counts">
+      <li class="critical"><span class="count">{{.Alerts.Critical}}</span> need attention now</li>
+      <li class="warning"><span class="count">{{.Alerts.Warning}}</span> worth a look</li>
+      <li class="info"><span class="count">{{.Alerts.Info}}</span> for information</li>
+    </ul>
+    {{end}}
+    <p><a href="/admin/alerts">Open the alerts screen</a></p>
+  </article>
+
+  <article class="card">
+    <h2>Waiting for a decision</h2>
+    {{if eq .PendingApprovals 0}}
+    <p class="calm">No changes are waiting for a second administrator.</p>
+    {{else}}
+    <p><span class="count">{{.PendingApprovals}}</span> {{if eq .PendingApprovals 1}}change is{{else}}changes are{{end}}
+    waiting for a second administrator.</p>
+    {{end}}
+    <p><a href="/admin/approvals">Open the requests screen</a></p>
+  </article>
+
+  <article class="card">
+    <h2>How this deployment is set up</h2>
+    <ul class="flags">
+      {{range .Features}}
+      <li>{{.Name}}: <strong>{{if .On}}on{{else}}off{{end}}</strong></li>
+      {{end}}
+    </ul>
+  </article>
+</section>
+{{end}}
+{{end}}

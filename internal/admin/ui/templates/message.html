@@ -1,0 +1,10 @@
+{{define "title"}}{{with .Data}}{{.Heading}}{{end}}{{end}}
+
+{{define "content"}}
+{{with .Data}}
+<section class="card narrow">
+  <h1>{{.Heading}}</h1>
+  <p>{{.Body}}</p>
+</section>
+{{end}}
+{{end}}

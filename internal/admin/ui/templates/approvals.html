@@ -1,0 +1,70 @@
+{{define "title"}}Requests{{end}}
+
+{{define "content"}}
+{{with .Data}}
+<h1>Requests waiting for a second administrator</h1>
+
+<p class="summary">Some changes are held until a second administrator agrees to
+them, so that no single sign-in can carry them out alone.</p>
+
+<section class="card">
+  <h2>Filter</h2>
+  <form method="get" action="/admin/approvals" class="row" data-autosubmit>
+    <label for="status">Show</label>
+    <select id="status" name="status">
+      {{range .StatusOptions}}
+      <option value="{{.Value}}"{{if eq .Value $.Data.Status}} selected{{end}}>{{.Label}}</option>
+      {{end}}
+    </select>
+    <button type="submit">Apply</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>{{if .Rows}}{{len .Rows}} request{{if ne (len .Rows) 1}}s{{end}}{{else}}Nothing to show{{end}}</h2>
+  {{if .Rows}}
+  <ul class="requests">
+    {{range .Rows}}
+    <li class="request">
+      <p class="headline">{{.Operation}}</p>
+      <dl class="pairs small">
+        <dt>State</dt><dd>{{.StatusLabel}}</dd>
+        <dt>Asked by</dt><dd>{{.RequestedBy}}{{if .Yours}} (you){{end}}</dd>
+        <dt>Asked at</dt><dd>{{datetime .RequestedAt}}</dd>
+        <dt>Expires</dt><dd>{{datetime .ExpiresAt}}</dd>
+        {{if .Reason}}<dt>Reason given</dt><dd>{{.Reason}}</dd>{{end}}
+        {{range .Fields}}<dt>{{.Name}}</dt><dd>{{.Value}}</dd>{{end}}
+      </dl>
+
+      {{if .Pending}}
+        {{if .Yours}}
+        <p class="hint">You asked for this, so someone else has to decide it.</p>
+        {{else if $.Can.DecideRequest}}
+        <div class="decide">
+          <form method="post" action="/admin/approvals/{{.ID}}/approve" class="stack tight"
+                data-confirm="Approve this change?">
+            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+            <label for="approve-note-{{.ID}}">Note (optional)</label>
+            <input id="approve-note-{{.ID}}" name="note" type="text">
+            <button type="submit">Approve</button>
+          </form>
+          <form method="post" action="/admin/approvals/{{.ID}}/reject" class="stack tight">
+            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+            <label for="reject-note-{{.ID}}">Note (optional)</label>
+            <input id="reject-note-{{.ID}}" name="note" type="text">
+            <button type="submit" class="danger">Reject</button>
+          </form>
+        </div>
+        {{else}}
+        <p class="hint">Your sign-in can read this queue but not decide on it.</p>
+        {{end}}
+      {{end}}
+    </li>
+    {{end}}
+  </ul>
+  {{else}}
+  <p class="calm">No requests match that filter.</p>
+  {{end}}
+</section>
+{{end}}
+{{end}}

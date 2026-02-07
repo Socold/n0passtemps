@@ -1,0 +1,156 @@
+{{define "title"}}Person{{end}}
+
+{{define "content"}}
+{{with .Data}}
+<p class="crumbs"><a href="/admin/subjects">People</a></p>
+<h1>{{if .DisplayName}}{{.DisplayName}}{{else}}One person{{end}}</h1>
+
+{{if .NewCodes}}
+<section class="card emphasis">
+  <h2>New recovery codes</h2>
+  <p>These codes are shown now and cannot be shown again. Give them to the person
+  over a channel you trust, and tell them each code works once. Any unused codes
+  from their previous set have stopped working.</p>
+  <ul class="codes" id="new-codes">
+    {{range .NewCodes}}<li>{{.}}</li>{{end}}
+  </ul>
+  <button type="button" class="quiet" data-copy-from="new-codes" hidden>Copy the codes</button>
+</section>
+{{end}}
+
+<section class="grid">
+  <article class="card">
+    <h2>Account</h2>
+    <dl class="pairs">
+      <dt>Status</dt>
+      <dd>{{.StatusLabel}}</dd>
+      <dt>Added</dt>
+      <dd>{{datetime .CreatedAt}}</dd>
+      <dt>Last change</dt>
+      <dd>{{datetime .UpdatedAt}}</dd>
+      <dt>Authenticator app</dt>
+      <dd>{{yesno .AuthenticatorApp}}</dd>
+      <dt>Recovery codes left</dt>
+      <dd>{{.RecoveryRemaining}}{{if .RecoveryLow}} <span class="warn">Running low</span>{{end}}</dd>
+    </dl>
+
+    {{if .ReferenceShown}}
+    <p class="reference">The application refers to this person as
+    <strong>{{.Reference}}</strong>. Looking this up has been recorded in the history.</p>
+    {{else if .ReferenceReady}}
+      {{if $.Can.ReadPerson}}
+      <form method="post" action="/admin/subjects/{{.ID}}/reference">
+        <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+        <button type="submit" class="quiet">Show the reference the application uses</button>
+      </form>
+      <p class="hint">This turns the record back into something that identifies a
+      person, so it is recorded in the history.</p>
+      {{end}}
+    {{end}}
+  </article>
+
+  {{if .Deletion}}
+  <article class="card">
+    <h2>Deletion</h2>
+    <dl class="pairs">
+      <dt>State</dt><dd>{{.Deletion.StatusLabel}}</dd>
+      <dt>Asked for</dt><dd>{{datetime .Deletion.Requested}}</dd>
+      <dt>Destroyed after</dt><dd>{{datetime .Deletion.PurgeAfter}}</dd>
+      {{if .Deletion.Reason}}<dt>Reason</dt><dd>{{.Deletion.Reason}}</dd>{{end}}
+    </dl>
+  </article>
+  {{end}}
+
+  <article class="card">
+    <h2>What you can do</h2>
+    {{if or $.Can.BlockSignIn $.Can.AllowSignIn $.Can.ClearSignInLimit $.Can.IssueRecoveryCodes}}
+    <div class="actions">
+      {{if and $.Can.BlockSignIn (not .Blocked)}}
+      <form method="post" action="/admin/subjects/{{.ID}}/lock" class="stack"
+            data-confirm="Block this person from signing in?">
+        <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+        <label for="lock-reason">Why are you blocking them</label>
+        <input id="lock-reason" name="reason" type="text">
+        <button type="submit">Block sign-in</button>
+      </form>
+      {{end}}
+
+      {{if and $.Can.AllowSignIn .Blocked}}
+      <form method="post" action="/admin/subjects/{{.ID}}/unlock" class="stack">
+        <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+        <label for="unlock-reason">Why are you allowing them again</label>
+        <input id="unlock-reason" name="reason" type="text">
+        <button type="submit">Allow sign-in</button>
+      </form>
+      {{end}}
+
+      {{if $.Can.ClearSignInLimit}}
+      <form method="post" action="/admin/subjects/{{.ID}}/clear-limit">
+        <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+        <button type="submit">Clear the sign-in limit</button>
+        <p class="hint">Use this when someone says they are locked out after
+        several failed attempts. It is not the same as blocking, which someone
+        has to decide.</p>
+      </form>
+      {{end}}
+
+      {{if $.Can.IssueRecoveryCodes}}
+      <form method="post" action="/admin/subjects/{{.ID}}/recovery-codes"
+            data-confirm="Issue a new set of recovery codes? Any unused codes they already have will stop working.">
+        <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+        <button type="submit">Issue new recovery codes</button>
+        <p class="hint">The new codes are shown once, on the next screen.</p>
+      </form>
+      {{end}}
+    </div>
+    {{else}}
+    <p class="calm">Your sign-in allows you to read this record but not to change it.</p>
+    {{end}}
+  </article>
+</section>
+
+<section class="card">
+  <h2>Security keys and passkeys</h2>
+  {{if .Authenticators}}
+  <p>{{.ActiveCount}} of {{len .Authenticators}} {{if eq (len .Authenticators) 1}}is{{else}}are{{end}} still in use.</p>
+  <table>
+    <caption class="visually-hidden">Registered security keys and passkeys</caption>
+    <thead>
+      <tr><th scope="col">Name</th><th scope="col">Added</th><th scope="col">Last used</th><th scope="col">State</th><th scope="col"></th></tr>
+    </thead>
+    <tbody>
+      {{range .Authenticators}}
+      <tr>
+        <td>{{.Label}}{{if .MayHaveBeenCopied}} <span class="warn">May have been copied</span>{{end}}</td>
+        <td>{{datetime .AddedAt}}</td>
+        <td>{{datetime .LastUsedAt}}</td>
+        <td>
+          {{if .Withdrawn}}Withdrawn {{datetime .WithdrawnAt}}{{if .WithdrawnReason}}<br><span class="hint">{{.WithdrawnReason}}</span>{{end}}
+          {{else}}In use{{end}}
+        </td>
+        <td>
+          {{if and $.Can.WithdrawAuthenticator (not .Withdrawn)}}
+          <form method="post" action="/admin/subjects/{{$.Data.ID}}/authenticators/{{.ID}}/withdraw"
+                class="stack tight"
+                data-confirm="Withdraw this security key or passkey? This cannot be undone.">
+            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+            <label for="reason-{{.ID}}">Reason</label>
+            <input id="reason-{{.ID}}" name="reason" type="text" required>
+            <label class="checkbox"><input type="checkbox" name="allow_last" value="yes">
+              Go ahead even if it is their last one</label>
+            <button type="submit" class="danger">Withdraw</button>
+          </form>
+          {{end}}
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  <p class="hint">Withdrawing cannot be undone. If a key was withdrawn by
+  mistake, the person has to register a new one.</p>
+  {{else}}
+  <p class="calm">This person has no security key or passkey registered.</p>
+  {{end}}
+</section>
+{{end}}
+{{end}}

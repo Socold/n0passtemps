@@ -1,0 +1,22 @@
+{{define "title"}}Sign in{{end}}
+
+{{define "content"}}
+<section class="card narrow">
+  <h1>Sign in</h1>
+  <p>Paste the administrator sign-in token you were given. It was shown once, when
+  it was created, and cannot be shown again.</p>
+
+  <form method="post" action="/admin/sign-in" class="stack">
+    <label for="token">Administrator sign-in token</label>
+    <input id="token" name="token" type="password" autocomplete="off"
+           autocapitalize="off" spellcheck="false" required
+           aria-describedby="token-help">
+    <p id="token-help" class="hint">It starts with npa_ and is a single line with
+    no spaces.</p>
+    <button type="submit">Sign in</button>
+  </form>
+
+  <p class="hint">If the token is refused, it may have expired or been withdrawn.
+  Another administrator can issue you a new one.</p>
+</section>
+{{end}}

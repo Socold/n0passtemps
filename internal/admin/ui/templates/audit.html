@@ -1,0 +1,130 @@
+{{define "title"}}History{{end}}
+
+{{define "content"}}
+{{with .Data}}
+<h1>History</h1>
+
+{{if .Check}}
+<section class="card {{if .Check.Intact}}emphasis{{else}}alarm{{end}}">
+  <h2>Integrity check</h2>
+  <p class="headline">{{.Check.Headline}}</p>
+  <p>{{.Check.Body}}</p>
+  <p class="hint">A check can tell you the history has been altered. It cannot
+  stop someone altering it: on a service you host yourself, whoever can reach the
+  database file can change it.</p>
+</section>
+{{end}}
+
+<section class="card">
+  <h2>Filter</h2>
+  <form method="get" action="/admin/audit" class="filters">
+    <div class="field">
+      <label for="event_type">What happened</label>
+      <select id="event_type" name="event_type">
+        <option value="">Anything</option>
+        {{range .EventOptions}}
+        <option value="{{.Value}}"{{if eq .Value $.Data.Filter.EventType}} selected{{end}}>{{.Label}}</option>
+        {{end}}
+      </select>
+    </div>
+    <div class="field">
+      <label for="outcome">Result</label>
+      <select id="outcome" name="outcome">
+        <option value="">Any result</option>
+        <option value="success"{{if eq .Filter.Outcome "success"}} selected{{end}}>Succeeded</option>
+        <option value="failure"{{if eq .Filter.Outcome "failure"}} selected{{end}}>Did not succeed</option>
+        <option value="denied"{{if eq .Filter.Outcome "denied"}} selected{{end}}>Refused</option>
+        <option value="error"{{if eq .Filter.Outcome "error"}} selected{{end}}>Faulted</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="since">From</label>
+      <input id="since" name="since" type="date" value="{{.Filter.Since}}">
+    </div>
+    <div class="field">
+      <label for="until">To</label>
+      <input id="until" name="until" type="date" value="{{.Filter.Until}}">
+    </div>
+    <div class="field">
+      <label for="subject_id">About one person</label>
+      <input id="subject_id" name="subject_id" type="text" value="{{.Filter.SubjectID}}"
+             spellcheck="false" autocapitalize="off">
+    </div>
+    <div class="field">
+      <label for="actor_id">By one administrator</label>
+      <input id="actor_id" name="actor_id" type="text" value="{{.Filter.ActorID}}"
+             spellcheck="false" autocapitalize="off">
+    </div>
+    <div class="field actions-inline">
+      <button type="submit">Apply</button>
+      <a class="quiet-link" href="/admin/audit">Clear</a>
+    </div>
+  </form>
+
+  {{if $.Can.CheckHistory}}
+  <form method="post" action="/admin/audit/check" class="row"
+        data-confirm="Check the whole history? On a large log this can take a while.">
+    <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+    <input type="hidden" name="event_type" value="{{.Filter.EventType}}">
+    <input type="hidden" name="outcome" value="{{.Filter.Outcome}}">
+    <input type="hidden" name="subject_id" value="{{.Filter.SubjectID}}">
+    <input type="hidden" name="actor_id" value="{{.Filter.ActorID}}">
+    <input type="hidden" name="since" value="{{.Filter.Since}}">
+    <input type="hidden" name="until" value="{{.Filter.Until}}">
+    <button type="submit">Check the history has not been altered</button>
+  </form>
+  {{end}}
+</section>
+
+<section class="card">
+  <h2>Entries</h2>
+  {{if .Rows}}
+  <table class="history">
+    <caption class="visually-hidden">Recorded events</caption>
+    <thead>
+      <tr>
+        <th scope="col">When</th>
+        <th scope="col">What happened</th>
+        <th scope="col">Result</th>
+        <th scope="col">Who</th>
+        <th scope="col">Details</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Rows}}
+      <tr>
+        <td>{{datetime .OccurredAt}}</td>
+        <td>{{.Event}}</td>
+        <td>{{.Outcome}}</td>
+        <td>
+          {{if .ActorID}}{{.ActorID}}{{else}}<span class="hint">The service</span>{{end}}
+          {{if .SubjectID}}<br><a href="/admin/subjects/{{.SubjectID}}">about one person</a>{{end}}
+        </td>
+        <td>
+          {{if .Fields}}
+          <details>
+            <summary>More</summary>
+            <dl class="pairs small">
+              {{range .Fields}}<dt>{{.Name}}</dt><dd>{{.Value}}</dd>{{end}}
+            </dl>
+          </details>
+          {{else}}<span class="hint">None</span>{{end}}
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+
+  {{if .NextSeq}}
+  <p class="paging">
+    <a href="/admin/audit?event_type={{.Filter.EventType}}&amp;outcome={{.Filter.Outcome}}&amp;subject_id={{.Filter.SubjectID}}&amp;actor_id={{.Filter.ActorID}}&amp;since={{.Filter.Since}}&amp;until={{.Filter.Until}}&amp;after_seq={{.NextSeq}}">Show the next {{.Limit}}</a>
+    <a class="quiet-link" href="/admin/audit?event_type={{.Filter.EventType}}&amp;outcome={{.Filter.Outcome}}&amp;subject_id={{.Filter.SubjectID}}&amp;actor_id={{.Filter.ActorID}}&amp;since={{.Filter.Since}}&amp;until={{.Filter.Until}}">Back to the beginning</a>
+  </p>
+  {{end}}
+
+  {{else}}
+  <p class="calm">Nothing matches those filters.</p>
+  {{end}}
+</section>
+{{end}}
+{{end}}
