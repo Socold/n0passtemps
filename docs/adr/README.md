@@ -24,3 +24,9 @@ superseded by a new record rather than edited in place. See
 | [0011](0011-drop-hotp.md) | Drop HOTP | accepted |
 | [0012](0012-server-rendered-administration-interface.md) | Server-rendered administration interface instead of a single-page application | accepted |
 | [0013](0013-approvals-are-redeemed-not-executed.md) | Approvals are redeemed, not executed | accepted |
+| [0014](0014-bootstrap-by-explicit-command.md) | Bootstrap the first administrator by explicit command | accepted |
+
+Records 0013 and 0014 are of a different kind. The specification is silent on
+both questions, how an approved operation comes to run and where the first
+administrative token comes from, so they record a design choice rather than a
+deviation.
