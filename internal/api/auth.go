@@ -42,6 +42,12 @@ func (a *Authenticator) RequireAPIKey() Middleware {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key, err := a.verifyAPIKey(r)
 			if err != nil {
+				var unavailable *unavailableError
+				if errors.As(err, &unavailable) {
+					// Not audited as a rejection: nothing was rejected.
+					WriteProblem(w, r, Unavailable(unavailable.cause))
+					return
+				}
 				a.recordRejection(r, audit.EventAPIKeyRejected, err)
 				WriteProblem(w, r, Unauthorized(err))
 				return
@@ -76,6 +82,11 @@ func (a *Authenticator) RequireAdmin() Middleware {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tok, err := a.verifyAdminToken(r)
 			if err != nil {
+				var unavailable *unavailableError
+				if errors.As(err, &unavailable) {
+					WriteProblem(w, r, Unavailable(unavailable.cause))
+					return
+				}
 				a.recordRejection(r, audit.EventAdminAuthFailed, err)
 				WriteProblem(w, r, Unauthorized(err))
 				return
@@ -100,6 +111,13 @@ func (a *Authenticator) RequireAdmin() Middleware {
 		})
 	}
 }
+
+// unavailableError marks a failure that is the service's fault rather than the
+// caller's, so the middleware can answer 503 instead of 401.
+type unavailableError struct{ cause error }
+
+func (e *unavailableError) Error() string { return "credential store unavailable: " + e.cause.Error() }
+func (e *unavailableError) Unwrap() error { return e.cause }
 
 // verifyAPIKey resolves and checks a presented API key.
 //
@@ -130,7 +148,11 @@ func (a *Authenticator) verifyAPIKey(r *http.Request) (*store.APIKey, error) {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, errors.New("credential is not recognised")
 		}
-		return nil, err
+		// The lookup itself failed, which means the database is in trouble
+		// rather than the credential being wrong. Reporting it as a rejected
+		// credential would mislead the caller and fill the audit log with
+		// authentication failures that never happened.
+		return nil, &unavailableError{cause: err}
 	}
 
 	ok, err := parsed.Verify(key.VerifierHash)
@@ -169,7 +191,9 @@ func (a *Authenticator) verifyAdminToken(r *http.Request) (*store.AdminToken, er
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, errors.New("credential is not recognised")
 		}
-		return nil, err
+		// See verifyAPIKey: a failed lookup is a database problem, not a
+		// rejected credential.
+		return nil, &unavailableError{cause: err}
 	}
 
 	ok, err := parsed.Verify(tok.VerifierHash)
