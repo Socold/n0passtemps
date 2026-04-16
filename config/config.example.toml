@@ -1,0 +1,427 @@
+# n0passtemps configuration, annotated.
+#
+# Every key here is optional: the built-in defaults are chosen so that a
+# deployment setting only a tenant, a relying party, an origin and a database
+# is already secure. What follows is a reference, not a file to copy wholesale.
+# Copying it would freeze today's defaults into your deployment, so a later
+# release could not improve them.
+#
+# Validate a file with:
+#   n0passtemps-wizard check -config config.toml
+#
+# NO SECRET BELONGS IN THIS FILE. The key encryption keyring, the subject
+# pepper and any database password come from the environment or from a mounted
+# file, so this file can be committed to version control.
+#
+# Every key can be overridden by an environment variable: uppercase the dotted
+# path and prefix it with N0PASSTEMPS_. So webauthn.rp_id becomes
+# N0PASSTEMPS_WEBAUTHN_RP_ID. The environment wins over the file.
+
+
+# ---------------------------------------------------------------------------
+# Tenant
+# ---------------------------------------------------------------------------
+# Every row carries a tenant identifier even though one deployment serves one
+# tenant. Adding the column later would mean rewriting every query and every
+# index, so it is carried from the start.
+#
+# Changing id on a deployment that already holds data orphans all of it.
+[tenant]
+id = "default"
+name = "n0passtemps"
+
+
+# ---------------------------------------------------------------------------
+# Listener
+# ---------------------------------------------------------------------------
+[server]
+addr = "127.0.0.1:8080"
+
+# TLS terminated in this process. Set both or neither.
+#
+# The configuration is refused if addr is not loopback, TLS is unset, and no
+# reverse proxy is declared below. That combination serves credentials over
+# plain HTTP to whatever can reach the port, and it is far more often an
+# oversight than a decision.
+# tls_cert_file = "/etc/n0passtemps/tls/fullchain.pem"
+# tls_key_file  = "/etc/n0passtemps/tls/privkey.pem"
+
+# Declare the reverse proxy that terminates TLS instead.
+#
+# trust_proxy requires trusted_proxy_cidrs. Honouring a forwarded client
+# address from an arbitrary source lets a caller choose the address that rate
+# limiting and audit entries are keyed on, which turns both controls off: a new
+# address on every attempt is never throttled, and the audit trail records
+# whatever the attacker wrote.
+# trust_proxy = true
+# trusted_proxy_cidrs = ["10.0.0.0/8", "172.16.0.0/12"]
+
+read_timeout = "15s"
+write_timeout = "15s"
+idle_timeout = "60s"
+
+# The defence against a client that opens a connection and dribbles headers.
+# Without it a handful of such connections hold workers open indefinitely.
+read_header_timeout = "5s"
+
+shutdown_grace = "20s"
+
+# Caps every request body. A WebAuthn attestation object is the largest
+# legitimate payload and stays well under this.
+max_body_bytes = 262144
+
+# Browsers that may call the public API directly. An explicit list, never a
+# wildcard: these endpoints are credentialed, and the fetch specification
+# forbids combining a wildcard origin with credentials because it would let any
+# site read the response. Server-to-server callers send no Origin and do not
+# need to be listed.
+# cors_allowed_origins = ["https://app.example.com"]
+
+
+# ---------------------------------------------------------------------------
+# Database
+# ---------------------------------------------------------------------------
+[database]
+# "sqlite" or "postgres". Both carry the same schema and the same behaviour.
+driver = "sqlite"
+
+# For sqlite, a file path. For postgres, a connection string, which should come
+# from N0PASSTEMPS_DATABASE_DSN because it contains a password.
+#
+# A postgres DSN must set sslmode explicitly. libpq defaults to "prefer", which
+# falls back to an unencrypted connection without reporting it, so an unset
+# sslmode is treated as a configuration error.
+dsn = "/var/lib/n0passtemps/n0passtemps.db"
+
+# Holds persistent state. The keyring is refused if it resolves inside here.
+data_dir = "/var/lib/n0passtemps"
+
+max_open_conns = 8
+max_idle_conns = 4
+conn_max_lifetime = "30m"
+
+# SQLite only. WAL still serialises writers, so a concurrent writer waits
+# rather than failing immediately.
+busy_timeout = "5s"
+
+# Apply pending migrations at startup. Operators who prefer schema changes as a
+# separate reviewed step set this false and run "n0passtemps-server -migrate".
+auto_migrate = true
+
+
+# ---------------------------------------------------------------------------
+# Key encryption keyring
+# ---------------------------------------------------------------------------
+# Secrets at rest are sealed under a data key, which is itself sealed under the
+# keyring. Rotating the keyring therefore rewraps a small blob per row instead
+# of re-encrypting every secret.
+#
+# Create one with: n0passtemps-wizard kek init -out /etc/n0passtemps/kek/keyring.json
+#
+# Losing every copy makes the TOTP secrets and the encrypted copies of your
+# application's user references unreadable. WebAuthn credentials and recovery
+# codes are unaffected: public keys are stored in clear and recovery codes are
+# hashed rather than encrypted.
+[kek]
+# "file" or "env". Use env where an orchestrator injects secrets without
+# mounting a file.
+provider = "file"
+
+# Must be mode 0600, and must NOT resolve inside data_dir. A key stored beside
+# the ciphertext it protects gives no confidentiality if the volume is copied,
+# so the service refuses to start in that arrangement. Symbolic links are
+# resolved before the check, so a link into the data directory does not pass.
+path = "/etc/n0passtemps/kek/keyring.json"
+
+# env_var = "N0PASSTEMPS_KEK"
+
+# How long a key version may remain current before the authenticated health
+# report calls rotation overdue. Advisory only; rotation is always an explicit
+# operator action. Zero disables the reminder.
+rotation_interval = "8760h"
+
+
+# ---------------------------------------------------------------------------
+# Subject references
+# ---------------------------------------------------------------------------
+# The identifier your application uses for its own user is treated as personal
+# data. The documentation asks for an opaque identifier and applications supply
+# email addresses regardless, so it is never stored in clear: a deterministic
+# HMAC is the lookup key, and an encrypted copy is kept for access requests and
+# for the administration interface.
+[subject]
+# Names the variable holding the HMAC pepper. Generate one with
+# "n0passtemps-wizard pepper". It is a different secret from the keyring on
+# purpose: the key able to decrypt secrets should not also be the key able to
+# confirm whether a given person has an account.
+#
+# Back it up with the same care. Losing it makes every existing subject
+# unfindable.
+pepper_env = "N0PASSTEMPS_SUBJECT_PEPPER"
+
+max_ref_length = 256
+
+# Keeps an encrypted copy of the original reference. Turning it off leaves the
+# service unable to tell an operator which user a row belongs to, and unable to
+# answer a GDPR Article 15 access request.
+seal_reference = true
+
+
+# ---------------------------------------------------------------------------
+# WebAuthn
+# ---------------------------------------------------------------------------
+# rp_id and origins are server configuration and are never read from a request.
+# WebAuthn's security rests on the relying party identifier and the origin being
+# what the server independently expects; a caller allowed to nominate either
+# could declare its own and the binding would prove nothing.
+[webauthn]
+# A bare registrable domain. Not a URL, no path, no port. Use "localhost" for
+# local development.
+rp_id = "example.com"
+
+# What the authenticator shows the user while they confirm.
+rp_display_name = "Example"
+
+# Where your front end is served from, scheme and port included. Each must be
+# covered by rp_id: equal to it, or a subdomain of it.
+origins = ["https://app.example.com"]
+
+challenge_ttl = "5m"
+ceremony_timeout = "2m"
+
+# "required", "preferred" or "discouraged".
+#
+# "required" makes the authenticator prove user identity and not merely
+# possession, which is what makes a single WebAuthn factor sufficient.
+# "discouraged" is refused by the validator, because an assertion that proves
+# only possession is no longer enough on its own and configuring it silently
+# would weaken every login.
+user_verification = "required"
+
+# "none", "indirect" or "direct".
+#
+# "none" is the default because verifying an attestation statement needs either
+# network access to the FIDO Metadata Service or a metadata blob on disk, and
+# this service is meant to run offline.
+attestation_preference = "none"
+
+# Refuses a registration whose attestation cannot be verified. Needs either
+# metadata_path or allowed_aaguids, and an attestation_preference other than
+# "none"; the validator says so rather than letting the setting sit inert.
+require_attestation = false
+
+# A FIDO Metadata Service BLOB on disk. Supplying it locally keeps attestation
+# verification possible without egress. Refreshing it is an operator task.
+# metadata_path = "/etc/n0passtemps/fido-mds.jwt"
+
+# Restrict registration to named authenticator models. This is the
+# offline-friendly alternative to full attestation verification. Empty means any
+# model.
+# allowed_aaguids = ["ee882879-721c-4913-9775-3dfcce97072a"]
+
+# Refuse named models, for withdrawing a device whose firmware has a published
+# flaw.
+# blocked_aaguids = []
+
+# Bounds enrolment, so a compromised API key cannot quietly add an unbounded
+# number of authenticators to one account.
+max_credentials_per_subject = 10
+
+# Raise an alert when an authenticator's signature counter fails to advance.
+# The assertion is NOT refused: many authenticators legitimately report a
+# constant zero, and a synchronised passkey does the same, so refusing would
+# lock out a large share of ordinary users.
+clone_warning_alerts = true
+
+
+# ---------------------------------------------------------------------------
+# TOTP
+# ---------------------------------------------------------------------------
+# A fallback for users without a FIDO authenticator. Worth knowing: a
+# TOTP-only user is phishable in a way a WebAuthn user is not, because a TOTP
+# code carries no origin binding.
+[totp]
+issuer = "Example"
+
+# "SHA1", "SHA256" or "SHA512". SHA1 is the default because it is what
+# authenticator applications actually implement, and the HMAC construction does
+# not inherit SHA-1's collision weakness.
+algorithm = "SHA1"
+
+digits = 6
+period = "30s"
+
+# RFC 4226 section 4 requires at least 128 bits and recommends 160.
+secret_bytes = 20
+
+# Periods accepted either side of the current one, to tolerate clock drift.
+# Each additional period widens the window an attacker may guess in, so this
+# stays small. Capped at 2.
+skew = 1
+
+# How long an unconfirmed enrolment remains usable. An enrolment left
+# unconfirmed past this is refused rather than accepted late, so a secret shown
+# to a user long ago cannot be activated by whoever later obtained it.
+enrolment_ttl = "15m"
+
+
+# ---------------------------------------------------------------------------
+# Recovery codes
+# ---------------------------------------------------------------------------
+# Hashed with Argon2id, never encrypted. The server only needs to decide
+# whether a presented code matches one it issued, so losing the keyring does
+# not invalidate them and a stolen database yields no usable codes even to an
+# attacker who also holds the keyring.
+[recovery]
+code_count = 16
+
+# Raise an alert once a subject has this many codes left, so they are prompted
+# to reissue before running out entirely.
+low_watermark = 3
+
+
+# ---------------------------------------------------------------------------
+# Signed assertions
+# ---------------------------------------------------------------------------
+# A successful ceremony returns a short-lived detached signature the calling
+# application verifies offline against the key published at
+# /v1/.well-known/jwks.json. A bare 200 would oblige it to trust the network
+# path between itself and this service.
+[assertion]
+issuer = "https://auth.example.com"
+
+# Ed25519, PKCS#8 PEM, mode 0600. Create one with:
+#   n0passtemps-wizard assertion-key init
+signing_key_path = "/etc/n0passtemps/kek/assertion-key.pem"
+
+# Short by design. The assertion proves a ceremony completed moments ago and is
+# exchanged immediately for the application's own session. Capped at 5m.
+ttl = "60s"
+
+allowed_clock_skew = "30s"
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------------------------
+# Limits apply per subject, per source address and per API key at the same time.
+# A single dimension is always wrong: per subject alone lets an attacker spread
+# one guess across many accounts, and per address alone punishes every user
+# behind one NAT gateway.
+[throttle]
+enabled = true
+window = "15m"
+
+max_failures_per_subject = 10
+max_failures_per_ip = 50
+
+# Caps total volume from one API key, which bounds the damage a leaked key does
+# before anyone notices.
+max_requests_per_key = 6000
+
+lockout_duration = "15m"
+
+# Revocations one administrator may perform inside the window. This is the
+# control that replaces the reversible revocation the original specification
+# asked for: a rogue or mistaken script is stopped after the burst rather than
+# allowed to empty the table and be undone afterwards.
+admin_revoke_burst = 10
+
+
+# ---------------------------------------------------------------------------
+# Audit log
+# ---------------------------------------------------------------------------
+# Append-only, with a SHA-256 hash chain. The chain makes tampering detectable,
+# not impossible: in an on-premise deployment the operator owns the database
+# file. Detection is the strongest property available without a witness outside
+# the operator's control.
+[audit]
+# Zero keeps entries forever, which is the default. Discarding audit history is
+# a decision to take deliberately. A trim records a checkpoint committing to the
+# hash of the last entry removed, so the remaining chain stays verifiable.
+retention_days = 0
+
+# Recompute the whole chain at startup and refuse to serve traffic if it does
+# not verify. Off by default because the cost is linear in the size of the log.
+verify_on_start = false
+
+# Caps a single audit query. This is the one table that grows without bound, so
+# an uncapped query over it is a denial-of-service vector.
+max_query_limit = 500
+
+
+# ---------------------------------------------------------------------------
+# Administration
+# ---------------------------------------------------------------------------
+[admin]
+# The server-rendered interface at /admin. Deployments administered purely
+# through the API turn it off, which removes the surface entirely.
+ui_enabled = true
+
+session_ttl = "30m"
+
+# Forced on whenever TLS is terminated here or a trusted proxy is declared.
+session_cookie_secure = true
+
+# Restricts the administration surface to named networks. The check runs before
+# authentication, so a caller outside the list cannot even present a token for
+# verification. The validator refuses ui_enabled on a non-loopback listener
+# without a list.
+# ip_allow_list = ["10.0.0.0/8"]
+
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+[logging]
+# "debug", "info", "warn" or "error".
+level = "info"
+
+# "json" or "text". JSON by default: logs are meant to be ingested, not read.
+format = "json"
+
+# The client address is personal data under GDPR, so recording it is a
+# deliberate choice rather than a default that happens to be on.
+include_source_ip = true
+
+# Keeps your application's user references out of log lines, replacing them
+# with a short prefix of their HMAC. On by default, because those references are
+# frequently email addresses whatever the documentation advises.
+redact_subject_refs = true
+
+
+# ---------------------------------------------------------------------------
+# Features
+# ---------------------------------------------------------------------------
+# These gate the behaviour separating the lite deployment from the complete
+# one. They are configuration rather than build tags, so one binary and one
+# schema serve both and a deployment can adopt a feature without migrating.
+[features]
+# A shorthand that turns off admin_rbac, dual_approval, deferred_erasure and
+# kek_rotation_reminder together, and reduces the recovery batch to eight. An
+# explicit setting below still wins.
+lite_mode = false
+
+# Enforce the three administrative roles. With it off, every administrative
+# token has full authority.
+admin_rbac = true
+
+# Hold sensitive operations for a second administrator. Requires admin_rbac:
+# without distinct roles there is no way to tell two administrators apart.
+dual_approval = true
+dual_approval_operations = ["credential.revoke_bulk", "subject.erase", "admin_token.create", "kek.rotate"]
+approval_ttl = "24h"
+
+# Block a subject immediately and purge the record after the window, rather
+# than deleting at once. An immediate hard delete destroys the evidence that
+# the erasure was legitimate, and hands anyone holding one administrative token
+# a way to wipe accounts irreversibly.
+deferred_erasure = true
+erasure_retention = "720h"
+
+# Report overdue rotation in the authenticated health report.
+kek_rotation_reminder = true
+
+# How often expired challenges, stale throttle buckets, expired approvals and
+# due erasures are swept.
+janitor_interval = "5m"
