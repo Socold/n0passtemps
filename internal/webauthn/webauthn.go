@@ -484,8 +484,15 @@ func (s *Service) CompleteAssertion(ctx context.Context, subject *store.Subject,
 	}
 
 	outcome := &AssertionOutcome{
-		Credential:        rec,
-		UserVerified:      validated.Flags.UserVerified,
+		Credential: rec,
+		// Read from the authenticator data of THIS ceremony, not from the
+		// credential the library hands back. The library merges the flags of
+		// the assertion into the stored ones with a logical OR, so for any
+		// credential registered with user verification its value is true for
+		// ever after. Reporting that would sign a possession-only assertion,
+		// the kind a stolen key without its PIN produces, as a user-verified
+		// one, and the calling application would treat one factor as two.
+		UserVerified:      parsed.Response.AuthenticatorData.Flags.HasUserVerified(),
 		PreviousSignCount: rec.SignCount,
 		NewSignCount:      validated.Authenticator.SignCount,
 	}
@@ -504,16 +511,22 @@ func (s *Service) CompleteAssertion(ctx context.Context, subject *store.Subject,
 
 	usedAt := s.now().UTC()
 	if noCounter {
-		// There is nothing to advance, so only the last-used timestamp moves.
-		// Passing the same value both sides keeps the compare-and-swap honest
-		// rather than skipping it.
-		if err := s.store.AdvanceSignCount(ctx, rec.TenantID, rec.ID,
-			rec.SignCount, rec.SignCount, usedAt); err != nil && !errors.Is(err, store.ErrStaleWrite) {
+		// There is no counter to advance, so only the use is recorded. This is
+		// the common case: most passkeys report zero for ever.
+		if err := s.store.TouchCredential(ctx, rec.TenantID, rec.ID, usedAt); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				// Revoked between the listing above and now. The assertion
+				// must not succeed on a credential that is no longer valid.
+				return nil, ErrCeremonyFailed
+			}
 			return nil, fmt.Errorf("webauthn: record credential use: %w", err)
 		}
 	} else if counterStuck {
 		if err := s.store.MarkCloneWarning(ctx, rec.TenantID, rec.ID); err != nil {
 			return nil, fmt.Errorf("webauthn: record clone warning: %w", err)
+		}
+		if err := s.store.TouchCredential(ctx, rec.TenantID, rec.ID, usedAt); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("webauthn: record credential use: %w", err)
 		}
 	} else {
 		err := s.store.AdvanceSignCount(ctx, rec.TenantID, rec.ID,
@@ -700,6 +713,14 @@ func normaliseAttestation(s string) store.AttestationType {
 	}
 }
 
+// toLibCredential converts a stored credential for the library.
+//
+// Two stored values are deliberately NOT passed through, because the library
+// latches both: it ORs the stored user-verified flag and the stored clone
+// warning into what it returns. Passing them would make every later ceremony
+// report the history of the credential instead of what just happened. The
+// stored values remain on the record for an operator to read; the outcome of a
+// ceremony describes that ceremony only.
 func toLibCredential(c *store.Credential) lib.Credential {
 	return lib.Credential{
 		ID:              c.CredentialID,
@@ -707,14 +728,14 @@ func toLibCredential(c *store.Credential) lib.Credential {
 		AttestationType: string(c.AttestationType),
 		Transport:       toTransports(c.Transports),
 		Flags: lib.CredentialFlags{
-			UserVerified:   c.UserVerified,
+			// Backup eligibility is a fixed property of the credential and
+			// the library checks that it never changes, so it is passed.
 			BackupEligible: c.BackupEligible,
 			BackupState:    c.BackupState,
 		},
 		Authenticator: lib.Authenticator{
-			AAGUID:       c.AAGUID,
-			SignCount:    c.SignCount,
-			CloneWarning: c.CloneWarning,
+			AAGUID:    c.AAGUID,
+			SignCount: c.SignCount,
 		},
 	}
 }
