@@ -1,0 +1,4780 @@
+openapi: 3.1.0
+
+info:
+  title: n0passtemps
+  version: 1.0.0
+  summary: On-premise passwordless authentication server.
+  description: |
+    n0passtemps authenticates the end users of an integrating application with
+    WebAuthn, TOTP and single-use recovery codes. It is deployed on premise and
+    is called server to server: the browser talks to the integrating
+    application, and the integrating application talks to this service with an
+    API key.
+
+    # Two authenticated surfaces
+
+    `/v1` is the surface an integrating application calls. Every route on it
+    requires an API key. It is not anonymous: an unauthenticated registration
+    route would let anyone enrol an authenticator against any subject.
+
+    `/admin/v1` is the surface an operator calls. Every route on it requires an
+    administrative token, carries a role check, and sits behind a network allow
+    list configured on the server. The two credential kinds cannot be
+    substituted for each other.
+
+    Three routes carry no credential at all: the liveness probe and the two
+    paths that serve the JWKS document. Both disclose only public information.
+    A fourth unauthenticated case is not a route in this document: `OPTIONS`
+    under `/v1/` is answered by the CORS middleware with `204` and no body,
+    because a preflight request carries no credential by definition.
+
+    # The two-round-trip ceremony flow
+
+    Both WebAuthn ceremonies are two round trips, and the caller sits in the
+    middle of them.
+
+    1. The application calls the begin route
+       (`/v1/webauthn/{subject_ref}/register` or
+       `/v1/webauthn/{subject_ref}/assert`). The response carries a
+       `challenge_id` and an `options` object.
+    2. The application passes `options` to the browser, which hands it to
+       `navigator.credentials.create()` or `navigator.credentials.get()`. The
+       browser returns a `PublicKeyCredential`.
+    3. The application calls the matching complete route with the
+       `challenge_id` from step 1 and that credential, **forwarded verbatim**,
+       as `credential`.
+
+    The credential response must not be reshaped, re-keyed or partially
+    transcribed on the way through. The service parses it with a WebAuthn
+    library, and a field dropped in transit is a field the library cannot use
+    to verify the signature. The one transformation the browser code has to
+    perform is the `ArrayBuffer` to base64url conversion that WebAuthn's JSON
+    form requires, and back again for the fields the browser expects as binary;
+    `examples/node/register.html` shows both directions.
+
+    Ceremony state lives in the database, keyed by `challenge_id`. The caller
+    never holds the expected challenge, the expected user handle or the
+    user-verification requirement, so it cannot alter them between the two
+    halves. A challenge is single use and expires.
+
+    # What a successful ceremony returns
+
+    A completed assertion, a verified TOTP code and a consumed recovery code
+    all return an `assertion`: a compact JWS (RFC 7515) signed with Ed25519
+    under the `EdDSA` algorithm of RFC 8037, carrying JWT claims (RFC 7519).
+    The integrating application verifies it offline against the public key
+    published at `/v1/.well-known/jwks.json` and then issues its own session.
+    A verifier must pin both `iss` and `aud`; `aud` is the identifier of the
+    API key the ceremony was performed for.
+
+    Assertions are short lived, sixty seconds by default. They prove a ceremony
+    completed moments ago and are meant to be exchanged immediately.
+
+    # API key scopes
+
+    An API key may be restricted to named families of `/v1` routes. The scopes
+    are `subjects`, `webauthn`, `totp`, `recovery` and `health`, and each `/v1`
+    route states the one it needs. A key minted with an empty scope list is
+    unrestricted and reaches every family; the minting response says so in
+    `unrestricted`, so that an unrestricted key is a visible choice. A key
+    calling outside its scopes is answered `403` with
+    `urn:n0passtemps:error:forbidden`, and the attempt is audited as
+    `api_key.rejected`.
+
+    Every request that presents a valid, in-scope API key is counted against
+    `throttle.max_requests_per_key`, on every `/v1` route that takes a key and
+    whether or not the route records an authentication outcome. Once the limit
+    is reached the key is answered `429` until the window moves on.
+
+    # Dual approval
+
+    With `features.dual_approval` on, the operations named in
+    `features.dual_approval_operations` are held for a second administrator.
+    Four routes can be held:
+
+    | route | operation | what the approval is bound to |
+    | --- | --- | --- |
+    | `POST /admin/v1/subjects/{subject_id}/erasure` | `subject.erase` | `subject_id`, `reason` |
+    | `POST /admin/v1/admin-tokens` | `admin_token.create` | `name`, `role` |
+    | `POST /admin/v1/subjects/{subject_id}/credentials/revoke-all` | `credential.revoke_bulk` | `subject_id`, `reason` |
+    | `POST /admin/v1/kek/rewrap` | `kek.rotate` | the fixed action `rewrap` |
+
+    An approval is a capability the requester redeems, not a job the service
+    runs on the approver's behalf. The flow is three requests:
+
+    1. The requester calls the route. Nothing is performed. The answer is a
+       `202` problem document of type
+       `urn:n0passtemps:error:approval-required` whose `detail` names the
+       approval request identifier.
+    2. A different administrator calls
+       `POST /admin/v1/approvals/{approval_id}/approve`. That records the
+       decision and performs nothing either. The requester cannot decide their
+       own request.
+    3. The original requester repeats the identical request with the header
+       `X-Approval-Id: <approval_id>`. Only this request runs the operation,
+       and its result, for instance a freshly minted token, goes to the
+       administrator who asked for it.
+
+    A redemption is accepted only when the approval names the same operation,
+    was raised by the administrative token now redeeming it, is in the
+    `approved` state, has not passed `expires_at` (set from
+    `features.approval_ttl` when the request was queued), and carries the same
+    bound payload as the request that was approved. Every refusal is the same
+    `403` with no detail, so the route cannot be used to probe for another
+    administrator's approvals; the reason is audited as `approval.rejected`.
+    A header that is not a UUID is a `400`.
+
+    An approval is spent exactly once, by a conditional update from `approved`
+    to `executed` that has one winner under concurrent redemption. It is
+    claimed before the operation runs. If the operation then fails, the
+    approval is spent anyway and a new request is needed: failing closed costs
+    a repeated request, where failing open would let one approval run an
+    operation twice.
+
+    One limitation. The bound payload of `admin_token.create` is `name` and
+    `role` only. `expires_in_days` is not part of it, so the redeeming request
+    may carry a different lifetime from the one the approver saw.
+
+    The header is ignored on every other route, and on these four when dual
+    approval is off or the operation is not in
+    `features.dual_approval_operations`.
+
+    # Error bodies
+
+    Every refusal is an RFC 9457 problem document with the media type
+    `application/problem+json`. The `type` member is a stable
+    `urn:n0passtemps:error:*` identifier a client can branch on.
+
+    Titles and types describe a class of failure and never the specific reason
+    one request was refused. Every WebAuthn, TOTP and recovery-code failure
+    returns the same `urn:n0passtemps:error:ceremony-failed` body with no
+    detail, so a caller cannot tell a wrong signature from an expired challenge
+    from an unknown credential. The real reason is logged and audited.
+
+    When the credential store cannot be reached, an authenticated route answers
+    `503` with `urn:n0passtemps:error:unavailable` rather than `401`. The
+    credential was not examined, so nothing is audited as a rejection, and a
+    client should retry rather than discard its key.
+
+    # Headers
+
+    Every response carries `X-Request-Id`. A client-supplied value is accepted
+    and echoed when it is short and alphanumeric, otherwise the service assigns
+    one itself.
+    It is the identifier to quote in a support exchange, and it appears in the
+    problem body as `request_id`.
+
+    A throttled response carries `Retry-After` in seconds, mirrored in the body
+    as `retry_after_seconds`.
+  license:
+    name: MIT
+    identifier: MIT
+  contact:
+    name: n0passtemps repository
+    url: https://github.com/Socold/n0passtemps
+
+servers:
+  - url: http://127.0.0.1:8080
+    description: |
+      The default listening address of an unconfigured build. It is plain HTTP
+      and bound to the loopback interface, which is appropriate for development
+      and for a deployment that terminates TLS in a reverse proxy in front of
+      this process.
+  - url: "{scheme}://{host}:{port}"
+    description: A deployment at an operator-chosen address.
+    variables:
+      scheme:
+        default: https
+        enum:
+          - https
+          - http
+        description: |
+          Plain HTTP is accepted only where TLS is terminated by a trusted
+          reverse proxy on the same host.
+      host:
+        default: n0passtemps.internal
+      port:
+        default: "8443"
+
+tags:
+  - name: Health
+    description: Liveness and the detailed component report.
+  - name: Keys
+    description: The public keys that verify an assertion.
+  - name: Subjects
+    description: Resolving an application's user reference to a subject.
+  - name: WebAuthn
+    description: The registration and assertion ceremonies.
+  - name: TOTP
+    description: Time-based one-time password enrolment and verification.
+  - name: Recovery
+    description: Single-use recovery codes.
+  - name: Administration
+    description: Operator routes under /admin/v1.
+
+paths:
+  /v1/health:
+    get:
+      tags: [Health]
+      operationId: getLiveness
+      summary: Liveness probe.
+      description: |
+        Answers whether this process can serve traffic. It touches the database,
+        because a process that is running but cannot reach its store cannot
+        authenticate anyone and should be taken out of rotation.
+
+        The version, the keyring state, whether rotation is overdue and the
+        certificate expiry are all behind authentication. Handed to an
+        unauthenticated caller, that set is a list of the software to look up
+        advisories for and a statement of which maintenance has been neglected.
+      security: []
+      responses:
+        "200":
+          description: The process can serve traffic.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Liveness"
+              examples:
+                alive:
+                  value:
+                    status: ok
+        "503":
+          description: |
+            The store is not reachable. The body carries `status: error`.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Liveness"
+              examples:
+                down:
+                  value:
+                    status: error
+
+  /v1/health/detail:
+    get:
+      tags: [Health]
+      operationId: getHealthDetail
+      summary: Detailed component report.
+      description: |
+        Requires an API key that holds the `health` scope, or an unrestricted
+        key.
+
+        The authenticated report. It names the build, the state of the key
+        encryption keyring, whether rotation is overdue, the certificate expiry
+        when TLS is terminated in process, the audit chain head and the count of
+        open alerts by severity.
+
+        The same report is served at `GET /admin/v1/health` for an operator
+        holding an administrative token.
+      security:
+        - apiKey: []
+      responses:
+        "200":
+          description: The report.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthReport"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/Throttled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/.well-known/jwks.json:
+    get:
+      tags: [Keys]
+      operationId: getJWKS
+      summary: The JWK Set that verifies assertions.
+      description: |
+        Publishes the public key of the assertion signing key as a JWK Set
+        (RFC 7517), restricted to the OKP members of RFC 8037 section 2.
+
+        It is unauthenticated because the contents are public keys, and because
+        an integrating application has to be able to fetch it in order to verify
+        an assertion offline. That is the point of returning a detached
+        signature rather than a bare status code.
+
+        During a rotation the operator serves the union of the outgoing and
+        incoming sets, and the `kid` header of each assertion selects between
+        them. The response is cacheable for five minutes.
+      security: []
+      responses:
+        "200":
+          description: The JWK Set.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+            Cache-Control:
+              description: Fixed at `public, max-age=300`.
+              schema:
+                type: string
+          content:
+            application/jwk-set+json:
+              schema:
+                $ref: "#/components/schemas/JWKSet"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/jwks.json:
+    get:
+      tags: [Keys]
+      operationId: getJWKSShort
+      summary: The JWK Set, at the shorter path.
+      description: |
+        Identical to `GET /v1/.well-known/jwks.json`. Both paths are served
+        because the well-known prefix is what the JWKS convention specifies,
+        while integrations frequently look for the shorter form.
+      security: []
+      responses:
+        "200":
+          description: The JWK Set.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+            Cache-Control:
+              description: Fixed at `public, max-age=300`.
+              schema:
+                type: string
+          content:
+            application/jwk-set+json:
+              schema:
+                $ref: "#/components/schemas/JWKSet"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/subjects:
+    post:
+      tags: [Subjects]
+      operationId: resolveSubject
+      summary: Resolve a reference to a subject, creating it if needed.
+      description: |
+        Requires an API key that holds the `subjects` scope, or an unrestricted
+        key.
+
+        Idempotent. An integrating application may call this on every login
+        rather than tracking whether it has registered the user here before.
+
+        The response never echoes `subject_ref`. The caller already has it, and
+        echoing it would put it into a response body that an intermediary may
+        cache or log.
+      security:
+        - apiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSubjectRequest"
+      responses:
+        "200":
+          description: The subject, whether it already existed or was created.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubjectSummary"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/Throttled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/subjects/{subject_ref}:
+    parameters:
+      - $ref: "#/components/parameters/SubjectRef"
+    get:
+      tags: [Subjects]
+      operationId: getSubject
+      summary: Read a subject's enrolled factors.
+      description: |
+        Requires an API key that holds the `subjects` scope, or an unrestricted
+        key.
+
+        Used to decide what to offer a returning user: a subject with no
+        credential needs registration, one with credentials needs an assertion.
+
+        Unlike the ceremony routes, this one distinguishes an unknown subject
+        with a `404`, because it is a lookup rather than an authentication
+        attempt.
+      security:
+        - apiKey: []
+      responses:
+        "200":
+          description: The subject.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubjectSummary"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/Throttled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/webauthn/{subject_ref}/register:
+    parameters:
+      - $ref: "#/components/parameters/SubjectRef"
+    post:
+      tags: [WebAuthn]
+      operationId: beginRegistration
+      summary: Begin a registration ceremony.
+      description: |
+        Requires an API key that holds the `webauthn` scope, or an unrestricted
+        key.
+
+        Round trip one of two. The subject must already exist; call
+        `POST /v1/subjects` first. Creating it here implicitly would let a
+        caller holding a valid key populate the database with subjects by
+        starting ceremonies it never finishes.
+
+        The subject's existing credentials are excluded in the returned
+        options, so an authenticator already enrolled cannot be enrolled twice
+        and the browser can tell the user why.
+
+        The body is optional; a request with no body is accepted.
+      security:
+        - apiKey: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterBeginRequest"
+      responses:
+        "200":
+          description: The challenge and the creation options.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BeginRegistrationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/CeremonyFailed"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/Throttled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/webauthn/{subject_ref}/register/complete:
+    parameters:
+      - $ref: "#/components/parameters/SubjectRef"
+    post:
+      tags: [WebAuthn]
+      operationId: completeRegistration
+      summary: Complete a registration ceremony.
+      description: |
+        Requires an API key that holds the `webauthn` scope, or an unrestricted
+        key.
+
+        Round trip two of two. `challenge_id` is the value from the begin call
+        and `credential` is the browser's `PublicKeyCredential`, forwarded
+        verbatim.
+
+        A first credential is the point at which recovery codes become useful,
+        so the response reports how many the subject holds. They are not issued
+        automatically, because that would mean returning secrets in a response
+        the caller did not ask for and which can only be shown once.
+      security:
+        - apiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CeremonyCompleteRequest"
+      responses:
+        "201":
+          description: The authenticator is enrolled.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisterCompleteResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/CeremonyFailed"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/Throttled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/webauthn/{subject_ref}/assert:
+    parameters:
+      - $ref: "#/components/parameters/SubjectRef"
+    post:
+      tags: [WebAuthn]
+      operationId: beginAssertion
+      summary: Begin an authentication ceremony.
+      description: |
+        Requires an API key that holds the `webauthn` scope, or an unrestricted
+        key.
+
+        Round trip one of two. Takes no body.
+
+        An unknown subject, an inactive subject and a subject with no registered
+        authenticator are all refused the same way as a failed ceremony, so this
+        route cannot be used to test whether a given person has an account.
+      security:
+        - apiKey: []
+      responses:
+        "200":
+          description: The challenge and the request options.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BeginAssertionResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/CeremonyFailed"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/Throttled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/webauthn/{subject_ref}/assert/complete:
+    parameters:
+      - $ref: "#/components/parameters/SubjectRef"
+    post:
+      tags: [WebAuthn]
+      operationId: completeAssertion
+      summary: Complete an authentication ceremony.
+      description: |
+        Requires an API key that holds the `webauthn` scope, or an unrestricted
+        key.
+
+        Round trip two of two. On success the response carries the signed
+        assertion to verify against the JWKS document.
+
+        `signals` reports conditions worth surfacing that did not refuse the
+        authentication. A signature counter that failed to advance is the
+        documented signal for two copies of a credential private key in use,
+        but many authenticators legitimately report a constant zero and a
+        synchronised platform authenticator does the same, so it is reported
+        rather than enforced. An application may decide to step up on it.
+      security:
+        - apiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CeremonyCompleteRequest"
+      responses:
+        "200":
+          description: The subject authenticated.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssertionResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/CeremonyFailed"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/Throttled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/totp/{subject_ref}/enrol:
+    parameters:
+      - $ref: "#/components/parameters/SubjectRef"
+    post:
+      tags: [TOTP]
+      operationId: enrolTOTP
+      summary: Issue a TOTP secret.
+      description: |
+        Requires an API key that holds the `totp` scope, or an unrestricted
+        key.
+
+        The secret is disclosed here and nowhere else. Every later route reports
+        only whether enrolment is confirmed.
+
+        The secret is not usable for authentication until the user proves they
+        can generate a code from it, which is what the confirm route is for.
+        Treating an unconfirmed secret as live would let a failed enrolment
+        weaken the account: the user would believe they had no second factor
+        while one existed that they could not produce codes for.
+
+        The account label inside `provisioning_uri` is the internal
+        `subject_id`, not the reference the application supplied, because the
+        URI ends up as a QR code and inside the user's authenticator
+        application.
+
+        Takes no body.
+      security:
+        - apiKey: []
+      responses:
+        "201":
+          description: The secret, awaiting confirmation.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TOTPEnrolResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/CeremonyFailed"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/Throttled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/totp/{subject_ref}/enrol/confirm:
+    parameters:
+      - $ref: "#/components/parameters/SubjectRef"
+    post:
+      tags: [TOTP]
+      operationId: confirmTOTP
+      summary: Confirm a TOTP enrolment with one code.
+      description: |
+        Requires an API key that holds the `totp` scope, or an unrestricted
+        key.
+
+        Activates the pending secret. An enrolment left unconfirmed past its
+        window is refused with `409` rather than accepted late, so a secret
+        shown to a user long ago cannot be activated by someone who later
+        obtained it. The default window is fifteen minutes.
+      security:
+        - apiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TOTPCodeRequest"
+      responses:
+        "200":
+          description: The secret is confirmed and usable.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TOTPConfirmResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/CeremonyFailed"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: |
+            There is no enrolment awaiting confirmation, the enrolment has
+            expired, or it is no longer awaiting confirmation.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/Throttled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/totp/{subject_ref}/verify:
+    parameters:
+      - $ref: "#/components/parameters/SubjectRef"
+    post:
+      tags: [TOTP]
+      operationId: verifyTOTP
+      summary: Authenticate a subject with a TOTP code.
+      description: |
+        Requires an API key that holds the `totp` scope, or an unrestricted
+        key.
+
+        On success the response carries a signed assertion whose `amr` claim is
+        `["totp"]`.
+
+        A subject with no confirmed secret is refused exactly as a wrong code
+        is, so this route cannot be used to discover which subjects have TOTP
+        enrolled.
+
+        A code is single use. The accepted timestep is consumed by a
+        compare-and-swap, so two requests presenting the same code inside one
+        period cannot both succeed.
+      security:
+        - apiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TOTPCodeRequest"
+      responses:
+        "200":
+          description: The subject authenticated.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssertionResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/CeremonyFailed"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/Throttled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/totp/{subject_ref}/enroll:
+    parameters:
+      - $ref: "#/components/parameters/SubjectRef"
+    post:
+      tags: [TOTP]
+      operationId: enrollTOTPAlias
+      summary: Issue a TOTP secret, American spelling.
+      description: |
+        Requires an API key that holds the `totp` scope, or an unrestricted
+        key.
+
+        An alias of `POST /v1/totp/{subject_ref}/enrol`, served by the same
+        handler. The specification spelled it "enroll" and both spellings are
+        served so a published integration does not break over an orthography
+        choice.
+      security:
+        - apiKey: []
+      responses:
+        "201":
+          description: The secret, awaiting confirmation.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TOTPEnrolResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/CeremonyFailed"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/Throttled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/totp/{subject_ref}/enroll/confirm:
+    parameters:
+      - $ref: "#/components/parameters/SubjectRef"
+    post:
+      tags: [TOTP]
+      operationId: confirmTOTPAlias
+      summary: Confirm a TOTP enrolment, American spelling.
+      description: |
+        Requires an API key that holds the `totp` scope, or an unrestricted
+        key.
+
+        An alias of `POST /v1/totp/{subject_ref}/enrol/confirm`, served by the
+        same handler.
+      security:
+        - apiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TOTPCodeRequest"
+      responses:
+        "200":
+          description: The secret is confirmed and usable.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TOTPConfirmResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/CeremonyFailed"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: |
+            There is no enrolment awaiting confirmation, the enrolment has
+            expired, or it is no longer awaiting confirmation.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/Throttled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/recovery/{subject_ref}/issue:
+    parameters:
+      - $ref: "#/components/parameters/SubjectRef"
+    post:
+      tags: [Recovery]
+      operationId: issueRecoveryCodes
+      summary: Issue a batch of single-use recovery codes.
+      description: |
+        Requires an API key that holds the `recovery` scope, or an unrestricted
+        key.
+
+        The codes appear in this response and nowhere else. They are hashed
+        with Argon2id before storage, so there is no operation that can show
+        them again.
+
+        Issuing retires every unused code from the previous batch in the same
+        transaction. Leaving old codes live would put codes in circulation that
+        the user believes are dead.
+
+        Takes no body. The batch size is server configuration, sixteen by
+        default and eight in lite mode.
+      security:
+        - apiKey: []
+      responses:
+        "201":
+          description: The batch. Present the codes to the user immediately.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryIssueResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/CeremonyFailed"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/Throttled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/recovery/{subject_ref}/consume:
+    parameters:
+      - $ref: "#/components/parameters/SubjectRef"
+    post:
+      tags: [Recovery]
+      operationId: consumeRecoveryCode
+      summary: Authenticate a subject with a recovery code.
+      description: |
+        Requires an API key that holds the `recovery` scope, or an unrestricted
+        key.
+
+        On success the response carries a signed assertion whose `amr` claim is
+        `["recovery-code"]`, plus the number of codes still unused.
+        Applications commonly treat a recovery-code login as lower assurance
+        and force a re-enrolment, which is why the factor is distinguishable in
+        the token.
+
+        Input is normalised: lowercase, whitespace and separators are accepted,
+        and the Crockford homoglyphs I, L and O are folded onto 1, 1 and 0.
+
+        Single use is enforced by a conditional update in the store, not by a
+        read-then-write, so two requests presenting the same code cannot both
+        succeed.
+      security:
+        - apiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecoveryConsumeRequest"
+      responses:
+        "200":
+          description: The subject authenticated and the code is now spent.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryConsumeResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/CeremonyFailed"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/Throttled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/subjects:
+    get:
+      tags: [Administration]
+      operationId: adminListSubjects
+      summary: Page through subjects.
+      description: |
+        Requires `subject.list`, held by admin_auditor, admin_operator or
+        admin_full.
+
+        There is no substring search on the application's reference. The
+        reference is encrypted at rest precisely so that it cannot be scanned,
+        and a search that decrypted every row to match a pattern would undo
+        that. Supply the exact reference in `subject_ref` instead; it is matched
+        through a deterministic HMAC.
+
+        The listing never includes credentials or the reference. Pagination is
+        by opaque cursor: pass the returned `next` as `after`, and stop when
+        `next` is empty.
+      security:
+        - adminToken: []
+      parameters:
+        - name: after
+          in: query
+          description: The `next` value from the previous page.
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: |
+            Page size. Defaults to 50 and is capped by `audit.max_query_limit`,
+            500 by default. A value that is not a positive integer falls back to
+            the default rather than being refused.
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 50
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/SubjectStatus"
+        - name: subject_ref
+          in: query
+          description: An exact reference to match.
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: One page of subjects.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminSubjectPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/subjects/{subject_id}:
+    parameters:
+      - $ref: "#/components/parameters/SubjectId"
+    get:
+      tags: [Administration]
+      operationId: adminGetSubject
+      summary: Read one subject with its enrolled factors.
+      description: |
+        Requires `subject.read`, held by admin_auditor, admin_operator or
+        admin_full.
+
+        Revoked credentials are included, unlike the public subject route.
+
+        Revealing the application's reference is a separate, audited act rather
+        than part of reading the record: pass `reveal_ref=true`. It is the one
+        operation that turns a row back into something identifying a person. A
+        subject created while `seal_reference` was off has nothing to reveal, in
+        which case `subject_ref` is absent and the request still
+        succeeds.
+      security:
+        - adminToken: []
+      parameters:
+        - name: reveal_ref
+          in: query
+          description: |
+            Set to the literal string `true` to decrypt and return
+            `subject_ref`. Any other value is ignored.
+          required: false
+          schema:
+            type: string
+            enum: ["true"]
+      responses:
+        "200":
+          description: The subject.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminSubject"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/subjects/{subject_id}/lock:
+    parameters:
+      - $ref: "#/components/parameters/SubjectId"
+    post:
+      tags: [Administration]
+      operationId: adminLockSubject
+      summary: Stop a subject authenticating.
+      description: |
+        Requires `subject.lock`, held by admin_operator or admin_full.
+
+        A lock is an operator decision and persists until it is undone. It is
+        distinct from a throttle lockout, which is automatic and expires; see
+        the throttle reset route.
+
+        The body is optional.
+      security:
+        - adminToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StatusChangeRequest"
+      responses:
+        "200":
+          description: The subject is locked.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubjectStatusResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/subjects/{subject_id}/unlock:
+    parameters:
+      - $ref: "#/components/parameters/SubjectId"
+    post:
+      tags: [Administration]
+      operationId: adminUnlockSubject
+      summary: Let a locked subject authenticate again.
+      description: |
+        Requires `subject.unlock`, held by admin_operator or admin_full.
+
+        Sets the status back to `active`. An operator helping a user who cannot
+        log in usually wants the throttle reset instead, which is why both
+        operations exist.
+
+        The body is optional.
+      security:
+        - adminToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StatusChangeRequest"
+      responses:
+        "200":
+          description: The subject is active.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubjectStatusResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/subjects/{subject_id}/credentials:
+    parameters:
+      - $ref: "#/components/parameters/SubjectId"
+    get:
+      tags: [Administration]
+      operationId: adminListCredentials
+      summary: List a subject's authenticators.
+      description: |
+        Requires `credential.list`, held by admin_auditor, admin_operator or
+        admin_full.
+
+        Revoked credentials are included.
+      security:
+        - adminToken: []
+      responses:
+        "200":
+          description: The credentials.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CredentialList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/subjects/{subject_id}/credentials/{credential_id}/revoke:
+    parameters:
+      - $ref: "#/components/parameters/SubjectId"
+      - $ref: "#/components/parameters/CredentialId"
+    post:
+      tags: [Administration]
+      operationId: adminRevokeCredential
+      summary: Revoke one authenticator.
+      description: |
+        Requires `credential.revoke`, held by admin_operator or admin_full.
+
+        Revocation is final. There is deliberately no un-revoke: a credential is
+        revoked because it is believed compromised, and a window in which that
+        can be reversed is a window in which the compromised credential can be
+        restored. Protection against a mistaken bulk revocation comes from the
+        rate limit applied per administrator to this route and the alert raised
+        above the threshold.
+
+        `reason` is required, because a revocation with no stated reason is an
+        audit entry nobody can act on later.
+
+        Revoking a subject's only remaining authenticator is refused with `409`
+        unless `allow_last` is set, because it locks the user out with no way
+        back except a recovery code.
+
+        A credential that exists under a different subject is reported as absent,
+        so this route cannot be used to discover which subject owns a given
+        credential.
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RevokeCredentialRequest"
+      responses:
+        "200":
+          description: The credential is revoked.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RevokeCredentialResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            The credential is already revoked, or it is the subject's last
+            active authenticator and `allow_last` was not set.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/Throttled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/subjects/{subject_id}/credentials/revoke-all:
+    parameters:
+      - $ref: "#/components/parameters/SubjectId"
+    post:
+      tags: [Administration]
+      operationId: adminRevokeAllCredentials
+      summary: Revoke every authenticator of one subject.
+      description: |
+        Requires `credential.revoke_bulk`, held by admin_full only.
+
+        The response to a suspected account compromise. Every active WebAuthn
+        credential and the TOTP secret are revoked in one transaction: either
+        every factor is revoked or none is. Revoking them one request at a time
+        can stop half way and leave an attacker one working factor while the
+        operator believes the account is closed.
+
+        Recovery codes are left alone. They are the user's way back in, and
+        revoking them here would turn every incident response into a permanent
+        lockout. The response reports how many remain, and carries `warning`
+        when none do, because the user then cannot sign in until an operator
+        reissues codes. An operator who believes the codes were taken as well
+        reissues them, which retires the old batch.
+
+        Revocation is final, as it is for a single credential. A subject with
+        nothing left to revoke yields two zero counts rather than an error.
+
+        `reason` is required.
+
+        The per-administrator revocation limit is shared with the single revoke
+        route, on the same bucket, and one call counts once however many
+        authenticators it revokes.
+
+        With `dual_approval` on and `credential.revoke_bulk` in
+        `features.dual_approval_operations`, the first call answers `202` with
+        a problem document and revokes nothing. Once a different administrator
+        has approved it, the original requester repeats the identical request
+        with `X-Approval-Id`. The approval is bound to `subject_id` and
+        `reason`. A redemption that fails any check answers `403` with no
+        detail. See "Dual approval" in the introduction.
+      security:
+        - adminToken: []
+      parameters:
+        - $ref: "#/components/parameters/ApprovalIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RevokeAllCredentialsRequest"
+      responses:
+        "200":
+          description: Every factor the subject held, other than recovery codes, is revoked.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RevokeAllCredentialsResult"
+              examples:
+                revoked:
+                  value:
+                    subject_id: 5b0c9d3e-8a41-4f6e-9c27-1d2e3f4a5b6c
+                    credentials_revoked: 2
+                    totp_revoked: 1
+                    recovery_codes_remaining: 11
+        "202":
+          $ref: "#/components/responses/ApprovalRequired"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/Throttled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/subjects/{subject_id}/recovery/reissue:
+    parameters:
+      - $ref: "#/components/parameters/SubjectId"
+    post:
+      tags: [Administration]
+      operationId: adminReissueRecovery
+      summary: Issue a fresh batch of recovery codes for a subject.
+      description: |
+        Requires `recovery.reissue`, held by admin_operator or admin_full.
+
+        The codes are returned here and nowhere else. An operator running this
+        on behalf of a user has to transmit them over a channel they trust,
+        which the `warning` member says rather than leaving implied.
+
+        Every unused code from the previous batch is retired.
+
+        Takes no body.
+      security:
+        - adminToken: []
+      responses:
+        "201":
+          description: The batch.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryIssueResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/subjects/{subject_id}/throttle/reset:
+    parameters:
+      - $ref: "#/components/parameters/SubjectId"
+    post:
+      tags: [Administration]
+      operationId: adminResetThrottle
+      summary: Clear a subject's rate-limit state.
+      description: |
+        Requires `throttle.reset`, held by admin_operator or admin_full.
+
+        This is the operation behind a user reporting that they are locked out.
+        A throttle lockout is automatic and temporary; a lock is a deliberate
+        operator decision, undone with the unlock route instead.
+
+        Takes no body.
+      security:
+        - adminToken: []
+      responses:
+        "200":
+          description: The state is cleared.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ThrottleResetResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/subjects/{subject_id}/erasure:
+    parameters:
+      - $ref: "#/components/parameters/SubjectId"
+    post:
+      tags: [Administration]
+      operationId: adminRequestErasure
+      summary: Start a GDPR Article 17 erasure.
+      description: |
+        Requires `erasure.request`, held by admin_full only.
+
+        Erasure is two-phase when `deferred_erasure` is on. The subject is
+        blocked from authenticating at once, which is the part of Article 17
+        that cannot wait, and the record is purged after the retention window.
+        An immediate hard delete would destroy the evidence that the erasure was
+        legitimate, and would hand anyone who obtained one administrative token
+        a way to wipe accounts irreversibly.
+
+        With `dual_approval` on and `subject.erase` in
+        `features.dual_approval_operations`, the operation is queued for a
+        second administrator instead of performed. That response is also a
+        `202`, but its media type is `application/problem+json` and its `type`
+        is `urn:n0passtemps:error:approval-required`. Branch on the media type
+        or on the presence of `type`.
+
+        Once a different administrator has approved it, the original requester
+        repeats the identical request with `X-Approval-Id`, and that request
+        performs the erasure. The approval is bound to `subject_id` and
+        `reason`. A redemption that fails any check answers `403` with no
+        detail. See "Dual approval" in the introduction.
+
+        The body is optional.
+      security:
+        - adminToken: []
+      parameters:
+        - $ref: "#/components/parameters/ApprovalIdHeader"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ErasureRequestBody"
+      responses:
+        "202":
+          description: |
+            Either the erasure request that was created, or a problem document
+            stating that a second administrator must approve it. The two are
+            distinguished by media type.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErasureRequest"
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                queued:
+                  value:
+                    type: urn:n0passtemps:error:approval-required
+                    title: the operation requires approval by a second administrator
+                    status: 202
+                    detail: >-
+                      queued as approval request
+                      0f1d2b3c-4e5f-6a7b-8c9d-0e1f2a3b4c5d; once a different
+                      administrator approves it, repeat this exact request with
+                      the header X-Approval-Id:
+                      0f1d2b3c-4e5f-6a7b-8c9d-0e1f2a3b4c5d
+                    request_id: 9f2a1c7b5d3e4f60a1b2c3d4
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: An erasure request is already pending for this subject.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    delete:
+      tags: [Administration]
+      operationId: adminCancelErasure
+      summary: Withdraw a pending erasure.
+      description: |
+        Requires `erasure.cancel`, held by admin_full only.
+
+        It works only inside the retention window, which is the window's
+        purpose: a request made in error can be undone before anything is
+        destroyed. Once purged there is nothing to restore.
+
+        Cancelling restores the subject as well as withdrawing the request. The
+        block placed on the subject when the erasure was requested is lifted,
+        so the user can authenticate again with the factors they already hold.
+      security:
+        - adminToken: []
+      responses:
+        "200":
+          description: The erasure request is cancelled.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErasureCancelResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            The erasure request is no longer pending, because it was already
+            cancelled or purged or changed state while this request was in
+            flight, so it cannot be cancelled. The same status is returned in
+            the rare case where the request was cancelled but the subject was
+            no longer pending deletion, so there was nothing to restore;
+            `detail` says which.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/audit:
+    get:
+      tags: [Administration]
+      operationId: adminQueryAudit
+      summary: Read the append-only log.
+      description: |
+        Requires `audit.read`, held by admin_auditor, admin_operator or
+        admin_full.
+
+        Entries are hash chained: `entry_hash` commits to the entry's own
+        fields and to `prev_hash`. Paginate forwards with `after_seq`, using the
+        returned `next_seq`, and stop when it is zero.
+      security:
+        - adminToken: []
+      parameters:
+        - name: event_type
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: subject_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: actor_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: outcome
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/Outcome"
+        - name: after_seq
+          in: query
+          description: Return entries after this sequence number.
+          required: false
+          schema:
+            type: integer
+            format: int64
+        - name: since
+          in: query
+          description: An RFC 3339 timestamp, inclusive lower bound.
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: until
+          in: query
+          description: An RFC 3339 timestamp, upper bound.
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          description: |
+            Page size. Defaults to 100 and is capped by `audit.max_query_limit`.
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 100
+      responses:
+        "200":
+          description: One page of entries.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/audit/verify:
+    get:
+      tags: [Administration]
+      operationId: adminVerifyAudit
+      summary: Recompute the audit hash chain.
+      description: |
+        Requires `audit.verify`, held by admin_auditor, admin_operator or
+        admin_full.
+
+        This is the operation that makes the chain worth having. It reports
+        whether the log has been altered since it was written, and the run is
+        itself recorded, so a verification cannot be performed quietly.
+
+        A broken chain answers `409` rather than `200`, so a monitoring check
+        that looks only at the status code cannot miss it. The body is the same
+        verification result in both cases, not a problem document. A break also
+        raises an alert.
+      security:
+        - adminToken: []
+      parameters:
+        - name: from_seq
+          in: query
+          description: The sequence number to start from. Defaults to 1.
+          required: false
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+            default: 1
+      responses:
+        "200":
+          description: The chain is intact from `from_seq` onwards.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditVerifyResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: |
+            The chain is broken. `broken_at` names the first sequence number
+            whose recomputed hash does not match. The body is a verification
+            result, not a problem document.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditVerifyResult"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/alerts:
+    get:
+      tags: [Administration]
+      operationId: adminListAlerts
+      summary: Read alerts.
+      description: |
+        Requires `alert.read`, held by admin_auditor, admin_operator or
+        admin_full.
+
+        Acknowledged alerts are excluded unless `include_acknowledged=true`.
+        Repeated instances of one condition collapse onto a single row with a
+        rising `occurrences` count, so a brute-force attempt produces one alert
+        rather than one per request.
+      security:
+        - adminToken: []
+      parameters:
+        - name: severity
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/Severity"
+        - name: alert_type
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: subject_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: include_acknowledged
+          in: query
+          description: Set to the literal string `true` to include them.
+          required: false
+          schema:
+            type: string
+            enum: ["true"]
+        - name: after
+          in: query
+          description: The identifier of the last alert on the previous page.
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 50
+      responses:
+        "200":
+          description: The alerts, and the count of open ones by severity.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/alerts/{alert_id}/acknowledge:
+    parameters:
+      - $ref: "#/components/parameters/AlertId"
+    post:
+      tags: [Administration]
+      operationId: adminAcknowledgeAlert
+      summary: Close an alert.
+      description: |
+        Requires `alert.acknowledge`, held by admin_operator or admin_full.
+
+        admin_auditor deliberately cannot acknowledge an alert: an auditor who
+        can quietly clear an alert can quietly cover a trace, which is the one
+        thing the role exists to prevent.
+
+        Takes no body.
+      security:
+        - adminToken: []
+      responses:
+        "200":
+          description: The alert is acknowledged.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertAcknowledgeResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/approvals:
+    get:
+      tags: [Administration]
+      operationId: adminListApprovals
+      summary: Read the dual-approval queue.
+      description: |
+        Requires `approval.read`, held by admin_auditor, admin_operator or
+        admin_full.
+
+        Defaults to the pending requests when `status` is not given.
+      security:
+        - adminToken: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/ApprovalStatus"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 50
+      responses:
+        "200":
+          description: The queue.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/approvals/{approval_id}/approve:
+    parameters:
+      - $ref: "#/components/parameters/ApprovalId"
+    post:
+      tags: [Administration]
+      operationId: adminApprove
+      summary: Approve a queued operation.
+      description: |
+        Requires `approval.decide`, held by admin_full only.
+
+        Approving records the decision and performs nothing. The operation runs
+        only when the original requester repeats their request with
+        `X-Approval-Id` set to this identifier, before `expires_at`. The
+        returned request carries `status: approved`.
+
+        The administrator who raised the request cannot decide it. That check
+        lives in the same transaction as the state change, because a
+        two-administrator rule one administrator can satisfy alone is not a
+        control. A self-approval attempt answers `403` and is audited.
+
+        The body is optional.
+      security:
+        - adminToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApprovalDecisionRequest"
+      responses:
+        "200":
+          description: The decided request.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalRequest"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            The request is no longer pending: it was already decided, has
+            expired, or has been spent.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/approvals/{approval_id}/reject:
+    parameters:
+      - $ref: "#/components/parameters/ApprovalId"
+    post:
+      tags: [Administration]
+      operationId: adminReject
+      summary: Refuse a queued operation.
+      description: |
+        Requires `approval.decide`, held by admin_full only.
+
+        Same rules as the approve route, including the refusal to let the
+        requesting administrator decide their own request.
+
+        The body is optional.
+      security:
+        - adminToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApprovalDecisionRequest"
+      responses:
+        "200":
+          description: The decided request.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalRequest"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            The request is no longer pending: it was already decided, has
+            expired, or has been spent.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/api-keys:
+    get:
+      tags: [Administration]
+      operationId: adminListAPIKeys
+      summary: List the credentials of integrating applications.
+      description: |
+        Requires `api_key.list`, held by admin_auditor, admin_operator or
+        admin_full.
+
+        Neither the selector nor the verifier digest is disclosed, so nothing
+        here can be used to reconstruct a token.
+      security:
+        - adminToken: []
+      responses:
+        "200":
+          description: The keys.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIKeyList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      tags: [Administration]
+      operationId: adminCreateAPIKey
+      summary: Mint a credential for an integrating application.
+      description: |
+        Requires `api_key.create`, held by admin_full only.
+
+        The token is returned once. Only its selector and a digest of its
+        verifier are stored, so there is no operation that can show it again.
+
+        `expires_in_days` of zero means no expiry, which the response reports as
+        `no_expiry` rather than refusing: a long-lived key is sometimes the only
+        practical option for an integration that cannot rotate.
+
+        `scopes` restricts the key to the named families of `/v1` routes:
+        `subjects`, `webauthn`, `totp`, `recovery` and `health`. Names are
+        matched without regard to case and stored lowercased, deduplicated and
+        sorted. An unknown scope is refused with `400` rather than stored,
+        because a key minted with a misspelled scope would hold a permission
+        that matches nothing. An empty or absent list mints an unrestricted
+        key, which the response reports as `unrestricted: true`. Issue a key
+        for the one thing an integration does: a leaked key that cannot issue
+        recovery codes costs less than one that can.
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateKeyRequest"
+      responses:
+        "201":
+          description: The key and its one-time token.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateAPIKeyResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/api-keys/{key_id}/revoke:
+    parameters:
+      - $ref: "#/components/parameters/KeyId"
+    post:
+      tags: [Administration]
+      operationId: adminRevokeAPIKey
+      summary: Revoke an application credential.
+      description: |
+        Requires `api_key.revoke`, held by admin_full only.
+
+        Takes no body.
+      security:
+        - adminToken: []
+      responses:
+        "200":
+          description: The key is revoked.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RevokeAPIKeyResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/admin-tokens:
+    get:
+      tags: [Administration]
+      operationId: adminListAdminTokens
+      summary: List administrative credentials.
+      description: |
+        Requires `admin_token.list`, held by admin_auditor, admin_operator or
+        admin_full.
+      security:
+        - adminToken: []
+      responses:
+        "200":
+          description: The tokens.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminTokenList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      tags: [Administration]
+      operationId: adminCreateAdminToken
+      summary: Mint an administrative credential.
+      description: |
+        Requires `admin_token.create`, held by admin_full only.
+
+        `role` is required and must be one of `admin_full`, `admin_operator` or
+        `admin_auditor`.
+
+        Minting an administrative credential is the operation that grants
+        authority, so it is a candidate for the approval queue. With
+        `dual_approval` on and `admin_token.create` in
+        `features.dual_approval_operations`, the response is a `202` problem
+        document of type `urn:n0passtemps:error:approval-required` and no token
+        is minted.
+
+        Once a different administrator has approved it, the original requester
+        repeats the request with `X-Approval-Id`, and that request mints the
+        token and returns it to the requester, never to the approver. A
+        redemption that fails any check answers `403` with no detail. See
+        "Dual approval" in the introduction.
+
+        The approval is bound to `name` and `role`. `expires_in_days` is not
+        part of what is bound, so the redeeming request may carry a lifetime
+        the approver did not see. That is a limitation of this release.
+      security:
+        - adminToken: []
+      parameters:
+        - $ref: "#/components/parameters/ApprovalIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAdminTokenRequest"
+      responses:
+        "201":
+          description: The token record and its one-time token.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateAdminTokenResult"
+        "202":
+          $ref: "#/components/responses/ApprovalRequired"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/admin-tokens/{token_id}/revoke:
+    parameters:
+      - $ref: "#/components/parameters/TokenId"
+    post:
+      tags: [Administration]
+      operationId: adminRevokeAdminToken
+      summary: Revoke an administrative credential.
+      description: |
+        Requires `admin_token.revoke`, held by admin_full only.
+
+        The last usable admin_full token cannot be revoked. A deployment with no
+        full administrator left has no way to mint one, so the service would
+        become permanently unadministrable and the recovery would be editing the
+        database by hand. Mint a replacement first.
+
+        A token that does not exist, and one that is already revoked, are both
+        reported as absent.
+
+        Takes no body.
+      security:
+        - adminToken: []
+      responses:
+        "200":
+          description: The token is revoked.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RevokeAdminTokenResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            This is the last usable admin_full token. Mint a replacement before
+            revoking it.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/kek/rewrap:
+    post:
+      tags: [Administration]
+      operationId: adminRewrapKEK
+      summary: Move every sealed record onto the current key version.
+      description: |
+        Requires `kek.rotate`, held by admin_full only.
+
+        The second half of a key rotation. `n0passtemps-wizard kek rotate` adds
+        a key version to the keyring file, but the records sealed under the
+        previous version still name it. This pass unseals each such record and
+        seals it again under the current version, so that the old key can be
+        retired. Every payload is authenticated on the way through, so `failed`
+        is a reliable integrity report.
+
+        The service reads the keyring once, at startup. After
+        `n0passtemps-wizard kek rotate` it must be restarted before a rewrap
+        can target the new version. Until then the pass treats the old version
+        as current and reports every record as already current, which is true
+        of the running process and not of the file.
+
+        Older versions may be deleted from the keyring file only when
+        `versions_in_use` holds `current_version` alone and `failed` is zero.
+        A record that could not be read at all has no version to report, which
+        is why both conditions are needed.
+
+        A record that fails is counted and logged and the pass carries on. The
+        response is `200` with the counts even then. A `500` means the pass was
+        interrupted: the current version was unavailable, a page could not be
+        read, or the caller went away. The records reached before that point
+        stay rewrapped, the audit entry records the partial counts, and the
+        pass can be run again.
+
+        The pass covers every tenant, because one keyring serves them all. It
+        discloses nothing and leaves every plaintext as it was.
+
+        Takes no body.
+
+        With `dual_approval` on and `kek.rotate` in
+        `features.dual_approval_operations`, the first call answers `202` with
+        a problem document and rewrites nothing. Once a different administrator
+        has approved it, the original requester repeats the request with
+        `X-Approval-Id`. The approval is bound to the fixed action `rewrap`. A
+        redemption that fails any check answers `403` with no detail. See
+        "Dual approval" in the introduction.
+      security:
+        - adminToken: []
+      parameters:
+        - $ref: "#/components/parameters/ApprovalIdHeader"
+      responses:
+        "200":
+          description: The pass finished. Read `failed` and `versions_in_use`.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RewrapReport"
+              examples:
+                finished:
+                  value:
+                    current_version: 2
+                    examined: 1284
+                    rewrapped: 1279
+                    already_current: 5
+                    failed: 0
+                    versions_in_use: [2]
+        "202":
+          $ref: "#/components/responses/ApprovalRequired"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/health:
+    get:
+      tags: [Administration]
+      operationId: adminHealthDetail
+      summary: Detailed component report, for an operator.
+      description: |
+        Requires `health.read_detailed`, held by admin_auditor, admin_operator
+        or admin_full.
+
+        The same handler and the same body as `GET /v1/health/detail`, reachable
+        with an administrative token instead of an API key.
+      security:
+        - adminToken: []
+      responses:
+        "200":
+          description: The report.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthReport"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: |
+        The credential of an integrating application, required on every `/v1`
+        route except the liveness probe and the two JWKS paths.
+
+        It is presented as `Authorization: Bearer npt_<selector>.<verifier>`,
+        for example
+        `npt_0000000000000000.AAAAAAAAAAAAAAAAAAAAAAAAAAA` with the zeros
+        replaced by the real value. The selector is sixteen lowercase hex
+        characters and is stored in clear so that authentication is one indexed
+        lookup; the verifier is 160 bits of base64url with no padding and only a
+        digest of it is stored. The `npt_` prefix exists so that a leaked token
+        is recognisable to a secret scanner.
+
+        A token is shown exactly once, by `POST /admin/v1/api-keys`. There is no
+        operation that can show it again; mint a replacement instead.
+
+        A key may be restricted to named route families when it is minted. A
+        key calling outside its scopes is answered `403`, and a key minted with
+        no scopes reaches every family. See "API key scopes" in the
+        introduction.
+
+        A token minted for the administrative surface cannot authenticate here,
+        and the reverse: the kind is bound into the stored digest as well as
+        checked on the way in.
+    adminToken:
+      type: http
+      scheme: bearer
+      description: |
+        The credential of an operator, required on every `/admin/v1` route.
+
+        It is presented as `Authorization: Bearer npa_<selector>.<verifier>`,
+        with the same `selector.verifier` shape as an API key and the `npa_`
+        prefix in place of `npt_`. Each token carries one of three roles, and
+        each route additionally requires a named permission.
+
+        A token is shown exactly once, by `POST /admin/v1/admin-tokens`, and
+        cannot be retrieved again.
+
+        The administrative surface also sits behind a network allow list
+        configured on the server. A caller outside it is refused before it can
+        present a token at all, which keeps the token-guessing surface off the
+        public internet.
+
+  headers:
+    XRequestId:
+      description: |
+        The request identifier, present on every response including error
+        responses. A client-supplied `X-Request-Id` is echoed when it is at most
+        64 characters of letters, digits, hyphen, underscore and full stop;
+        anything else is replaced by a value the service assigns. Quote it in a
+        support exchange.
+      schema:
+        type: string
+        maxLength: 64
+    RetryAfter:
+      description: |
+        How many seconds to wait before retrying. Present on a `429`, and
+        mirrored in the problem body as `retry_after_seconds`.
+      schema:
+        type: integer
+        minimum: 1
+    WWWAuthenticate:
+      description: |
+        The challenge RFC 9110 section 11.6.1 requires on a `401`. Fixed at
+        `Bearer realm="n0passtemps"`.
+      schema:
+        type: string
+
+  parameters:
+    SubjectRef:
+      name: subject_ref
+      in: path
+      required: true
+      description: |
+        The identifier the calling application uses for its user. It is opaque
+        to this service, must not be empty and must contain no control
+        characters or invalid UTF-8, and is bounded by
+        `subject.max_ref_length`, 256 bytes by default.
+
+        Use an opaque identifier rather than an email address. This service logs
+        the route pattern rather than the concrete path, so the value does not
+        reach its own logs, but an intervening reverse proxy will log it unless
+        configured otherwise. The reference is encrypted at rest regardless.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 256
+    SubjectId:
+      name: subject_id
+      in: path
+      required: true
+      description: The internal subject identifier, a UUID.
+      schema:
+        type: string
+        format: uuid
+    CredentialId:
+      name: credential_id
+      in: path
+      required: true
+      description: |
+        The internal credential identifier, a UUID. This is the `id` member of a
+        credential, not the WebAuthn `credential_id`.
+      schema:
+        type: string
+        format: uuid
+    AlertId:
+      name: alert_id
+      in: path
+      required: true
+      description: The alert identifier, a UUID.
+      schema:
+        type: string
+        format: uuid
+    ApprovalId:
+      name: approval_id
+      in: path
+      required: true
+      description: The approval request identifier, a UUID.
+      schema:
+        type: string
+        format: uuid
+    ApprovalIdHeader:
+      name: X-Approval-Id
+      in: header
+      required: false
+      description: |
+        The identifier of an approved request being redeemed. Omit it on the
+        first call, which queues the operation. Send it when repeating the
+        identical request after a different administrator has approved it.
+
+        It is a header rather than a body member because the routes it applies
+        to have different bodies, and because the body is part of what the
+        approval is bound to.
+
+        Ignored when dual approval does not apply to the operation. A value
+        that is not a UUID is refused with `400`.
+      schema:
+        type: string
+        format: uuid
+    KeyId:
+      name: key_id
+      in: path
+      required: true
+      description: The API key identifier, a UUID.
+      schema:
+        type: string
+        format: uuid
+    TokenId:
+      name: token_id
+      in: path
+      required: true
+      description: The administrative token identifier, a UUID.
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    BadRequest:
+      description: |
+        Malformed or invalid input. This is the one class of failure where
+        `detail` is populated, because telling a caller that a field is missing
+        helps them and tells an attacker nothing.
+
+        Unknown JSON fields are refused rather than ignored, so a misspelled
+        field name is reported instead of silently taking its zero value. A body
+        containing more than one JSON document is refused as well.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            missingField:
+              value:
+                type: urn:n0passtemps:error:bad-request
+                title: the request is not valid
+                status: 400
+                detail: challenge_id is required
+                request_id: 9f2a1c7b5d3e4f60a1b2c3d4
+    Unauthorized:
+      description: |
+        The bearer credential is missing, malformed, unrecognised, expired or
+        revoked. The five cases are one response on purpose: distinguishing them
+        would let a caller enumerate valid selectors.
+
+        A credential rejection is audited and raises an alert, because a run of
+        them is the earliest visible sign of a leaked key being probed.
+
+        A credential store that cannot be reached is not this response. It is a
+        `503`, because nothing was rejected.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+        WWW-Authenticate:
+          $ref: "#/components/headers/WWWAuthenticate"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            noCredential:
+              value:
+                type: urn:n0passtemps:error:unauthorized
+                title: authentication is required
+                status: 401
+                request_id: 9f2a1c7b5d3e4f60a1b2c3d4
+    CeremonyFailed:
+      description: |
+        Authentication did not succeed, or the credential is missing or
+        unrecognised.
+
+        Two problem types share this status. `urn:n0passtemps:error:unauthorized`
+        means the API key was refused. `urn:n0passtemps:error:ceremony-failed`
+        means the key was accepted and the ceremony was not: a wrong signature,
+        an expired or already-used challenge, an unknown credential, a wrong
+        TOTP code, a malformed or spent recovery code, an unknown subject or an
+        inactive one. They are one body with no detail so that a caller cannot
+        tell which, and in particular cannot use an authentication route to test
+        whether a given person has an account.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+        WWW-Authenticate:
+          $ref: "#/components/headers/WWWAuthenticate"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            ceremonyFailed:
+              value:
+                type: urn:n0passtemps:error:ceremony-failed
+                title: authentication did not succeed
+                status: 401
+                request_id: 9f2a1c7b5d3e4f60a1b2c3d4
+    Forbidden:
+      description: |
+        The credential is valid but is not permitted to perform the operation.
+
+        On `/v1` this is an API key calling a route outside its scopes. The
+        attempt is audited as `api_key.rejected` with the route and the scopes
+        the key holds. Re-authenticating does not help; the key has to be
+        replaced by one minted with the scope the route needs.
+
+        On `/admin/v1` this is a role that does not hold the route's permission,
+        an attempt to decide one's own approval request, or a refused
+        `X-Approval-Id` redemption. Every redemption refusal is this one
+        response, whether the approval is unknown, names another operation,
+        belongs to another requester, is not in the approved state, has
+        expired, was already spent, or covers a different payload; the reason
+        is audited as `approval.rejected` and not returned. On either surface it
+        is also the answer when the credential belongs to a tenant this
+        deployment does not serve. On a WebAuthn registration it can mean the
+        authenticator model is not permitted by the configured AAGUID policy,
+        which is the one forbidden case that is disclosed, because a user
+        holding an unsupported key needs to be told to use a different one.
+
+        A permission denial is audited and raises an alert. The reason names the
+        role and the permission, so it is logged rather than returned.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            wrongRole:
+              value:
+                type: urn:n0passtemps:error:forbidden
+                title: this credential is not permitted to perform that operation
+                status: 403
+                request_id: 9f2a1c7b5d3e4f60a1b2c3d4
+    NotFound:
+      description: |
+        The resource does not exist. It is also the answer when a resource
+        exists but under a different parent, so that a route cannot be used to
+        discover ownership, and when no route matches the request at all.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            absent:
+              value:
+                type: urn:n0passtemps:error:not-found
+                title: the resource does not exist
+                status: 404
+                request_id: 9f2a1c7b5d3e4f60a1b2c3d4
+    Conflict:
+      description: |
+        The request conflicts with the current state. `detail` is populated,
+        because these conditions are about the caller's own resources and
+        naming them is what makes the response actionable.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            alreadyRegistered:
+              value:
+                type: urn:n0passtemps:error:conflict
+                title: the request conflicts with the current state
+                status: 409
+                detail: this authenticator is already registered
+                request_id: 9f2a1c7b5d3e4f60a1b2c3d4
+    PayloadTooLarge:
+      description: |
+        The request body exceeded `server.max_body_bytes`. The limit is enforced
+        as the body is consumed, so an oversized body is refused without being
+        buffered.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            tooLarge:
+              value:
+                type: urn:n0passtemps:error:payload-too-large
+                title: the request body is too large
+                status: 413
+                request_id: 9f2a1c7b5d3e4f60a1b2c3d4
+    UnsupportedMediaType:
+      description: |
+        A write request arrived without `Content-Type: application/json`.
+
+        A form-encoded request would otherwise be parsed as an empty JSON object
+        and treated as a request with no fields. Refusing it also removes the
+        simple-request form that bypasses a CORS preflight.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            missingContentType:
+              value:
+                type: urn:n0passtemps:error:unsupported-media-type
+                title: a JSON request body is required
+                status: 415
+                detail: set Content-Type to application/json
+                request_id: 9f2a1c7b5d3e4f60a1b2c3d4
+    Throttled:
+      description: |
+        A rate limit was reached. Limits apply per subject, per source address
+        and per API key at the same time, and the two administrative revoke
+        routes additionally share one per administrator. The response does not
+        say which dimension tripped.
+
+        The per-key limit, `throttle.max_requests_per_key`, is metered on every
+        `/v1` route that takes an API key, including the ones that perform no
+        authentication: resolving a subject, starting a ceremony and reading
+        the health report all count. A leaked key cannot be used without bound
+        on any of them.
+
+        The check runs before any expensive work, so a locked-out caller does
+        not get a signature verification or an Argon2id evaluation out of the
+        service.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            throttled:
+              value:
+                type: urn:n0passtemps:error:throttled
+                title: too many attempts
+                status: 429
+                retry_after_seconds: 900
+                request_id: 9f2a1c7b5d3e4f60a1b2c3d4
+    Unavailable:
+      description: |
+        The credential store could not be reached, so the bearer credential
+        could not be checked. This is the service's fault rather than the
+        caller's: the credential was neither accepted nor rejected, nothing is
+        audited as a rejection, and no alert is raised. Retry with the same
+        credential. The liveness probe reports the same condition.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            storeDown:
+              value:
+                type: urn:n0passtemps:error:unavailable
+                title: the service is temporarily unavailable
+                status: 503
+                request_id: 9f2a1c7b5d3e4f60a1b2c3d4
+    ApprovalRequired:
+      description: |
+        The operation was queued for a second administrator and nothing was
+        performed. `detail` names the approval request identifier. Once a
+        different administrator has approved it, the original requester repeats
+        the identical request with `X-Approval-Id` set to that identifier.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            queued:
+              value:
+                type: urn:n0passtemps:error:approval-required
+                title: the operation requires approval by a second administrator
+                status: 202
+                detail: >-
+                  queued as approval request
+                  0f1d2b3c-4e5f-6a7b-8c9d-0e1f2a3b4c5d; once a different
+                  administrator approves it, repeat this exact request with
+                  the header X-Approval-Id:
+                  0f1d2b3c-4e5f-6a7b-8c9d-0e1f2a3b4c5d
+                request_id: 9f2a1c7b5d3e4f60a1b2c3d4
+    InternalError:
+      description: |
+        A fault in the service. Nothing about the cause is disclosed; it is
+        logged at error level against the same `request_id`.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            internal:
+              value:
+                type: urn:n0passtemps:error:internal
+                title: the service could not complete the request
+                status: 500
+                request_id: 9f2a1c7b5d3e4f60a1b2c3d4
+  schemas:
+    Problem:
+      type: object
+      title: Problem
+      description: |
+        The RFC 9457 error body returned by every refusal, with the media type
+        `application/problem+json`.
+
+        The members are deliberately spare. `title` and `type` describe a class
+        of failure, never the specific reason one request was refused: an
+        authentication service that explains why a ceremony failed is an oracle
+        for probing its own configuration. The real reason is logged and
+        audited, where an operator can read it and an attacker cannot.
+      required:
+        - type
+        - title
+        - status
+      properties:
+        type:
+          $ref: "#/components/schemas/ProblemType"
+        title:
+          type: string
+          description: |
+            A short, fixed description of the class of failure. It is stable for
+            a given `type` and is not customised per request.
+          examples:
+            - authentication did not succeed
+        status:
+          type: integer
+          description: |
+            The HTTP status code repeated, so a client that has only the body
+            still knows.
+          examples:
+            - 401
+        detail:
+          type: string
+          description: |
+            Present only where the extra information is safe to disclose, which
+            in practice means input validation and state conflicts. Absent on
+            every authentication and authorisation failure.
+        request_id:
+          type: string
+          description: |
+            Matches the `X-Request-Id` response header, and is the identifier an
+            operator uses to find the corresponding log and audit entries.
+          maxLength: 64
+        retry_after_seconds:
+          type: integer
+          description: |
+            Set on a throttled response only, mirroring the `Retry-After`
+            header. Never below 1.
+          minimum: 1
+    ProblemType:
+      type: string
+      title: ProblemType
+      description: |
+        A stable identifier for a class of error, usable by a client to branch
+        on. It is a URN rather than a URL because there is no documentation site
+        to dereference.
+
+        The status each one is returned with:
+
+        | type | status |
+        | --- | --- |
+        | `urn:n0passtemps:error:bad-request` | 400 |
+        | `urn:n0passtemps:error:unauthorized` | 401 |
+        | `urn:n0passtemps:error:ceremony-failed` | 401 |
+        | `urn:n0passtemps:error:forbidden` | 403 |
+        | `urn:n0passtemps:error:not-found` | 404 |
+        | `urn:n0passtemps:error:conflict` | 409 |
+        | `urn:n0passtemps:error:payload-too-large` | 413 |
+        | `urn:n0passtemps:error:unsupported-media-type` | 415 |
+        | `urn:n0passtemps:error:throttled` | 429 |
+        | `urn:n0passtemps:error:internal` | 500 |
+        | `urn:n0passtemps:error:unavailable` | 503 |
+        | `urn:n0passtemps:error:approval-required` | 202 |
+
+        `approval-required` is the one that is not a failure: it reports that a
+        sensitive operation was queued for a second administrator rather than
+        performed, and it is carried on a `202` with a problem body.
+
+        `unavailable` is returned by every authenticated route when the
+        credential store cannot be reached. The liveness probe reports the same
+        condition with a `503` and a liveness body rather than a problem
+        document.
+      enum:
+        - urn:n0passtemps:error:bad-request
+        - urn:n0passtemps:error:unauthorized
+        - urn:n0passtemps:error:forbidden
+        - urn:n0passtemps:error:not-found
+        - urn:n0passtemps:error:conflict
+        - urn:n0passtemps:error:ceremony-failed
+        - urn:n0passtemps:error:throttled
+        - urn:n0passtemps:error:payload-too-large
+        - urn:n0passtemps:error:unsupported-media-type
+        - urn:n0passtemps:error:approval-required
+        - urn:n0passtemps:error:internal
+        - urn:n0passtemps:error:unavailable
+
+    HealthStatus:
+      type: string
+      title: HealthStatus
+      description: |
+        `ok` means every check passed. `degraded` means the service still
+        authenticates users but something needs attention, such as an overdue
+        key rotation or a certificate nearing expiry. `error` means it cannot
+        authenticate users, which in practice means the database is unreachable.
+      enum:
+        - ok
+        - degraded
+        - error
+    Liveness:
+      type: object
+      title: Liveness
+      description: |
+        The unauthenticated report. It carries no version and no component
+        detail on purpose. In practice the probe answers `ok` or `error`.
+      required:
+        - status
+      properties:
+        status:
+          $ref: "#/components/schemas/HealthStatus"
+    HealthReport:
+      type: object
+      title: HealthReport
+      required:
+        - status
+        - version
+        - uptime_seconds
+        - database
+        - kek
+        - audit
+        - open_alerts
+        - features
+        - timestamp
+      properties:
+        status:
+          allOf:
+            - $ref: "#/components/schemas/HealthStatus"
+          description: The most severe of the component statuses below.
+        version:
+          $ref: "#/components/schemas/VersionInfo"
+        uptime_seconds:
+          type: integer
+          format: int64
+        database:
+          $ref: "#/components/schemas/DatabaseHealth"
+        kek:
+          $ref: "#/components/schemas/KEKHealth"
+        tls:
+          allOf:
+            - $ref: "#/components/schemas/TLSHealth"
+          description: |
+            Absent when TLS is terminated by a reverse proxy, whose certificate
+            this service cannot see. Reporting nothing is honest; reporting `ok`
+            would be a claim about something it does not know.
+        audit:
+          $ref: "#/components/schemas/AuditHealth"
+        open_alerts:
+          type: object
+          description: |
+            Count of unacknowledged alerts by severity. The three severities are
+            always present, at zero when there are none.
+          additionalProperties:
+            type: integer
+          examples:
+            - info: 0
+              warning: 2
+              critical: 0
+        features:
+          type: object
+          description: |
+            Which optional behaviours are on: `lite_mode`, `admin_rbac`,
+            `dual_approval`, `deferred_erasure`, `kek_rotation_reminder`,
+            `throttle` and `admin_ui`.
+          additionalProperties:
+            type: boolean
+        timestamp:
+          type: string
+          format: date-time
+        last_error:
+          type: string
+          description: |
+            The most recent component failure, for the operator who has only
+            this response to work from. It is a component name and a short
+            reason, never a stack trace or a query.
+    VersionInfo:
+      type: object
+      title: VersionInfo
+      required:
+        - version
+      properties:
+        version:
+          type: string
+          description: |
+            The semantic version of the build, or `dev` when it was not set at
+            link time.
+        commit:
+          type: string
+        build_date:
+          type: string
+        go_version:
+          type: string
+    DatabaseHealth:
+      type: object
+      title: DatabaseHealth
+      required:
+        - status
+        - engine
+        - latency_ms
+      properties:
+        status:
+          allOf:
+            - $ref: "#/components/schemas/HealthStatus"
+          description: |
+            `degraded` above 500ms for a single round trip: a slow database
+            still authenticates users.
+        engine:
+          type: string
+          examples:
+            - sqlite
+            - postgres
+        latency_ms:
+          type: integer
+          format: int64
+        detail:
+          type: string
+    KEKHealth:
+      type: object
+      title: KEKHealth
+      description: The state of the key encryption keyring.
+      required:
+        - status
+        - current_version
+        - retained_versions
+        - rotation_overdue
+      properties:
+        status:
+          $ref: "#/components/schemas/HealthStatus"
+        current_version:
+          type: integer
+          description: The key version new secrets are sealed under.
+        retained_versions:
+          type: integer
+          description: |
+            How many versions are still available to decrypt older records. A
+            count above one means a rotation is in progress or was never
+            finished.
+        rotation_overdue:
+          type: boolean
+        detail:
+          type: string
+    TLSHealth:
+      type: object
+      title: TLSHealth
+      description: |
+        The certificate, when TLS is terminated in process. The file is read on
+        every call rather than cached, so renewing a certificate is reflected
+        without a restart.
+      required:
+        - status
+        - not_after
+        - expires_in_days
+      properties:
+        status:
+          allOf:
+            - $ref: "#/components/schemas/HealthStatus"
+          description: |
+            `degraded` at fourteen days or fewer, which sits well outside the
+            renewal window of an ACME client so it only fires when automated
+            renewal has actually stopped working.
+        not_after:
+          type: string
+          format: date-time
+        expires_in_days:
+          type: integer
+        subject:
+          type: string
+          description: The certificate's common name.
+        detail:
+          type: string
+    AuditHealth:
+      type: object
+      title: AuditHealth
+      required:
+        - status
+        - head_seq
+      properties:
+        status:
+          $ref: "#/components/schemas/HealthStatus"
+        head_seq:
+          type: integer
+          format: int64
+          description: The sequence number of the newest chained entry.
+        detail:
+          type: string
+
+    JWKSet:
+      type: object
+      title: JWKSet
+      description: A JWK Set as defined by RFC 7517 section 5.
+      required:
+        - keys
+      properties:
+        keys:
+          type: array
+          items:
+            $ref: "#/components/schemas/JWK"
+    JWK:
+      type: object
+      title: JWK
+      description: |
+        One Ed25519 public key as an OKP JWK, restricted to the members of
+        RFC 8037 section 2.
+      required:
+        - kty
+        - crv
+        - x
+        - use
+        - alg
+        - kid
+      properties:
+        kty:
+          type: string
+          const: OKP
+        crv:
+          type: string
+          const: Ed25519
+        x:
+          type: string
+          description: |
+            The 32-byte public key, base64url encoded with no padding.
+        use:
+          type: string
+          const: sig
+        alg:
+          type: string
+          const: EdDSA
+          description: |
+            Ed25519 is the only algorithm this service produces or accepts.
+            There is no negotiation, because an algorithm field the token
+            controls is the root of the JWS confusion attacks.
+        kid:
+          type: string
+          description: |
+            The RFC 7638 JWK thumbprint of the key, base64url with no padding.
+            It matches the `kid` header of every assertion this deployment
+            signs, so a verifier can pick the right key while two keys are
+            published side by side during a rotation.
+
+    SubjectStatus:
+      type: string
+      title: SubjectStatus
+      enum:
+        - active
+        - locked
+        - pending_deletion
+    CreateSubjectRequest:
+      type: object
+      title: CreateSubjectRequest
+      required:
+        - subject_ref
+      properties:
+        subject_ref:
+          type: string
+          description: |
+            The identifier the calling application uses for its user. Bounded by
+            `subject.max_ref_length`, 256 bytes by default. Prefer an opaque
+            identifier over an email address.
+          minLength: 1
+          maxLength: 256
+        display_name:
+          type: string
+          description: Optional, and shown in the administration interface.
+    SubjectSummary:
+      type: object
+      title: SubjectSummary
+      description: |
+        What the public routes disclose about a subject. It carries the internal
+        identifier and the status, and never the reference the caller supplied.
+      required:
+        - subject_id
+        - status
+        - created_at
+        - credential_count
+        - totp_enrolled
+        - recovery_codes_remaining
+      properties:
+        subject_id:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/SubjectStatus"
+        created_at:
+          type: string
+          format: date-time
+        credential_count:
+          type: integer
+          description: |
+            Active WebAuthn credentials. Revoked ones are not counted here; the
+            administrative routes include them.
+        totp_enrolled:
+          type: boolean
+          description: |
+            True only once an enrolment has been confirmed. A pending secret
+            does not count.
+        recovery_codes_remaining:
+          type: integer
+
+    # The two ceremony payloads below are passed through verbatim in both
+    # directions. They are declared as open objects on purpose: modelling the
+    # whole of the W3C Web Authentication schema inline would duplicate a
+    # specification that changes independently of this one, and a schema that
+    # fell behind it would start rejecting valid browser output. The
+    # authoritative definitions are PublicKeyCredentialCreationOptions,
+    # PublicKeyCredentialRequestOptions and PublicKeyCredential in the Web
+    # Authentication Level 2 specification.
+    PublicKeyCredentialCreationOptions:
+      type: object
+      title: PublicKeyCredentialCreationOptions
+      description: |
+        The W3C `PublicKeyCredentialCreationOptions` structure, ready to be
+        handed to `navigator.credentials.create()` in the browser. It is passed
+        through verbatim and is not modelled here; see the Web Authentication
+        Level 2 specification.
+
+        The relying party identifier and the acceptable origins inside it are
+        server configuration and are never read from a request. WebAuthn's
+        security rests on the authenticator signing over an origin and a relying
+        party identifier that the server independently expects, so a caller
+        allowed to nominate either would prove nothing. The practical
+        consequence is that the front end has to be served from a configured
+        origin.
+      additionalProperties: true
+    PublicKeyCredentialRequestOptions:
+      type: object
+      title: PublicKeyCredentialRequestOptions
+      description: |
+        The W3C `PublicKeyCredentialRequestOptions` structure, ready to be handed
+        to `navigator.credentials.get()` in the browser. Passed through verbatim
+        and not modelled here; see the Web Authentication Level 2 specification.
+      additionalProperties: true
+    PublicKeyCredential:
+      type: object
+      title: PublicKeyCredential
+      description: |
+        The W3C `PublicKeyCredential` structure the browser returned, forwarded
+        verbatim. It is not modelled here; see the Web Authentication Level 2
+        specification.
+
+        The service keeps this as raw JSON and parses it with a WebAuthn
+        library, rather than through a struct that might drop a field the
+        library needs in order to verify. Reshaping or partially transcribing it
+        on the way through is the most common way an integration fails.
+      additionalProperties: true
+
+    RegisterBeginRequest:
+      type: object
+      title: RegisterBeginRequest
+      properties:
+        label:
+          type: string
+          description: |
+            Shown by the authenticator while the user confirms, and stored so an
+            operator can tell one of a subject's keys from another. It is not
+            used for any decision.
+    BeginRegistrationResult:
+      type: object
+      title: BeginRegistrationResult
+      required:
+        - challenge_id
+        - options
+        - expires_at
+      properties:
+        challenge_id:
+          type: string
+          format: uuid
+          description: |
+            Identifies the ceremony and must be presented again on completion.
+        options:
+          $ref: "#/components/schemas/PublicKeyCredentialCreationOptions"
+        expires_at:
+          type: string
+          format: date-time
+          description: When the challenge stops being accepted.
+    BeginAssertionResult:
+      type: object
+      title: BeginAssertionResult
+      required:
+        - challenge_id
+        - options
+        - expires_at
+      properties:
+        challenge_id:
+          type: string
+          format: uuid
+        options:
+          $ref: "#/components/schemas/PublicKeyCredentialRequestOptions"
+        expires_at:
+          type: string
+          format: date-time
+    CeremonyCompleteRequest:
+      type: object
+      title: CeremonyCompleteRequest
+      description: The body of both completion routes.
+      required:
+        - challenge_id
+        - credential
+      properties:
+        challenge_id:
+          type: string
+          format: uuid
+          description: |
+            The value returned by the corresponding begin call. A malformed
+            identifier is refused before it reaches the database.
+        credential:
+          $ref: "#/components/schemas/PublicKeyCredential"
+    RegisterCompleteResult:
+      type: object
+      title: RegisterCompleteResult
+      required:
+        - credential
+        - recovery_codes_remaining
+      properties:
+        credential:
+          $ref: "#/components/schemas/Credential"
+        recovery_codes_remaining:
+          type: integer
+          description: |
+            Reported because a first credential is the point at which recovery
+            codes become useful. Issue them with
+            `POST /v1/recovery/{subject_ref}/issue`.
+
+    Factor:
+      type: string
+      title: Factor
+      description: |
+        One authentication factor that contributed to a ceremony. These populate
+        the `amr` claim of RFC 8176; that registry has no value for a WebAuthn
+        assertion specifically, so these deployment-specific names are used and
+        an application that wants registry values can map them.
+
+        `webauthn-uv` is a separate factor rather than a property of `webauthn`,
+        because an application may require user verification for a sensitive
+        operation and it must not be inferred. It is present only when the
+        authenticator data of the current ceremony reports user verification.
+        Under `webauthn.user_verification = "preferred"`, a possession-only
+        assertion on a credential that was registered with user verification
+        yields `webauthn` alone.
+      enum:
+        - webauthn
+        - webauthn-uv
+        - totp
+        - recovery-code
+    AssertionResult:
+      type: object
+      title: AssertionResult
+      description: |
+        What a successful ceremony returns. The signed assertion is the
+        substance of it: a bare `200` would oblige the calling application to
+        trust the network path between itself and this service, and a detached
+        signature it verifies against the published key does not.
+      required:
+        - subject_id
+        - assertion
+        - expires_at
+        - factors
+      properties:
+        subject_id:
+          type: string
+          format: uuid
+        assertion:
+          type: string
+          description: |
+            A compact JWS, three base64url segments separated by full stops.
+            Verify it against the key served from
+            `/v1/.well-known/jwks.json`, pin `iss` and `aud`, then issue your
+            own session.
+          examples:
+            - eyJhbGciOiJFZERTQSIsImtpZCI6IkFBQUEiLCJ0eXAiOiJKV1QifQ.eyJzdWIiOiIwMDAwMDAwMCJ9.AAAA
+        expires_at:
+          type: string
+          format: date-time
+          description: |
+            Short by design, sixty seconds after issuance by default. The
+            assertion proves a ceremony completed moments ago and is meant to be
+            exchanged immediately.
+        factors:
+          type: array
+          description: |
+            What actually authenticated the subject, so the caller can apply its
+            own policy. A WebAuthn assertion with user verification is a
+            different assurance from a recovery code.
+          items:
+            $ref: "#/components/schemas/Factor"
+        signals:
+          type: object
+          description: |
+            Conditions worth surfacing that did not refuse the authentication.
+            Absent when there are none. Known members are
+            `sign_count_regression` and `binding_changed`, both booleans. They
+            are reported so the caller may decide to step up, not because this
+            service considers the assertion invalid.
+          additionalProperties: true
+    AssertionClaims:
+      type: object
+      title: AssertionClaims
+      description: |
+        The JWT claims set carried by an `assertion`. It is documented here for
+        implementers of a verifier; it is not itself a response body, and
+        nothing references it, because the claims travel inside the signed
+        `assertion` string rather than as JSON of their own.
+
+        The date claims are seconds since the Unix epoch, as RFC 7519 section 2
+        defines NumericDate. They are plain integers so that the wire form is
+        exactly what was signed, with no timezone or precision ambiguity between
+        issuer and verifier.
+
+        A verifier must fix the algorithm at `EdDSA` rather than read it from
+        the token, must reject any `crit` header, must select the key by `kid`
+        and one candidate only, and must treat a missing `exp` as invalid rather
+        than as no expiry.
+      required:
+        - iss
+        - sub
+        - aud
+        - iat
+        - nbf
+        - exp
+        - jti
+        - amr
+      properties:
+        iss:
+          type: string
+          description: |
+            Identifies the deployment that ran the ceremony. A verifier must pin
+            it. Defaults to `n0passtemps`.
+        sub:
+          type: string
+          format: uuid
+          description: |
+            The internal subject identifier, not the caller's own user
+            reference: the reference is sealed at rest and is not the service's
+            to re-publish.
+        aud:
+          type: string
+          format: uuid
+          description: |
+            The identifier of the API key the ceremony was performed for. A
+            verifier must pin it, so a token minted for one tenant's key cannot
+            be presented to another.
+        iat:
+          type: integer
+          format: int64
+        nbf:
+          type: integer
+          format: int64
+          description: |
+            Issuance time less the configured clock skew, so a verifier whose
+            clock lags slightly accepts the token immediately. The skew does not
+            extend `exp`, because moving expiry later is the direction that
+            costs security.
+        exp:
+          type: integer
+          format: int64
+        jti:
+          type: string
+          description: |
+            A unique token identifier, 128 random bits base64url encoded,
+            suitable as the key of a replay cache.
+        amr:
+          type: array
+          items:
+            $ref: "#/components/schemas/Factor"
+        cid:
+          type: string
+          description: |
+            The base64url WebAuthn credential identifier, present when a
+            WebAuthn factor was used. It lets an application pin a session to
+            one authenticator.
+        tid:
+          type: string
+          description: Present on multi-tenant deployments.
+
+    AttestationType:
+      type: string
+      title: AttestationType
+      enum:
+        - none
+        - self
+        - basic
+        - attca
+        - anonca
+        - indirect
+    Credential:
+      type: object
+      title: Credential
+      description: |
+        A registered WebAuthn authenticator.
+
+        The COSE public key and the binding hash are stored but never disclosed
+        by the API.
+      required:
+        - id
+        - tenant_id
+        - subject_id
+        - credential_id
+        - attestation_type
+        - transports
+        - sign_count
+        - clone_warning
+        - backup_eligible
+        - backup_state
+        - user_verified
+        - rp_id
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            The internal identifier, and the one to use in the revoke route's
+            `credential_id` path segment.
+        tenant_id:
+          type: string
+        subject_id:
+          type: string
+          format: uuid
+        credential_id:
+          type: string
+          format: byte
+          description: |
+            The WebAuthn credential identifier, base64 encoded with padding as
+            Go renders a byte slice. Note that WebAuthn itself uses base64url;
+            re-encode before comparing with a value from a browser.
+        aaguid:
+          type: string
+          format: byte
+          description: |
+            The authenticator model identifier, absent when the authenticator
+            did not supply one.
+        attestation_type:
+          $ref: "#/components/schemas/AttestationType"
+        transports:
+          type: [array, "null"]
+          description: |
+            The transports the authenticator reported. Null when it reported
+            none.
+          items:
+            type: string
+        sign_count:
+          type: integer
+          description: |
+            The authenticator's signature counter. A counter that fails to
+            advance across two assertions is the documented signal for a cloned
+            authenticator, but many authenticators legitimately report a
+            constant zero, so the condition raises an alert instead of refusing
+            the assertion.
+        clone_warning:
+          type: boolean
+        backup_eligible:
+          type: boolean
+        backup_state:
+          type: boolean
+        user_verified:
+          type: boolean
+          description: |
+            Whether user verification was reported at registration. It is a
+            property of the registration ceremony and is never carried forward
+            into an assertion: the `webauthn-uv` factor reflects the
+            authenticator data of the assertion being completed and nothing
+            else.
+        label:
+          type: string
+        rp_id:
+          type: string
+          description: |
+            The relying party identifier the credential was registered under.
+            It is server configuration.
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: string
+          format: date-time
+        revoked_reason:
+          type: string
+    CredentialList:
+      type: object
+      title: CredentialList
+      required:
+        - credentials
+      properties:
+        credentials:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/Credential"
+
+    TOTPCodeRequest:
+      type: object
+      title: TOTPCodeRequest
+      required:
+        - code
+      properties:
+        code:
+          type: string
+          description: |
+            The code from the user's authenticator application. Six digits by
+            default.
+          examples:
+            - "000000"
+    TOTPEnrolResult:
+      type: object
+      title: TOTPEnrolResult
+      required:
+        - secret_id
+        - secret
+        - provisioning_uri
+        - algorithm
+        - digits
+        - period_seconds
+        - expires_at
+      properties:
+        secret_id:
+          type: string
+          format: uuid
+        secret:
+          type: string
+          description: |
+            The base32 seed for a user typing it in by hand, with the padding
+            stripped because several widely used authenticator applications
+            refuse a padded secret. Disclosed here and nowhere else.
+        provisioning_uri:
+          type: string
+          description: |
+            The `otpauth://` form, for rendering as a QR code. The account label
+            is the internal `subject_id`.
+          examples:
+            - otpauth://totp/n0passtemps:00000000-0000-0000-0000-000000000000?secret=AAAAAAAAAAAAAAAA&issuer=n0passtemps&algorithm=SHA1&digits=6&period=30
+        algorithm:
+          type: string
+          description: Server configuration. `SHA1` by default.
+        digits:
+          type: integer
+          description: Server configuration. 6 by default.
+        period_seconds:
+          type: integer
+          description: Server configuration. 30 by default.
+        expires_at:
+          type: string
+          format: date-time
+          description: |
+            When an unconfirmed enrolment stops being usable, fifteen minutes
+            after issuance by default.
+    TOTPConfirmResult:
+      type: object
+      title: TOTPConfirmResult
+      required:
+        - secret_id
+        - confirmed
+      properties:
+        secret_id:
+          type: string
+          format: uuid
+        confirmed:
+          type: boolean
+          const: true
+
+    RecoveryIssueResult:
+      type: object
+      title: RecoveryIssueResult
+      required:
+        - batch_id
+        - codes
+        - count
+        - warning
+      properties:
+        batch_id:
+          type: string
+          format: uuid
+        codes:
+          type: array
+          description: |
+            The codes, in their grouped human-readable form. They appear here
+            and nowhere else, ever.
+          items:
+            type: string
+            examples:
+              - AAAAA-BBBBB-CCCCC-DDDDD
+        count:
+          type: integer
+        warning:
+          type: string
+          description: |
+            Returned alongside the codes because a caller that does not present
+            them to the user immediately has lost them.
+    RecoveryConsumeRequest:
+      type: object
+      title: RecoveryConsumeRequest
+      required:
+        - code
+      properties:
+        code:
+          type: string
+          description: |
+            One recovery code. Lowercase input, whitespace and the separators
+            `-`, `_` and tab are accepted, and the Crockford homoglyphs I, L and
+            O are folded onto 1, 1 and 0.
+    RecoveryConsumeResult:
+      title: RecoveryConsumeResult
+      allOf:
+        - $ref: "#/components/schemas/AssertionResult"
+        - type: object
+          required:
+            - recovery_codes_remaining
+          properties:
+            recovery_codes_remaining:
+              type: integer
+              description: |
+                Codes still unused after this one was spent. An alert is raised
+                at or below the configured low watermark, and again at zero,
+                because a subject with no codes left has no way back in if they
+                lose their authenticator.
+
+    AdminSubject:
+      type: object
+      title: AdminSubject
+      description: |
+        What the administrative surface discloses about a subject. The reference
+        the integrating application supplied is included only when the caller
+        asks for it with `reveal_ref=true`, and reading it is audited.
+      required:
+        - subject_id
+        - status
+        - created_at
+        - updated_at
+        - totp_enrolled
+        - recovery_codes_remaining
+      properties:
+        subject_id:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/SubjectStatus"
+        display_name:
+          type: string
+        subject_ref:
+          type: string
+          description: |
+            Present only on a single-subject read with `reveal_ref=true`, and
+            only when the deployment sealed the reference in the first place.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        deleted_at:
+          type: string
+          format: date-time
+          description: |
+            Set when the subject has been soft deleted, which an erasure request
+            does immediately.
+        credentials:
+          type: array
+          description: |
+            Present on a single-subject read, absent from a listing. Revoked
+            credentials are included.
+          items:
+            $ref: "#/components/schemas/Credential"
+        totp_enrolled:
+          type: boolean
+        recovery_codes_remaining:
+          type: integer
+        erasure:
+          allOf:
+            - $ref: "#/components/schemas/ErasureRequest"
+          description: |
+            Present on a single-subject read when an erasure request exists.
+    AdminSubjectPage:
+      type: object
+      title: AdminSubjectPage
+      required:
+        - subjects
+        - next
+      properties:
+        subjects:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminSubject"
+        next:
+          type: string
+          description: |
+            The cursor to pass as `after` for the following page, or the empty
+            string when this was the last one.
+    StatusChangeRequest:
+      type: object
+      title: StatusChangeRequest
+      properties:
+        reason:
+          type: string
+          description: Recorded in the audit entry.
+    SubjectStatusResult:
+      type: object
+      title: SubjectStatusResult
+      required:
+        - subject_id
+        - status
+      properties:
+        subject_id:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/SubjectStatus"
+    RevokeCredentialRequest:
+      type: object
+      title: RevokeCredentialRequest
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          description: |
+            Required and not merely recommended. A revocation with no stated
+            reason is an audit entry nobody can act on later.
+          minLength: 1
+        allow_last:
+          type: boolean
+          description: |
+            Permits revoking a subject's only remaining credential, which is
+            refused by default because it locks the user out with no way back
+            except a recovery code. Make sure the user holds recovery codes
+            first.
+          default: false
+    RevokeCredentialResult:
+      type: object
+      title: RevokeCredentialResult
+      required:
+        - credential_id
+        - revoked
+        - remaining_active
+      properties:
+        credential_id:
+          type: string
+          format: uuid
+        revoked:
+          type: boolean
+          const: true
+        remaining_active:
+          type: integer
+    RevokeAllCredentialsRequest:
+      type: object
+      title: RevokeAllCredentialsRequest
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          description: |
+            Required, and refused when blank. It is recorded on every revoked
+            authenticator and in the audit entry, and it is part of what a
+            dual approval is bound to.
+    RevokeAllCredentialsResult:
+      type: object
+      title: RevokeAllCredentialsResult
+      required:
+        - subject_id
+        - credentials_revoked
+        - totp_revoked
+        - recovery_codes_remaining
+      properties:
+        subject_id:
+          type: string
+          format: uuid
+        credentials_revoked:
+          type: integer
+          minimum: 0
+          description: How many active WebAuthn credentials were revoked.
+        totp_revoked:
+          type: integer
+          minimum: 0
+          description: |
+            How many TOTP secrets were revoked. An enrolment that was started
+            and never confirmed is revoked as well, so that it cannot be
+            confirmed afterwards.
+        recovery_codes_remaining:
+          type: integer
+          minimum: 0
+          description: |
+            The subject's unused recovery codes, which this route leaves alone.
+        warning:
+          type: string
+          description: |
+            Present only when `recovery_codes_remaining` is zero. The subject is
+            then locked out until an operator reissues recovery codes.
+    RewrapReport:
+      type: object
+      title: RewrapReport
+      description: The outcome of one rewrap pass over every sealed record.
+      required:
+        - current_version
+        - examined
+        - rewrapped
+        - already_current
+        - failed
+        - versions_in_use
+      properties:
+        current_version:
+          type: integer
+          minimum: 1
+          description: |
+            The key version the running process treats as current. It is read
+            from the keyring once, at startup.
+        examined:
+          type: integer
+          minimum: 0
+          description: |
+            Records accounted for: `rewrapped`, `already_current` and `failed`
+            added together. A record purged while the pass was running is in
+            none of the counts.
+        rewrapped:
+          type: integer
+          minimum: 0
+          description: Records moved from an older version onto the current one.
+        already_current:
+          type: integer
+          minimum: 0
+        failed:
+          type: integer
+          minimum: 0
+          description: |
+            Records that could not be moved: malformed, sealed under a version
+            that has left the keyring, failing authentication, or changed by
+            another request during the pass. Each is logged by identifier and
+            key version, never by content.
+        versions_in_use:
+          type: array
+          description: |
+            The distinct key versions still referenced by stored records once
+            the pass has finished, in ascending order. A malformed record has
+            no version to report, which is why `failed` has to be read
+            alongside this member.
+          items:
+            type: integer
+            minimum: 1
+    ThrottleResetResult:
+      type: object
+      title: ThrottleResetResult
+      required:
+        - subject_id
+        - reset
+      properties:
+        subject_id:
+          type: string
+          format: uuid
+        reset:
+          type: boolean
+          const: true
+    ErasureRequestBody:
+      type: object
+      title: ErasureRequestBody
+      properties:
+        reason:
+          type: string
+          description: Recorded in the audit entry and on the erasure request.
+    ErasureStatus:
+      type: string
+      title: ErasureStatus
+      enum:
+        - pending
+        - cancelled
+        - purged
+    ErasureRequest:
+      type: object
+      title: ErasureRequest
+      description: A GDPR Article 17 erasure tracked through its retention window.
+      required:
+        - id
+        - tenant_id
+        - subject_id
+        - status
+        - requested_by
+        - requested_at
+        - purge_after
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+        subject_id:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/ErasureStatus"
+        reason:
+          type: string
+        requested_by:
+          type: string
+          description: The identifier of the administrative token that asked.
+        requested_at:
+          type: string
+          format: date-time
+        purge_after:
+          type: string
+          format: date-time
+          description: |
+            The end of the retention window. Equal to `requested_at` when
+            `deferred_erasure` is off, in which case there is no window in which
+            to cancel.
+        cancelled_by:
+          type: string
+        cancelled_at:
+          type: string
+          format: date-time
+        purged_at:
+          type: string
+          format: date-time
+    ErasureCancelResult:
+      type: object
+      title: ErasureCancelResult
+      required:
+        - erasure_id
+        - cancelled
+      properties:
+        erasure_id:
+          type: string
+          format: uuid
+        cancelled:
+          type: boolean
+          const: true
+
+    ActorType:
+      type: string
+      title: ActorType
+      enum:
+        - system
+        - api_key
+        - admin
+        - subject
+    Outcome:
+      type: string
+      title: Outcome
+      enum:
+        - success
+        - failure
+        - denied
+        - error
+    AuditEntry:
+      type: object
+      title: AuditEntry
+      description: |
+        One immutable record in the hash-chained audit log.
+
+        `entry_hash` commits to the entry's own fields and to `prev_hash`, so
+        the log forms a chain. Verifying it detects any insertion, deletion or
+        modification after the fact. It cannot prevent one: in an on-premise
+        deployment the operator owns the database file.
+
+        The personal fields are committed through a salted digest rather than
+        hashed directly, so that honouring an erasure request does not break
+        verification for the rest of the log. Neither the salt nor that digest
+        is disclosed.
+      required:
+        - seq
+        - tenant_id
+        - occurred_at
+        - event_type
+        - actor_type
+        - outcome
+        - prev_hash
+        - entry_hash
+      properties:
+        seq:
+          type: integer
+          format: int64
+        tenant_id:
+          type: string
+          description: |
+            `system` on an entry that cannot be attributed to a real tenant,
+            which is the case for a failed authentication: the credential that
+            would have named the tenant is precisely the one that did not
+            verify.
+        occurred_at:
+          type: string
+          format: date-time
+        event_type:
+          type: string
+          examples:
+            - assertion.completed
+            - admin.subjects_listed
+        actor_type:
+          $ref: "#/components/schemas/ActorType"
+        actor_id:
+          type: string
+        subject_id:
+          type: string
+          format: uuid
+        resource_type:
+          type: string
+        resource_id:
+          type: string
+        outcome:
+          $ref: "#/components/schemas/Outcome"
+        source_ip:
+          type: string
+        request_id:
+          type: string
+        detail:
+          description: |
+            Event-specific fields. The shape varies by `event_type`, so it is
+            not modelled.
+        prev_hash:
+          type: [string, "null"]
+          format: byte
+          description: Base64 encoded. Null on the first entry of a chain.
+        entry_hash:
+          type: string
+          format: byte
+          description: Base64 encoded.
+    AuditPage:
+      type: object
+      title: AuditPage
+      required:
+        - entries
+        - next_seq
+        - limit
+      properties:
+        entries:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/AuditEntry"
+        next_seq:
+          type: integer
+          format: int64
+          description: |
+            Pass as `after_seq` for the following page. Zero when this was the
+            last one.
+        limit:
+          type: integer
+          description: The page size actually applied, after the cap.
+    AuditVerifyResult:
+      type: object
+      title: AuditVerifyResult
+      required:
+        - from_seq
+        - checked
+        - intact
+        - broken_at
+      properties:
+        from_seq:
+          type: integer
+          format: int64
+        checked:
+          type: integer
+          format: int64
+          description: How many entries were recomputed.
+        intact:
+          type: boolean
+        broken_at:
+          type: integer
+          format: int64
+          description: |
+            The first sequence number whose recomputed hash does not match, or
+            zero when the chain is intact.
+
+    Severity:
+      type: string
+      title: Severity
+      enum:
+        - info
+        - warning
+        - critical
+    Alert:
+      type: object
+      title: Alert
+      description: |
+        A detected condition an operator should look at. Repeated instances of
+        the same condition collapse onto a single row with a rising
+        `occurrences` count, so a brute-force attempt produces one alert rather
+        than one per request. The fingerprint that does the collapsing is not
+        disclosed.
+      required:
+        - id
+        - tenant_id
+        - alert_type
+        - severity
+        - summary
+        - occurrences
+        - first_seen_at
+        - last_seen_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+        alert_type:
+          type: string
+        severity:
+          $ref: "#/components/schemas/Severity"
+        subject_id:
+          type: string
+          format: uuid
+        resource_id:
+          type: string
+        summary:
+          type: string
+        detail:
+          description: |
+            Alert-specific fields. The shape varies by `alert_type`, so it is
+            not modelled.
+        occurrences:
+          type: integer
+        first_seen_at:
+          type: string
+          format: date-time
+        last_seen_at:
+          type: string
+          format: date-time
+        acknowledged_at:
+          type: string
+          format: date-time
+        acknowledged_by:
+          type: string
+    AlertPage:
+      type: object
+      title: AlertPage
+      required:
+        - alerts
+        - open
+      properties:
+        alerts:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/Alert"
+        open:
+          type: object
+          description: Count of unacknowledged alerts by severity.
+          additionalProperties:
+            type: integer
+    AlertAcknowledgeResult:
+      type: object
+      title: AlertAcknowledgeResult
+      required:
+        - alert_id
+        - acknowledged
+      properties:
+        alert_id:
+          type: string
+          format: uuid
+        acknowledged:
+          type: boolean
+          const: true
+
+    ApprovalStatus:
+      type: string
+      title: ApprovalStatus
+      description: |
+        `pending` awaits a decision. `approved` may be redeemed by the original
+        requester until `expires_at`. `executed` means the approval has been
+        spent: it was claimed by a redemption, which happens before the
+        operation runs, so it does not by itself state that the operation
+        succeeded. `rejected` and `expired` can never be redeemed. `failed` is
+        declared by the store and is not set by any route in this release.
+      enum:
+        - pending
+        - approved
+        - rejected
+        - expired
+        - executed
+        - failed
+    ApprovalRequest:
+      type: object
+      title: ApprovalRequest
+      description: A sensitive operation held for a second administrator.
+      required:
+        - id
+        - tenant_id
+        - operation
+        - payload
+        - status
+        - requested_by
+        - requested_at
+        - expires_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+        operation:
+          type: string
+          description: |
+            The operation that was intercepted, named as it appears in
+            `features.dual_approval_operations`.
+          examples:
+            - subject.erase
+            - admin_token.create
+            - credential.revoke_bulk
+            - kek.rotate
+        payload:
+          description: |
+            The arguments the approval is bound to, and what the second
+            administrator is approving. A redemption must present the same
+            document; it is compared as JSON rather than as bytes. The shape
+            varies by operation: `subject_id` and `reason` for `subject.erase`
+            and `credential.revoke_bulk`, `name` and `role` for
+            `admin_token.create`, and `action: rewrap` for `kek.rotate`.
+        reason:
+          type: string
+        status:
+          $ref: "#/components/schemas/ApprovalStatus"
+        requested_by:
+          type: string
+          description: |
+            The administrative token that raised the request. It cannot be the
+            one that decides it.
+        requested_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        decided_by:
+          type: string
+        decided_at:
+          type: string
+          format: date-time
+        decision_note:
+          type: string
+        executed_at:
+          type: string
+          format: date-time
+          description: |
+            When the approval was spent by the requester's redemption.
+        execution_error:
+          type: string
+          description: |
+            Declared by the store. No route sets it in this release, because an
+            approval is claimed before the operation runs.
+    ApprovalList:
+      type: object
+      title: ApprovalList
+      required:
+        - approvals
+      properties:
+        approvals:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/ApprovalRequest"
+    ApprovalDecisionRequest:
+      type: object
+      title: ApprovalDecisionRequest
+      properties:
+        note:
+          type: string
+          description: Recorded in the audit entry and on the request.
+
+    Scope:
+      type: string
+      title: Scope
+      description: |
+        One family of `/v1` routes an API key may call. `subjects` covers
+        `/v1/subjects`, `webauthn` covers `/v1/webauthn`, `totp` covers
+        `/v1/totp` under both spellings of enrol, `recovery` covers
+        `/v1/recovery`, and `health` covers `GET /v1/health/detail`.
+      enum:
+        - subjects
+        - webauthn
+        - totp
+        - recovery
+        - health
+    Role:
+      type: string
+      title: Role
+      description: |
+        An administrative role. Authority grows with the damage the holder is
+        trusted to cause, and reading is never bundled with writing.
+
+        `admin_auditor` reads everything and changes nothing, not even an alert
+        acknowledgement: an auditor who can quietly clear an alert can quietly
+        cover a trace, which is the one thing the role exists to prevent.
+
+        `admin_operator` adds the operations that recover a locked-out user:
+        lock, unlock, throttle reset, single credential revocation, recovery
+        code reissue and alert acknowledgement. It stops short of anything that
+        changes who may administer the service, anything that acts on many
+        records at once, and anything that touches key material.
+
+        `admin_full` holds every permission.
+
+        With `features.admin_rbac` off, every valid role carries full authority,
+        because that is what the lite deployment means: one administrator and no
+        pretence of separation of duty. An unrecognised role is refused either
+        way.
+      enum:
+        - admin_full
+        - admin_operator
+        - admin_auditor
+    CreateKeyRequest:
+      type: object
+      title: CreateKeyRequest
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+        expires_in_days:
+          type: integer
+          description: |
+            Bounds the credential's life. Zero or absent means no expiry.
+          minimum: 0
+        scopes:
+          type: array
+          description: |
+            Applies to an API key only. The families of `/v1` routes the key
+            may call. Empty or absent means every family. Matched without
+            regard to case; stored lowercased, deduplicated and sorted. An
+            unknown scope is refused with `400`.
+
+            The administrative token route shares this request shape, accepts
+            the member and ignores it.
+          items:
+            $ref: "#/components/schemas/Scope"
+    CreateAdminTokenRequest:
+      title: CreateAdminTokenRequest
+      allOf:
+        - $ref: "#/components/schemas/CreateKeyRequest"
+        - type: object
+          required:
+            - role
+          properties:
+            role:
+              $ref: "#/components/schemas/Role"
+    APIKey:
+      type: object
+      title: APIKey
+      description: |
+        The credential of an integrating application. Neither the selector nor
+        the verifier digest is ever disclosed.
+      required:
+        - id
+        - tenant_id
+        - name
+        - scopes
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            This is the value that appears as the `aud` claim of every assertion
+            issued to this key.
+        tenant_id:
+          type: string
+        name:
+          type: string
+        scopes:
+          type: [array, "null"]
+          description: |
+            The families of `/v1` routes the key may call, enforced on every
+            request. Empty or null means the key is unrestricted.
+          items:
+            $ref: "#/components/schemas/Scope"
+        created_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+        last_used_at:
+          type: string
+          format: date-time
+          description: |
+            Updated on each successful authentication. A failure to record it
+            does not fail the request, because refusing a valid authentication
+            over a write error would turn a degraded database into an outage.
+        expires_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: string
+          format: date-time
+    APIKeyList:
+      type: object
+      title: APIKeyList
+      required:
+        - api_keys
+      properties:
+        api_keys:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/APIKey"
+    CreateAPIKeyResult:
+      type: object
+      title: CreateAPIKeyResult
+      required:
+        - api_key
+        - token
+        - warning
+        - no_expiry
+        - unrestricted
+      properties:
+        api_key:
+          $ref: "#/components/schemas/APIKey"
+        token:
+          type: string
+          description: |
+            The full `npt_<selector>.<verifier>` token, shown once and not
+            retrievable again. Store it where the integrating application reads
+            its configuration from, and nowhere else.
+        warning:
+          type: string
+        no_expiry:
+          type: boolean
+          description: |
+            True when `expires_in_days` was zero or absent. Reported rather than
+            refused, because a long-lived key is sometimes the only practical
+            option for an integration that cannot rotate.
+        unrestricted:
+          type: boolean
+          description: |
+            True when the key was minted with no scopes and therefore reaches
+            every `/v1` route family. Reported so that an unrestricted key is a
+            visible choice rather than a silent default.
+    AdminToken:
+      type: object
+      title: AdminToken
+      description: |
+        The credential of an operator. Neither the selector nor the verifier
+        digest is ever disclosed.
+      required:
+        - id
+        - tenant_id
+        - name
+        - role
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+        name:
+          type: string
+        role:
+          $ref: "#/components/schemas/Role"
+        created_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+        last_used_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: string
+          format: date-time
+    AdminTokenList:
+      type: object
+      title: AdminTokenList
+      required:
+        - admin_tokens
+      properties:
+        admin_tokens:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/AdminToken"
+    CreateAdminTokenResult:
+      type: object
+      title: CreateAdminTokenResult
+      required:
+        - admin_token
+        - token
+        - warning
+      properties:
+        admin_token:
+          $ref: "#/components/schemas/AdminToken"
+        token:
+          type: string
+          description: |
+            The full `npa_<selector>.<verifier>` token, shown once and not
+            retrievable again.
+        warning:
+          type: string
+    RevokeAPIKeyResult:
+      type: object
+      title: RevokeAPIKeyResult
+      required:
+        - api_key_id
+        - revoked
+      properties:
+        api_key_id:
+          type: string
+          format: uuid
+        revoked:
+          type: boolean
+          const: true
+    RevokeAdminTokenResult:
+      type: object
+      title: RevokeAdminTokenResult
+      required:
+        - admin_token_id
+        - revoked
+      properties:
+        admin_token_id:
+          type: string
+          format: uuid
+        revoked:
+          type: boolean
+          const: true
