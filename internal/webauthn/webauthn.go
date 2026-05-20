@@ -88,10 +88,18 @@ func New(cfg config.WebAuthn, st store.Store, clock func() time.Time) (*Service,
 		clock = time.Now
 	}
 
+	mds, err := loadMetadata(cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	rp, err := lib.New(&lib.Config{
 		RPID:          cfg.RPID,
 		RPDisplayName: cfg.RPDisplayName,
 		RPOrigins:     cfg.Origins,
+		// Nil when no metadata file is configured, which leaves attestation
+		// statements checked for internal consistency only.
+		MDS: mds,
 		Timeouts: lib.TimeoutsConfig{
 			Login: lib.TimeoutConfig{
 				Enforce: true,
