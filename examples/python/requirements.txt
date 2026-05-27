@@ -1,0 +1,4 @@
+# Needed by verify_assertion.py alone: the standard library has no Ed25519, so
+# the signature check cannot be written honestly without it. Nothing else in
+# this directory has a dependency.
+cryptography>=42.0

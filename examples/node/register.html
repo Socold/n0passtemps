@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>n0passtemps registration ceremony</title>
+<!--
+  register.html - a real navigator.credentials.create() ceremony against a
+  running n0passtemps deployment.
+
+  How to run it:
+
+    1. Serve this file over HTTP from the origin your deployment is configured
+       for. WebAuthn needs a secure context, and http://localhost counts as one,
+       so a static server is enough:
+
+         python3 -m http.server 5173 --directory .
+
+       then open http://localhost:5173/register.html
+
+    2. The deployment must list that origin in server.cors_allowed_origins, and
+       its webauthn.rp_id must match the host. Both are server configuration and
+       are never read from a request: WebAuthn's security rests on the
+       authenticator signing over an origin and a relying party identifier that
+       the server independently expects. A caller allowed to nominate either
+       would be proving nothing. The practical consequence is that moving your
+       front end to a new subdomain is a change on the server, not in this file.
+
+    3. You need an authenticator: a security key, a platform authenticator such
+       as Touch ID or Windows Hello, or a virtual one from your browser's
+       developer tools.
+
+  Why the API key field carries a warning: this page talks to /v1 directly,
+  which means the key is in the browser, which is wrong anywhere but a
+  developer's machine. A real front end calls its own backend, and the backend
+  holds the key and relays the two ceremony round trips. That is the shape the
+  two fetch calls below stand in for.
+-->
+<style>
+  :root {
+    color-scheme: light dark;
+    --line: #8884;
+  }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.5;
+    max-width: 44rem;
+    margin: 0 auto;
+    padding: 2rem 1rem 4rem;
+  }
+  h1 { font-size: 1.4rem; }
+  h2 { font-size: 1.05rem; margin-top: 2rem; }
+  .warning {
+    border: 1px solid var(--line);
+    border-left-width: 4px;
+    padding: 0.75rem 1rem;
+    margin: 1.5rem 0;
+  }
+  label { display: block; margin-top: 0.9rem; font-weight: 600; }
+  input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0.45rem 0.5rem;
+    margin-top: 0.25rem;
+    font: inherit;
+  }
+  button {
+    margin-top: 1.25rem;
+    padding: 0.5rem 1.1rem;
+    font: inherit;
+  }
+  pre {
+    border: 1px solid var(--line);
+    padding: 0.75rem;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    min-height: 3rem;
+  }
+  code { font-size: 0.95em; }
+</style>
+</head>
+<body>
+
+<h1>n0passtemps registration ceremony</h1>
+
+<p>
+  Enrols a WebAuthn authenticator against a subject, using the two round trips
+  of <code>POST /v1/webauthn/{subject_ref}/register</code> and
+  <code>POST /v1/webauthn/{subject_ref}/register/complete</code>.
+</p>
+
+<div class="warning">
+  <strong>Development only.</strong> This page sends the API key from the
+  browser. In a deployment the key belongs on your server: the front end calls
+  your backend, and your backend calls this service. Do not paste a production
+  key here, and do not copy this fetch pattern into an application.
+</div>
+
+<form id="ceremony">
+  <label for="base-url">Service base URL</label>
+  <input id="base-url" name="base-url" value="http://127.0.0.1:8080" autocomplete="off">
+
+  <label for="api-key">API key</label>
+  <input id="api-key" name="api-key" type="password" autocomplete="off"
+         placeholder="npt_REPLACE_WITH_YOUR_SELECTOR.REPLACE_WITH_YOUR_VERIFIER">
+
+  <label for="subject-ref">Subject reference</label>
+  <input id="subject-ref" name="subject-ref" value="example-user-0001" autocomplete="off">
+
+  <label for="label">Authenticator label (optional)</label>
+  <input id="label" name="label" value="Demo key" autocomplete="off">
+
+  <button type="submit" id="start">Register an authenticator</button>
+</form>
+
+<h2>Log</h2>
+<pre id="log">Waiting.</pre>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------------------
+// Base64url conversions. This is where integrations get it wrong, so both
+// directions are spelled out.
+//
+// WebAuthn's JSON form uses base64url without padding (RFC 4648 section 5).
+// The browser's own atob and btoa speak standard base64 with padding
+// (section 4). The two alphabets differ in two characters, "+" and "/" against
+// "-" and "_", and in whether trailing "=" is present. The service decodes
+// strictly, so a value carrying "+", "/" or "=" is refused outright rather
+// than quietly repaired.
+// ---------------------------------------------------------------------------
+
+function base64urlToBuffer(value) {
+  if (typeof value !== "string") {
+    throw new TypeError("expected a base64url string");
+  }
+  // atob needs the standard alphabet, so translate back.
+  const standard = value.replace(/-/g, "+").replace(/_/g, "/");
+  // atob also needs the length to be a multiple of four, so re-add the padding
+  // the unpadded form dropped. An unpadded length of 1 is impossible in
+  // base64, hence no case for it.
+  const padded = standard.padEnd(standard.length + ((4 - (standard.length % 4)) % 4), "=");
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  // Return the ArrayBuffer rather than the view: navigator.credentials accepts
+  // either, but handing back the buffer keeps the call sites uniform.
+  return bytes.buffer;
+}
+
+function bufferToBase64url(buffer) {
+  const bytes = new Uint8Array(buffer);
+  // String.fromCharCode is applied in chunks because spreading a large array
+  // into a call overflows the argument limit on some engines. An attestation
+  // object from a key with a full certificate chain is easily large enough to
+  // hit it.
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  // btoa emits the standard alphabet with padding; strip and translate.
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+// ---------------------------------------------------------------------------
+// The rest of the page.
+// ---------------------------------------------------------------------------
+
+const logElement = document.getElementById("log");
+let logLines = [];
+
+function log(line) {
+  logLines.push(line);
+  logElement.textContent = logLines.join("\n");
+}
+
+function resetLog() {
+  logLines = [];
+  logElement.textContent = "";
+}
+
+async function call(baseUrl, apiKey, method, path, body) {
+  const headers = { "Accept": "application/json", "Authorization": "Bearer " + apiKey };
+  if (method === "POST") {
+    // Required on every write route even when the body is empty. Without it
+    // the service answers 415, which is what stops a form-encoded request
+    // being read as an empty JSON object.
+    headers["Content-Type"] = "application/json";
+  }
+
+  const response = await fetch(new URL(path, baseUrl), {
+    method: method,
+    headers: headers,
+    body: method === "POST" ? JSON.stringify(body || {}) : undefined,
+  });
+
+  const raw = await response.text();
+  const parsed = raw === "" ? null : JSON.parse(raw);
+
+  if (!response.ok) {
+    // An RFC 9457 problem document. title and type name a class of failure and
+    // never the specific reason, so request_id is the field to quote when
+    // asking an operator to read the audit log.
+    const problem = parsed || {};
+    const parts = [String(response.status), problem.type || "(no type)", problem.title || "(no title)"];
+    if (problem.detail) parts.push(problem.detail);
+    if (problem.request_id) parts.push("request_id=" + problem.request_id);
+    throw new Error(parts.join(": "));
+  }
+
+  return parsed;
+}
+
+async function register(baseUrl, apiKey, subjectRef, label) {
+  const encodedRef = encodeURIComponent(subjectRef);
+
+  log("Resolving the subject.");
+  const subject = await call(baseUrl, apiKey, "POST", "/v1/subjects", {
+    subject_ref: subjectRef,
+  });
+  log("  subject_id: " + subject.subject_id);
+  log("  existing credentials: " + subject.credential_count);
+
+  log("");
+  log("Round trip one: asking for creation options.");
+  const begin = await call(baseUrl, apiKey, "POST", "/v1/webauthn/" + encodedRef + "/register", {
+    label: label,
+  });
+  log("  challenge_id: " + begin.challenge_id);
+  log("  expires_at:   " + begin.expires_at);
+
+  // The service sends the WebAuthn binary members as base64url strings.
+  // navigator.credentials.create wants BufferSources for exactly three of
+  // them: the challenge, the user handle, and the id of each excluded
+  // credential. Everything else is passed through untouched.
+  const options = begin.options.publicKey;
+  const publicKey = Object.assign({}, options, {
+    challenge: base64urlToBuffer(options.challenge),
+    user: Object.assign({}, options.user, {
+      id: base64urlToBuffer(options.user.id),
+    }),
+    excludeCredentials: (options.excludeCredentials || []).map(function (descriptor) {
+      return Object.assign({}, descriptor, { id: base64urlToBuffer(descriptor.id) });
+    }),
+  });
+
+  log("");
+  log("  rp.id:              " + options.rp.id);
+  log("  excludeCredentials: " + publicKey.excludeCredentials.length);
+  log("");
+  log("The excluded list holds the subject's existing authenticators, so a key");
+  log("already enrolled cannot be enrolled twice and the browser can say why.");
+
+  log("");
+  log("Calling navigator.credentials.create(). Confirm on your authenticator.");
+  const credential = await navigator.credentials.create({ publicKey: publicKey });
+  if (credential === null) {
+    throw new Error("the browser returned no credential");
+  }
+
+  // Back the other way. Recent browsers offer credential.toJSON(), which
+  // produces this same structure with the encoding already correct; the
+  // explicit form is kept here because it is what has to happen either way and
+  // because toJSON is not available everywhere yet.
+  const attestation = credential.response;
+  const payload = {
+    id: credential.id,
+    rawId: bufferToBase64url(credential.rawId),
+    type: credential.type,
+    response: {
+      clientDataJSON: bufferToBase64url(attestation.clientDataJSON),
+      attestationObject: bufferToBase64url(attestation.attestationObject),
+    },
+    clientExtensionResults: credential.getClientExtensionResults(),
+  };
+
+  // getTransports is not implemented by every browser, and the service treats
+  // the list as advisory, so its absence is not an error.
+  if (typeof attestation.getTransports === "function") {
+    const transports = attestation.getTransports();
+    if (Array.isArray(transports) && transports.length > 0) {
+      payload.response.transports = transports;
+    }
+  }
+  if (credential.authenticatorAttachment) {
+    payload.authenticatorAttachment = credential.authenticatorAttachment;
+  }
+
+  log("");
+  log("Round trip two: forwarding the credential verbatim.");
+  log("Nothing above renames a field, drops an empty one or reshapes the");
+  log("object. The service parses it with a WebAuthn library, and a field lost");
+  log("in transit is a field the library cannot use to verify the signature.");
+
+  const completed = await call(
+    baseUrl,
+    apiKey,
+    "POST",
+    "/v1/webauthn/" + encodedRef + "/register/complete",
+    { challenge_id: begin.challenge_id, credential: payload },
+  );
+
+  log("");
+  log("Enrolled.");
+  log("  credential id:    " + completed.credential.id);
+  log("  attestation type: " + completed.credential.attestation_type);
+  log("  user_verified:    " + completed.credential.user_verified);
+  log("  backup_eligible:  " + completed.credential.backup_eligible);
+  log("  transports:       " + JSON.stringify(completed.credential.transports));
+  log("  recovery codes:   " + completed.recovery_codes_remaining);
+
+  if (completed.recovery_codes_remaining === 0) {
+    log("");
+    log("This subject holds no recovery codes. Issue a batch with");
+    log("POST /v1/recovery/{subject_ref}/issue before the user relies on this");
+    log("authenticator, or losing it locks them out. They are not issued");
+    log("automatically because they can only be shown once, and returning");
+    log("secrets in a response nobody asked for is how they get lost.");
+  }
+}
+
+document.getElementById("ceremony").addEventListener("submit", async function (event) {
+  event.preventDefault();
+
+  const button = document.getElementById("start");
+  const baseUrl = document.getElementById("base-url").value.trim();
+  const apiKey = document.getElementById("api-key").value.trim();
+  const subjectRef = document.getElementById("subject-ref").value.trim();
+  const label = document.getElementById("label").value.trim();
+
+  resetLog();
+
+  if (baseUrl === "" || apiKey === "" || subjectRef === "") {
+    log("The base URL, the API key and the subject reference are all required.");
+    return;
+  }
+  if (typeof window.PublicKeyCredential === "undefined") {
+    log("This browser does not support WebAuthn.");
+    return;
+  }
+  if (!window.isSecureContext) {
+    log("WebAuthn needs a secure context. Serve this page over HTTPS, or from");
+    log("http://localhost, which browsers treat as secure.");
+    return;
+  }
+
+  button.disabled = true;
+  try {
+    await register(baseUrl, apiKey, subjectRef, label);
+  } catch (error) {
+    log("");
+    if (error && error.name === "NotAllowedError") {
+      log("The ceremony was cancelled or timed out at the authenticator.");
+    } else if (error && error.name === "InvalidStateError") {
+      log("This authenticator is already enrolled for that subject. That is the");
+      log("excluded list doing its job.");
+    } else if (error instanceof TypeError) {
+      log("The request did not reach the service: " + error.message);
+      log("");
+      log("A cross-origin call needs this page's origin in the deployment's");
+      log("server.cors_allowed_origins. The list is never a wildcard, because");
+      log("these endpoints are credentialed and the fetch specification forbids");
+      log("combining a wildcard origin with credentials.");
+    } else {
+      log("Failed: " + (error && error.message ? error.message : String(error)));
+    }
+  } finally {
+    button.disabled = false;
+  }
+});
+</script>
+
+</body>
+</html>
