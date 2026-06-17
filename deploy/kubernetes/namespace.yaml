@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: n0passtemps
+  labels:
+    app.kubernetes.io/name: n0passtemps
+    # Pod Security Admission in enforcing mode. The deployment satisfies the
+    # restricted profile already; declaring it here makes a later manifest that
+    # drops a control fail admission instead of being accepted silently.
+    # "latest" is the literal Pod Security Admission accepts for "the policy
+    # version of the running control plane". It is not an image tag.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

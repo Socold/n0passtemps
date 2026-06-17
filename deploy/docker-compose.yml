@@ -1,0 +1,124 @@
+# Single-container deployment backed by SQLite.
+#
+# Settings come from a .env file next to this one; start from
+# deploy/.env.example. Run with:
+#   docker compose -f deploy/docker-compose.yml up -d
+#
+# Before the first start, place the keyring produced by
+# "n0passtemps-wizard kek init" in the n0passtemps-kek volume as keyring.json,
+# owned by uid 65532 and mode 0600. The server refuses a keyring readable by
+# group or other, and refuses one that resolves inside the data directory.
+
+name: n0passtemps
+
+services:
+  n0passtemps:
+    # Pinned through .env rather than a floating tag, so a restart cannot
+    # silently move the deployment to a different build.
+    image: ghcr.io/socold/n0passtemps:${N0PASSTEMPS_VERSION:?set N0PASSTEMPS_VERSION in .env}
+    container_name: n0passtemps
+
+    # Values are interpolated from the .env file in this directory rather than
+    # injected wholesale with env_file: the container then sees only the
+    # variables it needs, and unrelated operator settings stay out of
+    # /proc/self/environ.
+    environment:
+      N0PASSTEMPS_CONFIG: /etc/n0passtemps/config.toml
+      N0PASSTEMPS_DATA_DIR: /var/lib/n0passtemps
+      N0PASSTEMPS_KEK_FILE: /etc/n0passtemps/kek/keyring.json
+      N0PASSTEMPS_LISTEN_ADDR: ":8080"
+      N0PASSTEMPS_LOG_LEVEL: ${N0PASSTEMPS_LOG_LEVEL:-info}
+      N0PASSTEMPS_LOG_FORMAT: ${N0PASSTEMPS_LOG_FORMAT:-json}
+
+    # Bound to the loopback interface: the server speaks plain HTTP, and a
+    # passwordless authentication endpoint must be reached over TLS. Terminate
+    # TLS in a reverse proxy and let it forward to this port.
+    ports:
+      - "127.0.0.1:${N0PASSTEMPS_HTTP_PORT:-8080}:8080"
+
+    volumes:
+      # Database and write-ahead log. This is the only writable persistent path.
+      - n0passtemps-data:/var/lib/n0passtemps
+
+      # Separate volume on purpose. A key encryption keyring stored on the same
+      # volume as the ciphertext it protects gives no confidentiality once that
+      # volume is copied or restored from a backup, so the server rejects a
+      # keyring that resolves inside the data directory. Read-only because the
+      # server never rewrites it; rotation is an operator action.
+      - n0passtemps-kek:/etc/n0passtemps/kek:ro
+
+      # Configuration is read once at startup and never written. The file must
+      # exist before "up": Docker would otherwise create a directory at this
+      # path and the server would fail to parse it.
+      - ${N0PASSTEMPS_CONFIG_FILE:-./config.toml}:/etc/n0passtemps/config.toml:ro
+
+    # The image writes nothing outside the volumes above, so the root filesystem
+    # stays immutable: an attacker who reaches code execution cannot drop a
+    # payload on disk or tamper with the binary.
+    read_only: true
+
+    # /tmp is the one scratch path the Go runtime and the TOML parser may need.
+    # noexec and nosuid prevent it from being used to stage an executable.
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+
+    # The process binds 8080, an unprivileged port, and needs no capability at
+    # all: no raw sockets, no chown, no setuid.
+    cap_drop:
+      - ALL
+
+    security_opt:
+      # Blocks setuid binaries and file capabilities from raising privileges,
+      # which closes the usual local escalation path after a code-execution bug.
+      - no-new-privileges:true
+
+    # Matches the nonroot user baked into the distroless base and the ownership
+    # of the data directory in the image.
+    user: "65532:65532"
+
+    # File descriptors are the scarce resource for an HTTP server; the limit is
+    # high enough for the expected connection count and low enough to bound a
+    # descriptor leak.
+    ulimits:
+      nofile:
+        soft: 8192
+        hard: 8192
+
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
+          # A bounded process table keeps a fork bomb, deliberate or
+          # accidental, from taking the host down with the container.
+          pids: 512
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+    restart: unless-stopped
+
+    networks:
+      - n0passtemps
+
+    # No container-side healthcheck is declared. The image is distroless: it has
+    # no shell, no curl and no wget, so every probe command would fail and mark
+    # the container permanently unhealthy. Liveness is observed from outside,
+    # against GET /v1/health, by the reverse proxy or the monitoring system.
+    # If the image is ever rebuilt on a base that ships an HTTP client, this is
+    # the probe to enable:
+    #
+    # healthcheck:
+    #   test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:8080/v1/health"]
+    #   interval: 30s
+    #   timeout: 3s
+    #   retries: 3
+    #   start_period: 10s
+
+networks:
+  n0passtemps:
+    driver: bridge
+
+volumes:
+  n0passtemps-data:
+  n0passtemps-kek:

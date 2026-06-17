@@ -1,0 +1,51 @@
+# Non-secret configuration, mounted read-only at /etc/n0passtemps/config.toml.
+#
+# Anything holding a credential belongs in secret.example.yaml, not here:
+# a ConfigMap is readable by every account with get on the namespace.
+# Environment variables set in deployment.yaml take precedence over these keys.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: n0passtemps-config
+  namespace: n0passtemps
+  labels:
+    app.kubernetes.io/name: n0passtemps
+data:
+  config.toml: |
+    [server]
+    listen_addr = ":8080"
+    # The origin browsers will see. WebAuthn ties every credential to it, so a
+    # change invalidates existing authenticators: set it once, before the first
+    # registration.
+    public_url = "https://auth.example.internal"
+
+    [webauthn]
+    # The relying party identifier must be the registrable domain of
+    # server.public_url, or a parent of it. A mismatch makes every assertion
+    # fail with no useful error on the browser side.
+    rp_id = "auth.example.internal"
+    rp_display_name = "n0passtemps"
+
+    [database]
+    # "sqlite" or "postgres". With "postgres" the connection string comes from
+    # N0PASSTEMPS_DATABASE_URL, which is injected from the secret so it never
+    # appears in a ConfigMap.
+    driver = "postgres"
+
+    [kek]
+    # Path only. The key material itself is a mounted secret, and the path is
+    # outside data_dir because the server rejects a keyring that resolves inside
+    # a configured data directory.
+    file = "/etc/n0passtemps/kek/keyring.json"
+
+    [logging]
+    level = "info"
+    # Structured output so the cluster log pipeline can index fields rather than
+    # parse free text.
+    format = "json"
+
+    [features]
+    # Lite disables the governance surface (RBAC, approval workflow) for a
+    # single-tenant install. Leave it false for the full deployment.
+    lite_mode = false
+    admin_rbac_enabled = true

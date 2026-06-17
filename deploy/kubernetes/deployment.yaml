@@ -1,0 +1,175 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: n0passtemps
+  namespace: n0passtemps
+  labels:
+    app.kubernetes.io/name: n0passtemps
+    app.kubernetes.io/component: server
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: n0passtemps
+      app.kubernetes.io/component: server
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: n0passtemps
+        app.kubernetes.io/component: server
+    spec:
+      # The server never calls the Kubernetes API. Leaving the token out means a
+      # compromised pod holds no cluster credential to replay.
+      automountServiceAccountToken: false
+
+      securityContext:
+        # Refuses to start if the image resolves to uid 0, which catches a
+        # rebuild that accidentally drops the nonroot base.
+        runAsNonRoot: true
+        # The uid baked into gcr.io/distroless/static-debian12:nonroot.
+        runAsUser: 65532
+        runAsGroup: 65532
+        # Applied to the secret and emptyDir mounts so the process can read the
+        # keyring without any file being world readable.
+        fsGroup: 65532
+        seccompProfile:
+          # Blocks the system calls no ordinary workload needs, which removes a
+          # large part of the kernel attack surface reachable from the pod.
+          type: RuntimeDefault
+
+      containers:
+        - name: n0passtemps
+          # Pinned to a release tag. A floating tag would let an unrelated
+          # rollout restart pull a different build.
+          image: ghcr.io/socold/n0passtemps:1.0.0
+          imagePullPolicy: IfNotPresent
+
+          securityContext:
+            # No setuid binary or file capability in the image can raise
+            # privileges for this container or its descendants.
+            allowPrivilegeEscalation: false
+            # The image writes only to the volumes declared below, so the rest
+            # of the filesystem is immutable and a payload cannot be dropped.
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              # Port 8080 is unprivileged and the process never changes identity
+              # or ownership, so it needs no capability.
+              drop:
+                - ALL
+
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          env:
+            - name: N0PASSTEMPS_CONFIG
+              value: /etc/n0passtemps/config.toml
+            - name: N0PASSTEMPS_DATA_DIR
+              value: /var/lib/n0passtemps
+            # Outside N0PASSTEMPS_DATA_DIR on purpose: the server refuses a
+            # keyring that resolves inside a configured data directory, because
+            # a key kept beside the ciphertext it protects is copied with it.
+            - name: N0PASSTEMPS_KEK_FILE
+              value: /etc/n0passtemps/kek/keyring.json
+            - name: N0PASSTEMPS_LISTEN_ADDR
+              value: ":8080"
+            # Read from the secret rather than the ConfigMap: the URL carries
+            # the database password.
+            - name: N0PASSTEMPS_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: n0passtemps-secrets
+                  key: database-url
+
+          # Migrations run at startup and the first request must not arrive
+          # before they finish, so readiness is gated on the startup probe.
+          startupProbe:
+            httpGet:
+              path: /v1/health
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          # Deliberately slower to fail than the readiness probe: a database
+          # outage should take the pod out of the Service, not restart it in a
+          # loop while the database is still recovering.
+          livenessProbe:
+            httpGet:
+              path: /v1/health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 6
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              # No CPU limit: throttling an authentication server adds latency to
+              # every WebAuthn assertion under load. The request reserves the
+              # floor and the namespace quota caps the ceiling.
+              memory: 512Mi
+
+          volumeMounts:
+            - name: config
+              mountPath: /etc/n0passtemps/config.toml
+              subPath: config.toml
+              readOnly: true
+
+            # Mounted on its own path, not under the data volume, for the reason
+            # given in the env block above.
+            - name: kek
+              mountPath: /etc/n0passtemps/kek
+              readOnly: true
+
+            - name: data
+              mountPath: /var/lib/n0passtemps
+
+            # The root filesystem is read-only, so the scratch path the Go
+            # runtime and the TOML parser may use has to be provided.
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: config
+          configMap:
+            name: n0passtemps-config
+
+        - name: kek
+          secret:
+            secretName: n0passtemps-secrets
+            # Read-only for the owning uid and nothing else. The server refuses
+            # a keyring whose mode grants any group or other permission.
+            defaultMode: 0400
+            items:
+              - key: keyring.json
+                path: keyring.json
+
+        # An emptyDir is correct for the PostgreSQL store, where this path holds
+        # no durable state. With database.driver = "sqlite" it must be replaced
+        # by a PersistentVolumeClaim and replicas set to 1: SQLite does not
+        # support concurrent writers across pods.
+        - name: data
+          emptyDir: {}
+
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Mi

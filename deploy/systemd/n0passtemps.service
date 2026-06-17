@@ -1,0 +1,139 @@
+[Unit]
+Description=n0passtemps passwordless authentication server
+Documentation=https://github.com/Socold/n0passtemps/tree/main/docs
+# network-online rather than network: the listener binds a configured address
+# and migrations may reach a remote PostgreSQL, both of which need routes up.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+# The server does not implement the sd_notify protocol, so Type=notify would
+# leave systemd waiting for a readiness message that never arrives and the unit
+# would time out. Readiness is observed on GET /v1/health instead.
+Type=simple
+
+# A dedicated system account rather than DynamicUser: the key encryption keyring
+# lives in /etc with a fixed owner and mode 0600, which a per-boot dynamic uid
+# could not read. Create it once with:
+#   useradd --system --no-create-home --shell /usr/sbin/nologin n0passtemps
+User=n0passtemps
+Group=n0passtemps
+
+ExecStart=/usr/local/bin/n0passtemps-server
+Restart=on-failure
+RestartSec=5s
+
+# Configuration and secrets are read from the environment file, which must be
+# owned by root and mode 0600: it may hold a database URL with a password.
+EnvironmentFile=/etc/n0passtemps/n0passtemps.env
+
+# systemd creates and chowns /var/lib/n0passtemps to the service account on
+# start, and leaves it in place across restarts and package upgrades.
+StateDirectory=n0passtemps
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/n0passtemps
+
+# Discards setuid binaries and file capabilities as an escalation route for the
+# service and everything it spawns.
+NoNewPrivileges=yes
+
+# The whole filesystem becomes read-only apart from the paths opened below, so a
+# code-execution bug cannot modify the binary, a unit file or a cron entry.
+ProtectSystem=strict
+# The database is the only state the process writes. It is already writable
+# through StateDirectory; naming it explicitly documents the full writable set.
+ReadWritePaths=/var/lib/n0passtemps
+
+# No user data is ever legitimately read by an authentication server, and
+# /home, /root and /run/user are a common location for credentials to steal.
+ProtectHome=yes
+
+# A private /tmp and /var/tmp namespace, so a temporary file cannot be
+# predicted, raced or read by another service on the host.
+PrivateTmp=yes
+
+# Only the pseudo-devices are visible. The process needs no block device, no
+# raw disk and no /dev/mem, which is where a keyring could be recovered from.
+PrivateDevices=yes
+
+# /proc/sys, /sys and the kernel command line become read-only, blocking the
+# usual route from a container or service compromise to a host-wide change.
+ProtectKernelTunables=yes
+
+# Module loading is how a compromise becomes persistent and invisible.
+ProtectKernelModules=yes
+
+# The kernel ring buffer leaks addresses and other host detail useful for a
+# follow-up exploit.
+ProtectKernelLogs=yes
+
+# The cgroup hierarchy is read-only, so resource limits set here cannot be
+# lifted from inside the service.
+ProtectControlGroups=yes
+
+# A service that verifies TOTP codes and certificate expiry must not be able to
+# move the system clock: that alone would let replayed codes pass.
+ProtectClock=yes
+
+# Other processes are invisible in /proc, which removes the easy path to reading
+# another service's command line or environment block.
+ProtectProc=invisible
+ProcSubset=pid
+
+# The host name cannot be changed from inside the service.
+ProtectHostname=yes
+
+# Only IP and local sockets. Denying AF_NETLINK, AF_PACKET and the rest removes
+# raw packet capture and kernel configuration interfaces.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Namespace creation is the first step of most sandbox escapes; the service has
+# no legitimate use for it.
+RestrictNamespaces=yes
+
+# Realtime scheduling can be used to starve the rest of the host.
+RestrictRealtime=yes
+
+# The service creates no files that should ever carry the setuid or setgid bit.
+RestrictSUIDSGID=yes
+
+# Prevents switching the execution domain, which is otherwise a way to reach
+# older and less audited system call ABIs.
+LockPersonality=yes
+
+# The Go runtime never needs writable executable memory, so denying it closes
+# the standard route from a memory-safety bug to executing injected code.
+MemoryDenyWriteExecute=yes
+
+# Rejects system calls made through a non-native ABI, which would otherwise
+# bypass the filter below.
+SystemCallArchitectures=native
+
+# A network service needs the ordinary service call set and nothing more. The
+# second line subtracts the privileged and resource-control groups, which are
+# included in @system-service but have no use here.
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+# The process binds 8080, an unprivileged port, and never changes ownership or
+# identity, so it needs no capability at all.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Files the service creates, the SQLite database among them, are readable only
+# by the service account.
+UMask=0077
+
+# Removes any System V IPC objects left behind on stop, so a restart cannot
+# inherit stale shared memory.
+RemoveIPC=yes
+
+# File descriptors are the scarce resource for an HTTP server. The ceiling is
+# high enough for the expected connection count and low enough to bound a leak.
+LimitNOFILE=8192
+
+# Bounds the process table so a fork loop stays inside the unit.
+TasksMax=512
+
+[Install]
+WantedBy=multi-user.target

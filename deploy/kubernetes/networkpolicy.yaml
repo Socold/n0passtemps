@@ -1,0 +1,96 @@
+# Three policies, applied in order of intent: deny everything in the namespace,
+# then open the two paths the server actually uses. Kubernetes unions policies,
+# so the deny rule stays effective for anything the others do not name.
+#
+# Requires a CNI that implements NetworkPolicy. Under a CNI that ignores it
+# (plain kubenet, for instance) these objects are accepted and do nothing.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: n0passtemps-default-deny
+  namespace: n0passtemps
+  labels:
+    app.kubernetes.io/name: n0passtemps
+spec:
+  # Empty selector: every pod in the namespace, including any added later.
+  podSelector: {}
+  # Naming both types with no rules below denies all ingress and all egress.
+  # Egress is included because a compromised authentication server reaching the
+  # internet is how credentials leave the cluster.
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: n0passtemps-allow-http-ingress
+  namespace: n0passtemps
+  labels:
+    app.kubernetes.io/name: n0passtemps
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: n0passtemps
+      app.kubernetes.io/component: server
+  policyTypes:
+    - Ingress
+  ingress:
+    # Port 8080 only, so the probes and the API are reachable and nothing else
+    # is. Narrow this "from" to the namespace running the ingress controller:
+    # namespaceSelector: {} currently admits any pod in the cluster.
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: n0passtemps-allow-egress
+  namespace: n0passtemps
+  labels:
+    app.kubernetes.io/name: n0passtemps
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: n0passtemps
+      app.kubernetes.io/component: server
+  policyTypes:
+    - Egress
+  egress:
+    # Name resolution. Without this the default-deny policy above breaks the
+    # database hostname lookup, and the failure looks like a database outage.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+    # PostgreSQL. This opens an in-cluster instance labelled as below; adjust
+    # the selector to match the actual database deployment.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgresql
+      ports:
+        - protocol: TCP
+          port: 5432
+
+    # For a database outside the cluster, replace the rule above with the
+    # address of that host, keeping the range as small as the provider allows:
+    #
+    # - to:
+    #     - ipBlock:
+    #         cidr: 10.0.0.0/32
+    #   ports:
+    #     - protocol: TCP
+    #       port: 5432

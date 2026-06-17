@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: n0passtemps
+  namespace: n0passtemps
+  labels:
+    app.kubernetes.io/name: n0passtemps
+    app.kubernetes.io/component: server
+spec:
+  # ClusterIP only. The server speaks plain HTTP, so it must sit behind an
+  # Ingress or gateway that terminates TLS; a LoadBalancer here would publish
+  # WebAuthn and admin endpoints in clear text.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: n0passtemps
+    app.kubernetes.io/component: server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP

@@ -1,0 +1,66 @@
+# The build context is the repository root, and the Dockerfile builds only
+# ./cmd/n0passtemps-server and ./cmd/n0passtemps-wizard. Everything the two
+# binaries need is go.mod, go.sum and the Go packages, so the rest is excluded:
+# a smaller context uploads faster and, more importantly, cannot leak a local
+# file into an image layer.
+
+# Version metadata is passed in as build arguments, so the history is not
+# needed. It is also the largest thing in the context and would carry every
+# file ever committed into the build.
+.git
+.gitignore
+.gitattributes
+
+# Build output from a host build. Copying it in would shadow nothing but would
+# make the context large and the layer cache useless.
+bin/
+dist/
+
+# Test and coverage output
+coverage.out
+coverage.html
+*.test
+*.prof
+
+# Local secrets and state. None of these are ever tracked, but a build runs
+# against the working tree, so the exclusion has to be here too: an image layer
+# is readable by anyone who can pull the image. The patterns use **/ because an
+# unanchored .dockerignore pattern matches the context root only.
+**/.env
+**/.env.*
+!**/.env.example
+**/keyring.json
+**/kek.json
+**/kek.txt
+**/*.kek
+**/*.keyring
+**/config.toml
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.sqlite
+**/*.sqlite3
+**/data/
+
+# Repository material with no role in the build. The .html pattern is anchored
+# to the context root on purpose: the admin interface templates under
+# internal/admin/ui are .html files compiled into the binary through embed.FS
+# and must stay in the context.
+/*.html
+.github/
+docs/
+examples/
+deploy/
+Makefile
+README.md
+CONTRIBUTING.md
+.golangci.yml
+.gitleaks.toml
+.dockerignore
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store

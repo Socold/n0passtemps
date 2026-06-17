@@ -1,0 +1,202 @@
+# Two-container deployment backed by PostgreSQL.
+#
+# Settings come from a .env file next to this one; start from
+# deploy/.env.example. Run with:
+#   docker compose -f deploy/docker-compose.postgres.yml up -d
+#
+# Before the first start, place the keyring produced by
+# "n0passtemps-wizard kek init" in the n0passtemps-kek volume as keyring.json,
+# owned by uid 65532 and mode 0600.
+
+name: n0passtemps
+
+services:
+  n0passtemps:
+    # Pinned through .env rather than a floating tag, so a restart cannot
+    # silently move the deployment to a different build.
+    image: ghcr.io/socold/n0passtemps:${N0PASSTEMPS_VERSION:?set N0PASSTEMPS_VERSION in .env}
+    container_name: n0passtemps
+
+    # Interpolated from .env instead of injected with env_file, so the
+    # application container receives the database URL and nothing else: the
+    # PostgreSQL superuser variables stay on the database container.
+    environment:
+      N0PASSTEMPS_CONFIG: /etc/n0passtemps/config.toml
+      N0PASSTEMPS_DATA_DIR: /var/lib/n0passtemps
+      N0PASSTEMPS_KEK_FILE: /etc/n0passtemps/kek/keyring.json
+      N0PASSTEMPS_LISTEN_ADDR: ":8080"
+      N0PASSTEMPS_LOG_LEVEL: ${N0PASSTEMPS_LOG_LEVEL:-info}
+      N0PASSTEMPS_LOG_FORMAT: ${N0PASSTEMPS_LOG_FORMAT:-json}
+      # Credentials are never written literally here. sslmode=disable is
+      # acceptable only because this connection never leaves the internal
+      # bridge network below, which is not published to the host; point this at
+      # a managed instance and sslmode must become verify-full.
+      N0PASSTEMPS_DATABASE_URL: >-
+        postgres://${POSTGRES_USER:?set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:?set POSTGRES_DB in .env}?sslmode=disable
+
+    # Bound to the loopback interface: the server speaks plain HTTP, and a
+    # passwordless authentication endpoint must be reached over TLS. Terminate
+    # TLS in a reverse proxy and let it forward to this port.
+    ports:
+      - "127.0.0.1:${N0PASSTEMPS_HTTP_PORT:-8080}:8080"
+
+    volumes:
+      # Only local state remains here with PostgreSQL as the store, but the
+      # directory must exist and be writable for cached artefacts.
+      - n0passtemps-data:/var/lib/n0passtemps
+
+      # Separate volume on purpose. A key encryption keyring stored on the same
+      # volume as the ciphertext it protects gives no confidentiality once that
+      # volume is copied or restored from a backup, so the server rejects a
+      # keyring that resolves inside the data directory. Read-only because the
+      # server never rewrites it; rotation is an operator action.
+      - n0passtemps-kek:/etc/n0passtemps/kek:ro
+
+      # Configuration is read once at startup and never written. The file must
+      # exist before "up": Docker would otherwise create a directory at this
+      # path and the server would fail to parse it.
+      - ${N0PASSTEMPS_CONFIG_FILE:-./config.toml}:/etc/n0passtemps/config.toml:ro
+
+    # The image writes nothing outside the volumes above, so the root filesystem
+    # stays immutable: an attacker who reaches code execution cannot drop a
+    # payload on disk or tamper with the binary.
+    read_only: true
+
+    # /tmp is the one scratch path the Go runtime and the TOML parser may need.
+    # noexec and nosuid prevent it from being used to stage an executable.
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+
+    # The process binds 8080, an unprivileged port, and needs no capability at
+    # all: no raw sockets, no chown, no setuid.
+    cap_drop:
+      - ALL
+
+    security_opt:
+      # Blocks setuid binaries and file capabilities from raising privileges,
+      # which closes the usual local escalation path after a code-execution bug.
+      - no-new-privileges:true
+
+    # Matches the nonroot user baked into the distroless base and the ownership
+    # of the data directory in the image.
+    user: "65532:65532"
+
+    # File descriptors are the scarce resource for an HTTP server; the limit is
+    # high enough for the expected connection count and low enough to bound a
+    # descriptor leak.
+    ulimits:
+      nofile:
+        soft: 8192
+        hard: 8192
+
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
+          # A bounded process table keeps a fork bomb, deliberate or
+          # accidental, from taking the host down with the container.
+          pids: 512
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+    # Migrations run at startup and fail fast against an unreachable database,
+    # so the server is not started until PostgreSQL accepts connections.
+    depends_on:
+      db:
+        condition: service_healthy
+
+    restart: unless-stopped
+
+    networks:
+      - n0passtemps
+
+    # No container-side healthcheck is declared. The image is distroless: it has
+    # no shell, no curl and no wget, so every probe command would fail and mark
+    # the container permanently unhealthy. Liveness is observed from outside,
+    # against GET /v1/health, by the reverse proxy or the monitoring system.
+
+  db:
+    # Pinned to a minor release: a major upgrade of PostgreSQL needs a data
+    # directory migration and must never happen on a restart.
+    image: postgres:16-alpine
+    container_name: n0passtemps-db
+
+    # No literal credentials. The required-variable syntax fails the command
+    # rather than starting a database with a default password.
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+      # scram-sha-256 for host connections, so the password is never sent in a
+      # form replayable from a captured session.
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+
+    # Deliberately no "ports:" entry. The database is reachable only from the
+    # application container over the internal network; publishing 5432 would
+    # expose the credential store to anything that can reach the host.
+
+    volumes:
+      - n0passtemps-db:/var/lib/postgresql/data
+
+    # pg_isready reports the server accepting connections for the target role
+    # and database, which is what depends_on above needs to know. A TCP check
+    # would pass during initdb, while the database is still unusable.
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\" -h 127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+    # The entrypoint needs to write the data directory and the socket directory,
+    # so the root filesystem is not read-only here; the writable surface is
+    # narrowed to those two paths instead.
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+      - /var/run/postgresql:rw,nosuid,nodev,size=8m
+
+    # The official entrypoint drops from root to the postgres user itself, so it
+    # keeps setuid and chown only for that step.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+
+    security_opt:
+      - no-new-privileges:true
+
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+          # A bounded process table keeps a fork bomb, deliberate or
+          # accidental, from taking the host down with the container.
+          pids: 512
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+    restart: unless-stopped
+
+    networks:
+      - n0passtemps
+
+networks:
+  n0passtemps:
+    driver: bridge
+    # Left routable rather than internal: an operator who configures an SMTP or
+    # webhook alert sink needs egress. Restricting it belongs on the host
+    # firewall, where the allowed destinations are known.
+
+volumes:
+  n0passtemps-data:
+  n0passtemps-kek:
+  n0passtemps-db:
