@@ -1,0 +1,123 @@
+name: Bug report
+description: Report incorrect behaviour in the server, the wizard or the admin interface
+title: "[bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The two required fields below, the health output and the log excerpt,
+        are what makes a report answerable without a round trip. Most issues
+        are diagnosed from those two alone.
+
+        Do not paste a keyring, a database URL with its password, an admin
+        bearer token or a WebAuthn credential identifier. Replace each with a
+        placeholder.
+
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: Before reporting
+      options:
+        - label: I have read docs/TROUBLESHOOT.md
+          required: true
+        - label: I have searched the existing issues, open and closed
+          required: true
+
+  - type: textarea
+    id: health
+    attributes:
+      label: Output of GET /v1/health
+      description: |
+        curl -s http://127.0.0.1:8080/v1/health
+
+        The response reports the database, the keyring and the certificate
+        state separately, which usually identifies the failing component
+        directly.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log excerpt
+      description: |
+        The lines around the failure. Under Docker: docker compose logs
+        n0passtemps. Under systemd: journalctl -u n0passtemps -n 200.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps, starting from a clean install where possible.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The version field of the health response, or the image tag.
+      placeholder: "1.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      options:
+        - Docker Compose, SQLite
+        - Docker Compose, PostgreSQL
+        - Binary on a host with systemd
+        - Kubernetes
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: store
+    attributes:
+      label: Storage engine
+      description: |
+        Asked separately because a number of defects reproduce on one engine
+        only.
+      options:
+        - SQLite
+        - PostgreSQL
+    validations:
+      required: true
+
+  - type: input
+    id: authenticator
+    attributes:
+      label: Authenticator or client
+      description: |
+        For a WebAuthn problem: the security key or platform authenticator, and
+        the browser with its version. Leave blank if unrelated.
+      placeholder: "YubiKey 5 NFC, Firefox 130 on Fedora 40"
+    validations:
+      required: false

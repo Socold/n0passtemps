@@ -1,0 +1,139 @@
+# Correctness gate. Security scanning lives in security.yml, releases in
+# release.yml, so a red result here always points at the code under review.
+#
+# Every action is pinned to a commit SHA. A tag is a moving reference the
+# upstream owner can repoint, which is the whole shape of the tj-actions
+# compromise; the trailing comment records which release the SHA is.
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+# The workflow reads the repository and writes nothing. Coverage upload is the
+# only outbound step and it authenticates with its own token.
+permissions:
+  contents: read
+
+# A new push to the same branch makes the previous run's result irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Floor declared by the go directive in go.mod. Building below it fails
+  # immediately, so it is also the lowest version worth testing.
+  GO_VERSION_MIN: "1.27.1"
+
+jobs:
+  build-test:
+    name: build and unit test (go ${{ matrix.go }})
+    runs-on: ubuntu-24.04
+    strategy:
+      # One failing toolchain should not hide the result of the other.
+      fail-fast: false
+      matrix:
+        # The floor from go.mod, and the newest release, so a toolchain
+        # regression is caught here rather than by a contributor.
+        go:
+          - "1.27.1"
+          - "stable"
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Go ${{ matrix.go }}
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version: ${{ matrix.go }}
+          # Keys the module and build cache on go.sum, so a dependency change
+          # invalidates it and an unrelated commit does not.
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Check formatting
+        run: make fmt-check
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build every package
+        run: go build ./...
+
+      - name: Unit tests with the race detector and coverage
+        run: |
+          go test -trimpath -race -covermode=atomic \
+            -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out | tail -n 1
+        env:
+          CGO_ENABLED: "1" # the race detector needs cgo; production builds set 0
+
+      - name: Upload the coverage profile as an artifact
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: coverage-go${{ matrix.go }}
+          path: coverage.out
+          retention-days: 7
+
+      - name: Report coverage
+        # Uploaded once. Sending the same lines from every matrix entry makes
+        # the reported total depend on upload order.
+        if: matrix.go == '1.27.1'
+        uses: codecov/codecov-action@e28ff129e5465c2c0dcc6f003fc735cb6ae0c673 # v4.5.0
+        with:
+          files: coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}
+          # A coverage service outage is not a reason to block a merge.
+          fail_ci_if_error: false
+
+  integration-postgres:
+    name: integration tests against postgresql
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        # Same minor as deploy/docker-compose.postgres.yml, so a behaviour
+        # difference between CI and a real deployment is not a version
+        # difference.
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: n0passtemps
+          POSTGRES_PASSWORD: n0passtemps
+          POSTGRES_DB: n0passtemps_test
+        ports:
+          - 5432:5432
+        # Without this the first test connects during initdb and fails on a
+        # database that exists but does not yet accept the role.
+        options: >-
+          --health-cmd "pg_isready -U n0passtemps -d n0passtemps_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Go
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version: ${{ env.GO_VERSION_MIN }}
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Run the tagged integration tests
+        # The URL matches the TEST_POSTGRES_URL default in the Makefile, so the
+        # same command reproduces a failure on a developer machine.
+        run: make test-integration
+
+  migrate-parity:
+    name: migration parity between sqlite and postgresql
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # No Go toolchain: the check reads the .sql files directly, so it also
+      # catches a divergence introduced before the store code compiles.
+      - name: Compare the declared tables and indexes
+        run: make migrate-check

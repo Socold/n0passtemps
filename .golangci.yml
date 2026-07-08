@@ -1,0 +1,150 @@
+# Targets golangci-lint v2. The schema changed between v1 and v2, so a v1
+# binary rejects this file; the pinned version is in the Makefile.
+version: "2"
+
+run:
+  # Long enough for a cold run on a runner without a warm build cache.
+  timeout: 5m
+  # Test files are linted too. Most of the crypto and store invariants are
+  # asserted there, and an unchecked error in a test hides a passing assertion.
+  tests: true
+
+linters:
+  # Nothing implicit: the set below is the set that runs, so adding a linter is
+  # a visible decision and a golangci-lint upgrade cannot quietly enable one.
+  default: none
+  enable:
+    # An ignored error in this project means an unverified assertion, a
+    # keyring left unzeroized or a transaction left open.
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    # Security patterns: weak randomness, hardcoded credentials, unhandled
+    # file permissions. The keyring mode check in internal/crypto/kek is the
+    # kind of rule this backs up.
+    - gosec
+    - revive
+    - ineffassign
+    - unconvert
+    - misspell
+    # An unclosed HTTP response body leaks a connection from the pool, which
+    # shows up as a slow admin interface long after the offending call.
+    - bodyclose
+    # Errors are compared with errors.Is and wrapped with %w, not matched on
+    # their message text.
+    - errorlint
+    - gocritic
+    # Returning nil after checking a non-nil error swallows a database or
+    # crypto failure and reports success.
+    - nilerr
+    # Rows and statements not closed hold a connection for the lifetime of the
+    # process; rows.Err() not checked turns a truncated result set into a
+    # silently short answer.
+    - sqlclosecheck
+    - rowserrcheck
+    # Complexity budget, see the settings below.
+    - gocyclo
+    - lll
+
+  settings:
+    errcheck:
+      # A discarded error from a type assertion is as much a bug as a
+      # discarded return value, and "_ = f()" has to be a deliberate,
+      # commented choice rather than a shortcut.
+      check-type-assertions: true
+      check-blank: true
+
+    govet:
+      enable:
+        # A shadowed err is the standard way a handled error becomes an
+        # unhandled one.
+        - shadow
+
+    gocyclo:
+      # Budget: 15 branches per function. The WebAuthn assertion path and the
+      # config loader sit near it; anything above is a sign the function is
+      # doing two jobs and should be split rather than annotated.
+      min-complexity: 15
+
+    lll:
+      # Budget: 120 columns. Wide enough for a struct tag, a wrapped error with
+      # context and a table-driven test case on one line; narrow enough to read
+      # two files side by side and to review a diff without horizontal
+      # scrolling. gofmt does not wrap lines, so this is the only thing that
+      # keeps them bounded.
+      line-length: 120
+      tab-width: 4
+
+    misspell:
+      locale: US
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+      disabled-checks:
+        # Fires on the guard-clause style used throughout the store and handler
+        # code, where the early return is the point.
+        - ifElseChain
+
+    revive:
+      rules:
+        - name: exported
+          arguments:
+            - checkPrivateReceivers
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: indent-error-flow
+        - name: range-val-address
+        - name: unreachable-code
+        - name: unused-parameter
+        - name: var-naming
+
+  exclusions:
+    # Generated files carry the upstream generator's style, which is not the
+    # project's to fix.
+    generated: lax
+    rules:
+      # Tests deliberately use weak keys, fixed nonces and hardcoded sample
+      # secrets to pin known-answer results, and table-driven cases run long.
+      # Correctness rules stay on; style and security rules that only make
+      # sense for production code do not.
+      - path: _test\.go
+        linters:
+          - gosec
+          - lll
+          - gocyclo
+          - bodyclose
+
+      # The wizard writes config.toml, docker-compose.yml and .env with modes
+      # the operator then tightens, and prints to stdout by design. gosec reads
+      # both as findings.
+      - path: ^cmd/n0passtemps-wizard/
+        linters:
+          - gosec
+        text: "G(302|304|306)"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+    goimports:
+      local-prefixes:
+        - github.com/Socold/n0passtemps
+
+issues:
+  # No cap. A truncated report makes the second run look like an improvement
+  # when it is the same code.
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  # Only findings introduced by the change under review would be reported if
+  # this were true, which lets existing problems stay indefinitely.
+  new: false

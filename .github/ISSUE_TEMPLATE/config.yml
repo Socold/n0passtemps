@@ -1,0 +1,19 @@
+# A blank issue arrives without the health output and the log excerpt the bug
+# form requires, which is exactly the information a report cannot be answered
+# without. Both forms stay available; the empty text box does not.
+blank_issues_enabled: false
+
+contact_links:
+  - name: Report a vulnerability
+    url: https://github.com/Socold/n0passtemps/security/policy
+    about: >-
+      Do not open a public issue for a security problem. A public report on an
+      authentication server gives every deployment that has not upgraded yet a
+      working description of the weakness. Use the private reporting channel
+      described in the security policy.
+
+  - name: Troubleshooting guide
+    url: https://github.com/Socold/n0passtemps/blob/main/docs/TROUBLESHOOT.md
+    about: >-
+      Startup failures, keyring and permission errors, database and migration
+      problems, and what each health status means.

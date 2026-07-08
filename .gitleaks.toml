@@ -1,0 +1,46 @@
+title = "n0passtemps secret scanning"
+
+# The upstream rule set is the baseline. Rules are added to it rather than
+# replacing it, so a new detector shipped by gitleaks starts applying on the
+# next version bump without a change here.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fixtures, examples and documented placeholders"
+
+# Keeping this list short is deliberate. Every path below is a place where a
+# high-entropy string is expected, and every path excluded here is a place a
+# real secret could be committed unnoticed.
+paths = [
+  # Test fixtures hold generated keys and sealed blobs by construction. They
+  # are produced by the tests themselves and protect nothing.
+  '''(^|/)test/.*''',
+  '''.*_test\.go$''',
+  '''(^|/)testdata/.*''',
+
+  # Integration examples call the API with sample tokens.
+  '''(^|/)examples/.*''',
+
+  # Files whose whole purpose is to show the shape of a credential. The real
+  # values live in .env, config.toml and the keyring, none of which are tracked.
+  '''(^|/)\.env\.example$''',
+  '''(^|/)n0passtemps\.env\.example$''',
+  '''(^|/)secret\.example\.yaml$''',
+  '''(^|/)config\.example\.toml$''',
+]
+
+# Placeholders used across the documentation and the example deployment files.
+# Anchored on the marker words so a real value sitting next to one is still
+# reported.
+regexes = [
+  '''REPLACE_[A-Z0-9_]+''',
+  '''REPLACE_WITH_BASE64_OF_32_RANDOM_BYTES''',
+  '''CHANGE_ME''',
+  '''replace-me(-[a-z0-9]+)*''',
+  '''(?i)example\.(com|org|internal)''',
+]
+
+# Commit allowlisting is intentionally absent. Excusing a specific commit hides
+# a finding that has already entered the history, where it stays reachable; the
+# answer to a committed secret is to rotate it, not to silence the scanner.

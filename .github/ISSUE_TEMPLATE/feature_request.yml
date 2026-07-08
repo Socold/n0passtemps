@@ -1,0 +1,81 @@
+name: Feature request
+description: Propose a capability the project does not have
+title: "[feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The project aims to stay small enough to deploy and operate without
+        support. A request that adds a configuration surface, a dependency or a
+        second way to do something already possible is likely to be declined,
+        so the problem statement matters more than the proposed design.
+
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: Before requesting
+      options:
+        - label: I have searched the existing issues, open and closed
+          required: true
+        - label: I have checked the documentation under docs/ for an existing way to do this
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: |
+        What cannot be done today, and what it currently costs you. Describe
+        the situation rather than the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: What the server, the wizard or the admin interface would do.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: |
+        Including working around it outside the project, and why that is not
+        enough.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - WebAuthn and FIDO2
+        - TOTP
+        - Recovery codes
+        - Admin API or admin interface
+        - Configuration and setup wizard
+        - Storage and migrations
+        - Cryptography and key management
+        - Deployment, packaging or CI
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility impact
+      description: |
+        Whether this changes the API surface, the configuration file, the
+        database schema or the behaviour of an existing credential. A change to
+        the relying party identifier or to the sealed format invalidates
+        registrations already in place.
+    validations:
+      required: false

@@ -1,0 +1,63 @@
+version: 2
+
+updates:
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Paris
+    # Enough room for the grouped pull request plus a few majors, and low
+    # enough that a quiet week does not bury the review queue.
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: deps
+    labels:
+      - dependencies
+      - go
+    groups:
+      # Patch and minor releases are reviewed together: they share one CI run
+      # and one merge decision. Restricting the group to these two update types
+      # is what leaves every major update in its own pull request, which it
+      # needs: a Go major is a new module path and an API break, so it comes
+      # with code changes that cannot ride along with a patch bump.
+      - group-name: go-patch-and-minor
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - patch
+          - minor
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Paris
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+    labels:
+      - dependencies
+      - github-actions
+    groups:
+      # Same split as above. Every action in the three workflows is pinned to a
+      # commit SHA, so these pull requests are what moves the pin and records
+      # the new release in the trailing comment.
+      - group-name: actions-patch-and-minor
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - patch
+          - minor
+
+# Nothing above groups security updates, and nothing should. Dependabot raises
+# them separately from version updates whatever the schedule says, and they
+# must stay separate: a grouped pull request is only as mergeable as its slowest
+# member, so bundling an advisory fix with an unrelated minor bump adds the
+# review time of that bump to the exposure window of the vulnerability. A
+# security pull request has to be reviewable and mergeable on its own.

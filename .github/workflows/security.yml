@@ -1,0 +1,239 @@
+# Supply-chain and code scanning. Separated from ci.yml so a newly published
+# advisory turns this workflow red without implying the pull request under
+# review broke something.
+#
+# Every action is pinned to a commit SHA, with the release recorded in the
+# trailing comment: a tag can be repointed by whoever owns the action.
+name: security
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  schedule:
+    # Weekly. Most findings here come from a new advisory rather than a new
+    # commit, so the scan has to run when nothing is being pushed.
+    - cron: "17 3 * * 1"
+
+# Read-only by default. security-events: write is granted per job, and only in
+# the jobs that actually upload a SARIF report.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.27.1"
+  GOSEC_VERSION: "v2.21.4"
+  GOVULNCHECK_VERSION: "v1.1.4"
+
+jobs:
+  gosec:
+    name: gosec static analysis
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # Required to publish the SARIF report to the code scanning dashboard.
+      security-events: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Go
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Install gosec
+        # Installed from the module proxy at a pinned version rather than run as
+        # a third-party action, which keeps one less workflow with access to the
+        # job's token.
+        run: go install github.com/securego/gosec/v2/cmd/gosec@${{ env.GOSEC_VERSION }}
+
+      - name: Run gosec
+        # -no-fail because the findings are triaged in the code scanning view;
+        # the job failing on the first medium-severity hit would make the SARIF
+        # upload below unreachable.
+        run: gosec -no-fail -exclude-generated -fmt sarif -out gosec.sarif ./...
+
+      - name: Upload the gosec findings
+        uses: github/codeql-action/upload-sarif@f079b8493333aace61c81488f8bd40919487bd9f # v3.25.7
+        with:
+          sarif_file: gosec.sarif
+          category: gosec
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Go
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@${{ env.GOVULNCHECK_VERSION }}
+
+      - name: Check the dependency tree against the Go vulnerability database
+        # Reachability-based: an advisory against a package the binary never
+        # calls is reported as informational rather than failing the job, which
+        # is what keeps this signal worth acting on.
+        run: govulncheck ./...
+
+  gitleaks:
+    name: gitleaks secret scan
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # The whole history is fetched because a secret that was committed and
+          # later removed stays recoverable from the object store, so only a
+          # complete scan answers the question. On a pull_request event the
+          # action narrows the scan to the commit range of the request; on the
+          # scheduled and push runs it walks everything.
+          fetch-depth: 0
+
+      - name: Scan for committed secrets
+        uses: gitleaks/gitleaks-action@83373cf2f8c4db6e24b41c1a9b086bb9619e9cd3 # v2.3.6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+          # The report lists the matched values, so it is not published as a
+          # downloadable artifact. The job log shows the location of each
+          # finding, which is what a reviewer needs.
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          # An organisation-owned repository additionally needs GITLEAKS_LICENSE
+          # here. A repository under a personal account does not.
+
+  codeql:
+    name: codeql analysis
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # CodeQL reads the workflow run metadata of the default branch to decide
+      # what to compare against.
+      actions: read
+      security-events: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Go
+        # Pinned here as well: letting CodeQL pick its own toolchain would build
+        # the database with a different compiler than CI uses.
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Initialise CodeQL
+        uses: github/codeql-action/init@f079b8493333aace61c81488f8bd40919487bd9f # v3.25.7
+        with:
+          languages: go
+          # security-extended adds the queries that matter for an
+          # authentication server: taint into SQL, weak crypto, path handling.
+          queries: security-extended
+
+      - name: Build for the CodeQL database
+        uses: github/codeql-action/autobuild@f079b8493333aace61c81488f8bd40919487bd9f # v3.25.7
+
+      - name: Analyse
+        uses: github/codeql-action/analyze@f079b8493333aace61c81488f8bd40919487bd9f # v3.25.7
+        with:
+          category: /language:go
+
+  trivy:
+    name: trivy filesystem and image scan
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Scan the repository filesystem
+        uses: aquasecurity/trivy-action@6c175e9c4083a92bbca2f9724c8a5e33bc2d97a5 # 0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          # vuln reads go.sum, secret catches a credential that gitleaks rules
+          # miss, config reviews the Dockerfile and the Kubernetes manifests
+          # under deploy/.
+          scanners: vuln,secret,config
+          format: sarif
+          output: trivy-fs.sarif
+          severity: MEDIUM,HIGH,CRITICAL
+          # The findings are triaged in code scanning; failing the step would
+          # skip the upload.
+          exit-code: "0"
+
+      - name: Upload the filesystem findings
+        uses: github/codeql-action/upload-sarif@f079b8493333aace61c81488f8bd40919487bd9f # v3.25.7
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+      - name: Build the image to scan
+        # Built locally and never pushed. Scanning the image the Dockerfile
+        # actually produces covers the base layer, which a filesystem scan of
+        # the source tree cannot see.
+        run: |
+          docker build \
+            --file deploy/Dockerfile \
+            --build-arg VERSION=scan \
+            --build-arg REVISION="${GITHUB_SHA}" \
+            --tag n0passtemps:scan \
+            .
+
+      - name: Scan the image
+        uses: aquasecurity/trivy-action@6c175e9c4083a92bbca2f9724c8a5e33bc2d97a5 # 0.28.0
+        with:
+          scan-type: image
+          image-ref: n0passtemps:scan
+          format: sarif
+          output: trivy-image.sarif
+          severity: MEDIUM,HIGH,CRITICAL
+          exit-code: "0"
+
+      - name: Upload the image findings
+        uses: github/codeql-action/upload-sarif@f079b8493333aace61c81488f8bd40919487bd9f # v3.25.7
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+  dependency-review:
+    name: dependency review
+    # Only meaningful on a pull request: the check compares the dependency
+    # manifest of the head against the base.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Review the dependency changes
+        uses: actions/dependency-review-action@5a2ce3f5b92ee19cbb1541a4984c76d921601d7c # v4.3.4
+        with:
+          fail-on-severity: moderate
+          # The project is MIT. A copyleft dependency would force a licence
+          # change on every consumer of the binary.
+          deny-licenses: GPL-2.0, GPL-3.0, AGPL-3.0, LGPL-2.1, LGPL-3.0
