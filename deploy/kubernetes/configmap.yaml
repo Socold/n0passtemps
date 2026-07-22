@@ -12,40 +12,77 @@ metadata:
     app.kubernetes.io/name: n0passtemps
 data:
   config.toml: |
+    # Keys and sections here must match internal/config exactly: the loader
+    # refuses unknown fields, so a misspelling stops the pod starting rather
+    # than being quietly ignored. Validate a change before applying it:
+    #
+    #   n0passtemps-wizard check -config config.toml
+
+    [tenant]
+    id = "default"
+    name = "n0passtemps"
+
     [server]
-    listen_addr = ":8080"
-    # The origin browsers will see. WebAuthn ties every credential to it, so a
-    # change invalidates existing authenticators: set it once, before the first
-    # registration.
-    public_url = "https://auth.example.internal"
+    # Every interface inside the pod network namespace. Reachability is
+    # constrained by the Service and the NetworkPolicy, not by this address,
+    # which the binary cannot see, so allow_plaintext acknowledges that TLS is
+    # terminated in front rather than here.
+    addr = "0.0.0.0:8080"
+    allow_plaintext = true
+
+    # Set these instead when an ingress controller terminates TLS and forwards
+    # the client address. trust_proxy without trusted_proxy_cidrs is refused,
+    # because honouring a forwarded address from any source lets a caller
+    # choose the address rate limiting and audit entries are keyed on.
+    # trust_proxy = true
+    # trusted_proxy_cidrs = ["10.0.0.0/8"]
 
     [webauthn]
-    # The relying party identifier must be the registrable domain of
-    # server.public_url, or a parent of it. A mismatch makes every assertion
-    # fail with no useful error on the browser side.
+    # A bare registrable domain. Not a URL and not a host with a port.
+    #
+    # Every origin below must be covered by it: equal to it, or a subdomain.
+    # A mismatch fails in the browser with nothing useful in the server log,
+    # which is why the configuration validator checks the relationship at
+    # startup instead.
     rp_id = "auth.example.internal"
     rp_display_name = "n0passtemps"
+    origins = ["https://auth.example.internal"]
 
     [database]
-    # "sqlite" or "postgres". With "postgres" the connection string comes from
-    # N0PASSTEMPS_DATABASE_URL, which is injected from the secret so it never
-    # appears in a ConfigMap.
+    # "sqlite" or "postgres". With postgres the connection string comes from
+    # N0PASSTEMPS_DATABASE_DSN, injected from the secret so it never appears in
+    # a ConfigMap.
     driver = "postgres"
+    data_dir = "/var/lib/n0passtemps"
 
     [kek]
-    # Path only. The key material itself is a mounted secret, and the path is
-    # outside data_dir because the server rejects a keyring that resolves inside
-    # a configured data directory.
-    file = "/etc/n0passtemps/kek/keyring.json"
+    # Path only. The key material is a mounted secret, and the path is outside
+    # data_dir because the server refuses a keyring that resolves inside a
+    # configured data directory: a key beside the ciphertext it protects gives
+    # no confidentiality if the volume is copied.
+    provider = "file"
+    path = "/etc/n0passtemps/kek/keyring.json"
+
+    [assertion]
+    issuer = "https://auth.example.internal"
+    signing_key_path = "/etc/n0passtemps/keys/assertion-key.pem"
+
+    [admin]
+    ui_enabled = true
+    # The administration surface is reachable from every network that can reach
+    # the Service unless this is set. The check runs before authentication, so
+    # a caller outside the list cannot present a token at all.
+    ip_allow_list = ["10.0.0.0/8"]
 
     [logging]
     level = "info"
-    # Structured output so the cluster log pipeline can index fields rather than
-    # parse free text.
+    # Structured output so the cluster log pipeline indexes fields rather than
+    # parsing free text.
     format = "json"
 
     [features]
-    # Lite disables the governance surface (RBAC, approval workflow) for a
-    # single-tenant install. Leave it false for the full deployment.
+    # lite_mode is a shorthand that turns off the three administrative roles,
+    # the approval queue and the deferred erasure window together. Leave it
+    # false for the full deployment.
     lite_mode = false
-    admin_rbac_enabled = true
+    admin_rbac = true

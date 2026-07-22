@@ -19,7 +19,7 @@ Type=simple
 User=n0passtemps
 Group=n0passtemps
 
-ExecStart=/usr/local/bin/n0passtemps-server
+ExecStart=/usr/local/bin/n0passtemps-server -config /etc/n0passtemps/config.toml
 Restart=on-failure
 RestartSec=5s
 

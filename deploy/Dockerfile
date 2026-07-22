@@ -81,10 +81,10 @@ COPY --from=builder --chown=65532:65532 /data/etc /etc/n0passtemps
 # keyring that resolves inside a configured data directory, because a key stored
 # on the same volume as the ciphertext it protects is no protection at all once
 # that volume is copied. Mount it from a separate volume or secret, mode 0600.
-ENV N0PASSTEMPS_CONFIG=/etc/n0passtemps/config.toml \
-    N0PASSTEMPS_DATA_DIR=/var/lib/n0passtemps \
-    N0PASSTEMPS_KEK_FILE=/etc/n0passtemps/kek/keyring.json \
-    N0PASSTEMPS_LISTEN_ADDR=:8080
+ENV N0PASSTEMPS_DATABASE_DATA_DIR=/var/lib/n0passtemps \
+    N0PASSTEMPS_KEK_PATH=/etc/n0passtemps/kek/keyring.json \
+    N0PASSTEMPS_SERVER_ADDR=0.0.0.0:8080 \
+    N0PASSTEMPS_SERVER_ALLOW_PLAINTEXT=true
 
 # Only the database and its write-ahead log live here. Everything else the
 # process touches is either read-only or a runtime tmpfs, so the root filesystem
@@ -103,4 +103,7 @@ USER 65532:65532
 # against GET /v1/health: see the Kubernetes probes in deploy/kubernetes and the
 # note in deploy/docker-compose.yml.
 
-ENTRYPOINT ["/usr/local/bin/n0passtemps-server"]
+# The configuration path is a flag rather than an environment variable: the
+# file is read before any override can name it. Every other setting can be
+# overridden from the environment.
+ENTRYPOINT ["/usr/local/bin/n0passtemps-server", "-config", "/etc/n0passtemps/config.toml"]

@@ -70,20 +70,18 @@ spec:
               protocol: TCP
 
           env:
-            - name: N0PASSTEMPS_CONFIG
-              value: /etc/n0passtemps/config.toml
-            - name: N0PASSTEMPS_DATA_DIR
+            - name: N0PASSTEMPS_DATABASE_DATA_DIR
               value: /var/lib/n0passtemps
-            # Outside N0PASSTEMPS_DATA_DIR on purpose: the server refuses a
+            # Outside N0PASSTEMPS_DATABASE_DATA_DIR on purpose: the server refuses a
             # keyring that resolves inside a configured data directory, because
             # a key kept beside the ciphertext it protects is copied with it.
-            - name: N0PASSTEMPS_KEK_FILE
+            - name: N0PASSTEMPS_KEK_PATH
               value: /etc/n0passtemps/kek/keyring.json
-            - name: N0PASSTEMPS_LISTEN_ADDR
-              value: ":8080"
+            - name: N0PASSTEMPS_SERVER_ADDR
+              value: "0.0.0.0:8080"
             # Read from the secret rather than the ConfigMap: the URL carries
             # the database password.
-            - name: N0PASSTEMPS_DATABASE_URL
+            - name: N0PASSTEMPS_DATABASE_DSN
               valueFrom:
                 secretKeyRef:
                   name: n0passtemps-secrets

@@ -23,12 +23,16 @@ services:
     # variables it needs, and unrelated operator settings stay out of
     # /proc/self/environ.
     environment:
-      N0PASSTEMPS_CONFIG: /etc/n0passtemps/config.toml
-      N0PASSTEMPS_DATA_DIR: /var/lib/n0passtemps
-      N0PASSTEMPS_KEK_FILE: /etc/n0passtemps/kek/keyring.json
-      N0PASSTEMPS_LISTEN_ADDR: ":8080"
-      N0PASSTEMPS_LOG_LEVEL: ${N0PASSTEMPS_LOG_LEVEL:-info}
-      N0PASSTEMPS_LOG_FORMAT: ${N0PASSTEMPS_LOG_FORMAT:-json}
+      N0PASSTEMPS_DATABASE_DATA_DIR: /var/lib/n0passtemps
+      N0PASSTEMPS_KEK_PATH: /etc/n0passtemps/kek/keyring.json
+      # Every interface inside the container network namespace. The port is
+      # published to loopback below, so reachability is constrained by the
+      # publish rule rather than by the bind address, which the binary
+      # cannot see. allow_plaintext acknowledges that explicitly.
+      N0PASSTEMPS_SERVER_ADDR: "0.0.0.0:8080"
+      N0PASSTEMPS_SERVER_ALLOW_PLAINTEXT: "true"
+      N0PASSTEMPS_LOGGING_LEVEL: ${N0PASSTEMPS_LOGGING_LEVEL:-info}
+      N0PASSTEMPS_LOGGING_FORMAT: ${N0PASSTEMPS_LOGGING_FORMAT:-json}
 
     # Bound to the loopback interface: the server speaks plain HTTP, and a
     # passwordless authentication endpoint must be reached over TLS. Terminate
