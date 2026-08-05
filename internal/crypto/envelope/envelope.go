@@ -189,9 +189,15 @@ func (s *Sealer) CurrentVersion() (uint32, error) {
 	return version, nil
 }
 
-// Rewrap re-seals the DEK of an existing record under the current KEK without
-// decrypting the payload. The payload ciphertext and its nonce are copied
-// verbatim.
+// Rewrap moves an existing record onto the current KEK.
+//
+// The payload is always opened, even when the record is already current. Two
+// reasons. The header is authenticated data of the payload and the header is
+// about to change, so the payload has to be re-sealed in any case. And a
+// rotation job reads the error from this function as its integrity report: if
+// the already-current path returned early without authenticating, a corrupted
+// row would be reported as successfully rotated and the corruption would
+// surface months later as a user who cannot sign in.
 func (s *Sealer) Rewrap(sealed []byte) ([]byte, error) {
 	if len(sealed) < minSize || sealed[0] != FormatVersion {
 		return nil, ErrMalformed
@@ -214,20 +220,8 @@ func (s *Sealer) Rewrap(sealed []byte) ([]byte, error) {
 	}
 	defer zeroize.Bytes(dek)
 
-	newVersion, newKey, err := s.kek.Current()
-	if err != nil {
-		return nil, fmt.Errorf("envelope: current kek: %w", err)
-	}
-	defer zeroize.Bytes(newKey)
-
-	if newVersion == oldVersion {
-		// Already current. Return a copy so callers may treat the result as
-		// independent of the input.
-		return append([]byte(nil), sealed...), nil
-	}
-
-	// The payload is bound to the header, which is about to change, so the
-	// payload has to be re-sealed under the same DEK with a fresh nonce.
+	// Authenticate the payload before anything else is decided. See the
+	// function comment for why this is not skipped for a current record.
 	dekGCM, err := newGCM(dek)
 	if err != nil {
 		return nil, err
@@ -237,6 +231,18 @@ func (s *Sealer) Rewrap(sealed []byte) ([]byte, error) {
 		return nil, ErrUnsealFailed
 	}
 	defer zeroize.Bytes(plaintext)
+
+	newVersion, newKey, err := s.kek.Current()
+	if err != nil {
+		return nil, fmt.Errorf("envelope: current kek: %w", err)
+	}
+	defer zeroize.Bytes(newKey)
+
+	if newVersion == oldVersion {
+		// Already current, and now known to be intact. Return a copy so
+		// callers may treat the result as independent of the input.
+		return append([]byte(nil), sealed...), nil
+	}
 
 	out := make([]byte, headerSize, len(sealed))
 	out[0] = FormatVersion
