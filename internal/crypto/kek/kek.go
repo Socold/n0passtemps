@@ -180,6 +180,16 @@ func parseKeyring(raw []byte) (*keyring, error) {
 		if err != nil {
 			return nil, fmt.Errorf("kek: key version %q is not a number: %w", vs, err)
 		}
+		// Only the canonical spelling is accepted. "1" and "01" parse to the
+		// same version, so a keyring holding both would keep whichever the
+		// map iteration happened to visit last, and which key protects the
+		// database would differ from one start to the next.
+		if strconv.FormatUint(v, 10) != vs {
+			return nil, fmt.Errorf("kek: key version %q is not in canonical form, write it as %d", vs, v)
+		}
+		if v == 0 {
+			return nil, fmt.Errorf("kek: key version 0 is reserved; versions start at 1")
+		}
 		key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
 		if err != nil {
 			return nil, fmt.Errorf("kek: key %d is not valid base64: %w", v, err)

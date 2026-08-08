@@ -506,3 +506,21 @@ func TestEnvProviderRefusals(t *testing.T) {
 		}
 	})
 }
+
+// TestNonCanonicalVersionsAreRefused guards against two spellings of one
+// version.
+//
+// "1" and "01" parse to the same number. A keyring holding both with different
+// key material would keep whichever entry the map iteration visited last, so
+// the key protecting the database could differ between two starts of the same
+// binary on the same file.
+func TestNonCanonicalVersionsAreRefused(t *testing.T) {
+	key := base64.StdEncoding.EncodeToString(make([]byte, KeySize))
+	for _, version := range []string{"01", "+1", " 1", "1 ", "0"} {
+		doc := `{"current":1,"keys":{"` + version + `":"` + key + `"}}`
+		if _, err := parseKeyring([]byte(doc)); err == nil {
+			t.Errorf("key version %q was accepted; only the canonical decimal form "+
+				"may name a key, and versions start at 1", version)
+		}
+	}
+}
