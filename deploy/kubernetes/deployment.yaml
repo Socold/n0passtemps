@@ -79,6 +79,13 @@ spec:
               value: /etc/n0passtemps/kek/keyring.json
             - name: N0PASSTEMPS_SERVER_ADDR
               value: "0.0.0.0:8080"
+            # No default exists for the pepper, by design: a deployment started
+            # without one would mint subjects nobody could find again later.
+            - name: N0PASSTEMPS_SUBJECT_PEPPER
+              valueFrom:
+                secretKeyRef:
+                  name: n0passtemps-secrets
+                  key: subject-pepper
             # Read from the secret rather than the ConfigMap: the URL carries
             # the database password.
             - name: N0PASSTEMPS_DATABASE_DSN
@@ -159,6 +166,10 @@ spec:
             items:
               - key: keyring.json
                 path: keyring.json
+              # The assertion signing key sits beside the keyring: both are key
+              # material, and both stay out of the data volume.
+              - key: assertion-key.pem
+                path: assertion-key.pem
 
         # An emptyDir is correct for the PostgreSQL store, where this path holds
         # no durable state. With database.driver = "sqlite" it must be replaced

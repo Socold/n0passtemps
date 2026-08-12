@@ -47,7 +47,14 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # Created here rather than at runtime: the final image has no shell, and the
 # data directory must exist and be owned by uid 65532 before the server starts
 # under a read-only root filesystem.
-RUN mkdir -p /data/lib /data/etc \
+#
+# /etc/n0passtemps/kek is created here as well, and it matters. Docker
+# initialises an empty named volume from the image directory it is mounted over,
+# ownership included. Without this directory the secrets volume comes up owned
+# by root, and the non-root wizard cannot write the keyring into it: the first
+# command of the install fails with "permission denied".
+RUN mkdir -p /data/lib /data/etc/kek \
+ && chmod 0700 /data/etc/kek \
  && chown -R 65532:65532 /data
 
 

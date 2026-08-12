@@ -5,7 +5,9 @@
 #   docker compose -f deploy/docker-compose.postgres.yml up -d
 #
 # Before the first start, place the keyring produced by
-# "n0passtemps-wizard kek init" in the n0passtemps-kek volume as keyring.json,
+# "n0passtemps-wizard kek init" in the n0passtemps-kek volume as keyring.json
+# (and the key from "n0passtemps-wizard assertion-key init" beside it as
+# assertion-key.pem),
 # owned by uid 65532 and mode 0600.
 
 name: n0passtemps
@@ -23,6 +25,13 @@ services:
     environment:
       N0PASSTEMPS_DATABASE_DATA_DIR: /var/lib/n0passtemps
       N0PASSTEMPS_KEK_PATH: /etc/n0passtemps/kek/keyring.json
+      # The two remaining secrets. The pepper derives the lookup key from the
+      # application's user reference and has no default: a deployment that
+      # started without one would mint subjects nobody could find again once a
+      # pepper was introduced. The signing key lives in the same read-only
+      # volume as the keyring, outside the data volume for the same reason.
+      N0PASSTEMPS_SUBJECT_PEPPER: ${N0PASSTEMPS_SUBJECT_PEPPER:?set N0PASSTEMPS_SUBJECT_PEPPER in .env, generate it with n0passtemps-wizard pepper}
+      N0PASSTEMPS_ASSERTION_SIGNING_KEY_PATH: /etc/n0passtemps/kek/assertion-key.pem
       # Every interface inside the container network namespace. The port is
       # published to loopback below, so reachability is constrained by the
       # publish rule rather than by the bind address, which the binary
@@ -35,6 +44,12 @@ services:
       # acceptable only because this connection never leaves the internal
       # bridge network below, which is not published to the host; point this at
       # a managed instance and sslmode must become verify-full.
+      N0PASSTEMPS_DATABASE_DRIVER: postgres
+      # The validator refuses sslmode=disable towards any host that is not
+      # loopback, because it cannot see that "db" is a private bridge. This
+      # is the explicit acknowledgement. Remove it together with
+      # sslmode=disable the day the database moves off this host.
+      N0PASSTEMPS_DATABASE_ALLOW_PLAINTEXT: "true"
       N0PASSTEMPS_DATABASE_DSN: >-
         postgres://${POSTGRES_USER:?set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:?set POSTGRES_DB in .env}?sslmode=disable
 
@@ -59,7 +74,11 @@ services:
       # Configuration is read once at startup and never written. The file must
       # exist before "up": Docker would otherwise create a directory at this
       # path and the server would fail to parse it.
-      - ${N0PASSTEMPS_CONFIG_FILE:-./config.toml}:/etc/n0passtemps/config.toml:ro
+      # "z" relabels the file for container access on SELinux hosts (Fedora,
+      # RHEL and derivatives), where a bind mount is otherwise refused with
+      # "permission denied" however permissive its mode. It is ignored where
+      # SELinux is absent. The file must also be readable by uid 65532.
+      - ${N0PASSTEMPS_CONFIG_FILE:-./config.toml}:/etc/n0passtemps/config.toml:ro,z
 
     # The image writes nothing outside the volumes above, so the root filesystem
     # stays immutable: an attacker who reaches code execution cannot drop a

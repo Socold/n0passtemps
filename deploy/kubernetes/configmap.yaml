@@ -65,7 +65,7 @@ data:
 
     [assertion]
     issuer = "https://auth.example.internal"
-    signing_key_path = "/etc/n0passtemps/keys/assertion-key.pem"
+    signing_key_path = "/etc/n0passtemps/kek/assertion-key.pem"
 
     [admin]
     ui_enabled = true
