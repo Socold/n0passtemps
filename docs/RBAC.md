@@ -1,0 +1,227 @@
+# Administrative roles and permissions
+
+Three roles, twenty-five permissions, one mapping. The authority is in
+`internal/rbac/rbac.go`; the matrix below is generated to match it.
+
+## The design principle
+
+Authority grows with the damage the holder is trusted to cause, and reading is
+never bundled with writing.
+
+| Role | Held by | Line it stops at |
+|---|---|---|
+| `admin_auditor` | Someone who reviews the service without operating it | Changes nothing at all, not even an alert acknowledgement. An auditor who can quietly clear an alert can quietly cover a trace, which is the one thing the role exists to prevent. |
+| `admin_operator` | Day to day user support | Adds the operations that recover a locked-out user. Stops short of anything that changes who may administer the service, anything that acts on many records at once, and anything that touches key material. |
+| `admin_full` | The operator of the deployment | Holds every permission. |
+
+Membership is an explicit permission set per role, not a numeric level. A level
+invites the assumption that a higher role is a superset of a lower one, which
+then makes it impossible to grant an operator something an auditor must not have
+without reordering the levels.
+
+The mapping is validated at package initialisation. Every declared permission
+must be granted to `admin_full`, and no role may hold an undeclared permission;
+either fault panics at start rather than leaving an operation nobody can perform
+or a privilege nobody intended.
+
+Authorisation fails closed. A token carrying a role this build does not
+recognise, for instance after a downgrade, holds nothing.
+
+## The matrix
+
+The read permissions come first, then the operations an operator may perform,
+then the operations reserved to `admin_full`.
+
+| # | Permission | `admin_auditor` | `admin_operator` | `admin_full` | Dual-approval candidate |
+|---|---|---|---|---|---|
+| 1 | `subject.list` | yes | yes | yes | no |
+| 2 | `subject.read` | yes | yes | yes | no |
+| 3 | `credential.list` | yes | yes | yes | no |
+| 4 | `audit.read` | yes | yes | yes | no |
+| 5 | `audit.verify` | yes | yes | yes | no |
+| 6 | `alert.read` | yes | yes | yes | no |
+| 7 | `approval.read` | yes | yes | yes | no |
+| 8 | `health.read_detailed` | yes | yes | yes | no |
+| 9 | `api_key.list` | yes | yes | yes | no |
+| 10 | `admin_token.list` | yes | yes | yes | no |
+| 11 | `subject.lock` | no | yes | yes | no |
+| 12 | `subject.unlock` | no | yes | yes | no |
+| 13 | `credential.revoke` | no | yes | yes | no |
+| 14 | `recovery.reissue` | no | yes | yes | no |
+| 15 | `throttle.reset` | no | yes | yes | no |
+| 16 | `alert.acknowledge` | no | yes | yes | no |
+| 17 | `credential.revoke_bulk` | no | no | yes | yes |
+| 18 | `approval.decide` | no | no | yes | no |
+| 19 | `erasure.request` | no | no | yes | yes |
+| 20 | `erasure.cancel` | no | no | yes | no |
+| 21 | `api_key.create` | no | no | yes | no |
+| 22 | `api_key.revoke` | no | no | yes | no |
+| 23 | `admin_token.create` | no | no | yes | yes |
+| 24 | `admin_token.revoke` | no | no | yes | no |
+| 25 | `kek.rotate` | no | no | yes | yes |
+
+Counts: `admin_auditor` holds 10, `admin_operator` holds 16, `admin_full` holds
+all 25.
+
+`audit.verify` sits among the read permissions because verification recomputes
+hashes and writes nothing. It does append one audit entry recording that a
+verification ran, which is the log recording its own inspection rather than the
+caller changing state.
+
+`api_key.list` and `admin_token.list` are read only and metadata only: neither
+listing can disclose a token, because only a selector and a digest of the
+verifier are ever stored. They are separate permissions rather than a reuse of
+`subject.list`, because sharing a permission between unrelated resources means a
+later decision to withhold one of them has nowhere to express itself.
+
+## Which route requires which permission
+
+Every administrative route carries three layers: the network allow list, the
+administrative token, and the permission. The permission is attached where the
+route is mounted, not checked inside the handler, so a handler that forgot the
+check cannot exist as an open route.
+
+| Route | Permission |
+|---|---|
+| `GET /admin/v1/subjects` | `subject.list` |
+| `GET /admin/v1/subjects/{subject_id}` | `subject.read` |
+| `POST /admin/v1/subjects/{subject_id}/lock` | `subject.lock` |
+| `POST /admin/v1/subjects/{subject_id}/unlock` | `subject.unlock` |
+| `GET /admin/v1/subjects/{subject_id}/credentials` | `credential.list` |
+| `POST /admin/v1/subjects/{subject_id}/credentials/{credential_id}/revoke` | `credential.revoke` |
+| `POST /admin/v1/subjects/{subject_id}/credentials/revoke-all` | `credential.revoke_bulk` |
+| `POST /admin/v1/subjects/{subject_id}/recovery/reissue` | `recovery.reissue` |
+| `POST /admin/v1/subjects/{subject_id}/throttle/reset` | `throttle.reset` |
+| `POST /admin/v1/subjects/{subject_id}/erasure` | `erasure.request` |
+| `DELETE /admin/v1/subjects/{subject_id}/erasure` | `erasure.cancel` |
+| `GET /admin/v1/audit` | `audit.read` |
+| `GET /admin/v1/audit/verify` | `audit.verify` |
+| `GET /admin/v1/alerts` | `alert.read` |
+| `POST /admin/v1/alerts/{alert_id}/acknowledge` | `alert.acknowledge` |
+| `GET /admin/v1/approvals` | `approval.read` |
+| `POST /admin/v1/approvals/{approval_id}/approve` | `approval.decide` |
+| `POST /admin/v1/approvals/{approval_id}/reject` | `approval.decide` |
+| `GET /admin/v1/api-keys` | `api_key.list` |
+| `POST /admin/v1/api-keys` | `api_key.create` |
+| `POST /admin/v1/api-keys/{key_id}/revoke` | `api_key.revoke` |
+| `GET /admin/v1/admin-tokens` | `admin_token.list` |
+| `POST /admin/v1/admin-tokens` | `admin_token.create` |
+| `POST /admin/v1/admin-tokens/{token_id}/revoke` | `admin_token.revoke` |
+| `POST /admin/v1/kek/rewrap` | `kek.rotate` |
+| `GET /admin/v1/health` | `health.read_detailed` |
+
+Three of these are worth stating plainly.
+
+Both credential listings are readable by every role, including `admin_auditor`.
+An auditor can therefore see which API keys and which administrative tokens
+exist, with their names, roles, creation and last-use timestamps. No selector
+and no verifier is ever in a response body, so the listing discloses the
+inventory of credentials and not the credentials themselves.
+
+`credential.revoke_bulk` and `kek.rotate` are held by `admin_full` alone and
+each guards one route. `credential.revoke_bulk` is a separate permission from
+`credential.revoke`, which `admin_operator` holds: an operator can revoke one
+named credential, with the last-credential guard in the way, and cannot remove
+every factor a subject holds in one call. `kek.rotate` guards the rewrap pass
+over the sealed records. Adding a key version to the keyring file is not an API
+operation at all; it is `n0passtemps-wizard kek rotate`, run on the host by
+someone who can write the file.
+
+Revealing a subject reference is part of `GET /admin/v1/subjects/{subject_id}`,
+not a separate route. Passing `?reveal_ref=true` decrypts `subjects.ref_sealed`
+and audits the disclosure as `admin.subject_ref_revealed`. There is
+deliberately no second permission check inside the handler: the route is already
+guarded by `subject.read`, and a duplicate check would have to decide for itself
+whether the role model is enabled, which is exactly the kind of second code path
+that drifts from the first. The consequence is that any role able to read a
+subject is able to reveal its reference, and the audit entry is what records who
+did.
+
+## Dual-approval candidates
+
+`internal/rbac` names four permissions whose effect is wide enough, or hard
+enough to undo, to be worth a second administrator:
+
+| Permission | Why |
+|---|---|
+| `credential.revoke_bulk` | Removes every factor a subject holds in one call, and revocation is final. |
+| `erasure.request` | Destroys data, and cannot be undone once the retention window closes. |
+| `admin_token.create` | Grants administrative authority. |
+| `kek.rotate` | Rewrites key material for every sealed record in the deployment. |
+
+They are candidates, not requirements. Whether the queue actually intercepts an
+operation is decided by `features.dual_approval_operations`, which names
+operations while this package names permissions. The default list covers exactly
+these four. The mapping between the two vocabularies is made in the
+administrative layer.
+
+All four are wired to the queue:
+
+| Permission | Operation name | Route |
+|---|---|---|
+| `credential.revoke_bulk` | `credential.revoke_bulk` | `POST /admin/v1/subjects/{subject_id}/credentials/revoke-all` |
+| `erasure.request` | `subject.erase` | `POST /admin/v1/subjects/{subject_id}/erasure` |
+| `admin_token.create` | `admin_token.create` | `POST /admin/v1/admin-tokens` |
+| `kek.rotate` | `kek.rotate` | `POST /admin/v1/kek/rewrap` |
+
+A held operation does not run when it is approved. The original requester
+redeems the approval by repeating the identical request with the header
+`X-Approval-Id`, and the redemption passes through the same permission check as
+the first call, so a requester whose role changed in between is refused by the
+ordinary rule. Deciding needs `approval.decide`; redeeming needs only the
+permission of the route itself. See
+[ADR 0013](adr/0013-approvals-are-redeemed-not-executed.md) and
+[ADMIN-GUIDE.md](ADMIN-GUIDE.md#the-dual-approval-queue).
+
+API key scopes are a separate mechanism. They restrict which families of `/v1`
+routes an API key may call, they apply whether or not `features.admin_rbac` is
+on, and they are described in
+[ADMIN-GUIDE.md](ADMIN-GUIDE.md#an-api-key).
+
+## Turning RBAC off
+
+`features.admin_rbac = false`, which `features.lite_mode` implies, is what the
+lite deployment means: one administrator, no separation of duty, and no pretence
+of one. Every valid role then carries full authority, and the decision recorded
+in the audit log says so:
+
+```
+role-based access control is disabled, every valid role has full authority
+```
+
+An unknown role is still refused, because the value comes from a persisted token
+rather than from the operator, and an unrecognised one means the token is not
+interpretable rather than unrestricted.
+
+`features.dual_approval` requires `features.admin_rbac`; the configuration
+validator refuses the combination, because without distinct roles there is no
+way to tell two administrators apart.
+
+## What a denial looks like
+
+A refused call returns RFC 9457 `403` with a fixed title and no explanation of
+which permission was missing:
+
+```json
+{
+  "type": "urn:n0passtemps:error:forbidden",
+  "title": "this credential is not permitted to perform that operation",
+  "status": 403,
+  "request_id": "9f1c4e2b7a5d8c3f"
+}
+```
+
+The reason names the role and the permission, which would tell a caller holding
+a valid token exactly which capability it is missing and therefore which token
+is worth stealing next. It goes to the log, to an `admin.denied` audit entry and
+to an `admin.denied` alert instead. Correlate through `request_id`.
+
+## Related documents
+
+| Document | What it covers |
+|---|---|
+| [ADMIN-GUIDE.md](ADMIN-GUIDE.md) | What an operator does with these permissions |
+| [CONFIGURATION.md](CONFIGURATION.md) | `features.admin_rbac`, `features.dual_approval` and the operation list |
+| [THREAT-MODEL.md](THREAT-MODEL.md) | What a rogue administrator can and cannot do |
+| [ADR 0002](adr/0002-authenticate-every-call-to-the-public-api-surface.md) | Why both surfaces are authenticated |
+| [ADR 0013](adr/0013-approvals-are-redeemed-not-executed.md) | Why an approval is redeemed by the requester |
