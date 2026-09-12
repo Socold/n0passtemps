@@ -1,0 +1,1033 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>n0passtemps v1 CDC Complet — Spécification + Déploiement + Dev Strategy</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: #f9fafb;
+        }
+        .container { max-width: 1200px; margin: 0 auto; padding: 40px 20px; }
+        header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 60px 20px;
+            text-align: center;
+            margin-bottom: 40px;
+        }
+        header h1 { font-size: 2.5em; margin-bottom: 10px; }
+        header p { font-size: 1.1em; opacity: 0.95; }
+        .toc {
+            background: white;
+            border-left: 4px solid #667eea;
+            padding: 20px;
+            margin: 30px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .toc h2 { font-size: 1.3em; margin-bottom: 15px; }
+        .toc ul { list-style: none; padding-left: 20px; }
+        .toc li { margin: 8px 0; }
+        .toc a { color: #667eea; text-decoration: none; font-weight: 500; }
+        .toc a:hover { text-decoration: underline; }
+        section {
+            background: white;
+            padding: 30px;
+            margin: 20px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h2 { color: #667eea; font-size: 1.8em; margin-top: 30px; margin-bottom: 15px; border-bottom: 2px solid #e5e7eb; padding-bottom: 10px; }
+        h3 { color: #764ba2; font-size: 1.3em; margin-top: 20px; margin-bottom: 10px; }
+        h4 { color: #555; font-size: 1.1em; margin-top: 15px; margin-bottom: 8px; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        table th {
+            background: #667eea;
+            color: white;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+        }
+        table td {
+            border-bottom: 1px solid #e5e7eb;
+            padding: 12px;
+        }
+        table tr:hover { background: #f3f4f6; }
+        .highlight {
+            background: #fef3c7;
+            padding: 20px;
+            border-left: 4px solid #f59e0b;
+            margin: 15px 0;
+            border-radius: 4px;
+        }
+        .warning {
+            background: #fee2e2;
+            padding: 20px;
+            border-left: 4px solid #dc2626;
+            margin: 15px 0;
+            border-radius: 4px;
+        }
+        .success {
+            background: #d1fae5;
+            padding: 20px;
+            border-left: 4px solid #10b981;
+            margin: 15px 0;
+            border-radius: 4px;
+        }
+        .code-block {
+            background: #1f2937;
+            color: #e5e7eb;
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+            margin: 10px 0;
+            font-family: "Courier New", monospace;
+            font-size: 0.9em;
+        }
+        .badge {
+            display: inline-block;
+            padding: 4px 12px;
+            background: #dbeafe;
+            color: #0369a1;
+            border-radius: 12px;
+            font-size: 0.85em;
+            font-weight: 600;
+            margin: 2px;
+        }
+        .badge.success { background: #d1fae5; color: #065f46; }
+        .badge.warning { background: #fed7aa; color: #92400e; }
+        .badge.danger { background: #fee2e2; color: #991b1b; }
+        .checklist { list-style: none; }
+        .checklist li:before { content: "✓ "; color: #10b981; font-weight: bold; margin-right: 8px; }
+        .checklist li.warn:before { content: "⚠ "; color: #f59e0b; }
+        .checklist li.fail:before { content: "✗ "; color: #dc2626; }
+        .roadmap-phase {
+            padding: 15px;
+            margin: 10px 0;
+            background: #f3f4f6;
+            border-radius: 6px;
+            border-left: 4px solid #667eea;
+        }
+        .roadmap-phase strong { color: #667eea; }
+        ul, ol { margin-left: 20px; margin-top: 10px; margin-bottom: 10px; }
+        li { margin: 8px 0; }
+        footer {
+            text-align: center;
+            color: #666;
+            margin-top: 50px;
+            padding-top: 30px;
+            border-top: 1px solid #e5e7eb;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 8px 16px;
+            background: #10b981;
+            color: white;
+            border-radius: 20px;
+            font-weight: 600;
+            margin: 10px 0;
+        }
+        .risk-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin: 15px 0;
+        }
+        .risk-item {
+            padding: 15px;
+            background: #f3f4f6;
+            border-radius: 6px;
+            border-left: 3px solid #f59e0b;
+        }
+        .risk-item h5 { margin: 0 0 8px 0; color: #92400e; font-size: 0.95em; }
+        @media (max-width: 768px) {
+            .risk-grid { grid-template-columns: 1fr; }
+            header h1 { font-size: 1.8em; }
+            h2 { font-size: 1.4em; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>n0passtemps v1 CDC Complet</h1>
+        <p>Plateforme OSS d'authentification sans mot de passe — Engineering + Product + Go-to-Market</p>
+        <span class="status-badge">✅ CDC FINALISÉ v3 (PLG + Dev Strategy)</span>
+    </header>
+
+    <div class="container">
+        <div class="toc">
+            <h2>📋 Table des matières</h2>
+            <ul>
+                <li><a href="#exec">I. Executive Summary</a></li>
+                <li><a href="#variants">II. Variantes (Lite vs Complet)</a></li>
+                <li><a href="#spec">III. Spécification technique</a></li>
+                <li><a href="#development">IV. Development Considerations</a></li>
+                <li><a href="#deployment">V. Deployment & Customer Experience (PLG)</a></li>
+                <li><a href="#anticipations">VI. Anticipations & Risk Mitigation</a></li>
+                <li><a href="#phase0">VII. Phase 0 Exact Deliverables</a></li>
+                <li><a href="#timeline">VIII. Timeline & Resource Planning</a></li>
+                <li><a href="#status">IX. Status & Launch Checklist</a></li>
+            </ul>
+        </div>
+
+        <!-- I. EXECUTIVE SUMMARY -->
+        <section id="exec">
+            <h2>I. Executive Summary</h2>
+
+            <h3>Vision</h3>
+            <p><strong>n0passtemps</strong> = OSS passwordless auth platform, offline-first, on-premise. Cible: SMBs et startups françaises (souveraineté données, RGPD). Model: Product-Led Growth (PLG) = zéro support client, installation auto-service, docs exhaustives.</p>
+
+            <h3>Key metrics</h3>
+            <table>
+                <tr>
+                    <th>Métrique</th>
+                    <th>v1 Complet</th>
+                    <th>v1 Lite</th>
+                </tr>
+                <tr>
+                    <td>Timeline</td>
+                    <td>13–14 weeks</td>
+                    <td>3–4 weeks</td>
+                </tr>
+                <tr>
+                    <td>Team size</td>
+                    <td>1–2 devs</td>
+                    <td>1 dev solo</td>
+                </tr>
+                <tr>
+                    <td>Lines of code</td>
+                    <td>~15k–20k Go</td>
+                    <td>~5k–8k Go</td>
+                </tr>
+                <tr>
+                    <td>Database</td>
+                    <td>SQLite + Postgres</td>
+                    <td>SQLite only</td>
+                </tr>
+                <tr>
+                    <td>Install time</td>
+                    <td>5 min (docker-compose)</td>
+                    <td>5 min (docker run)</td>
+                </tr>
+                <tr>
+                    <td>Support model</td>
+                    <td>Docs + GitHub (no email)</td>
+                    <td>Docs + GitHub (no email)</td>
+                </tr>
+                <tr>
+                    <td>SaaS launch</td>
+                    <td>Phase 6+ (year 2)</td>
+                    <td>N/A (on-premise only)</td>
+                </tr>
+            </table>
+
+            <div class="success">
+                <strong>✅ CDC est "locked".</strong> Toutes décisions prises. Prêt pour phase 0 (repo setup, OpenAPI spec, DB schema, CI/CD groundwork).
+            </div>
+        </section>
+
+        <!-- II. VARIANTES -->
+        <section id="variants">
+            <h2>II. Variantes: Lite vs Complet</h2>
+
+            <p>Un seul repo, deux chemins via feature flags dans <code>config.toml</code>.</p>
+
+            <table>
+                <tr>
+                    <th>Feature</th>
+                    <th>v1 Complet</th>
+                    <th>v1 Lite</th>
+                    <th>Rationale</th>
+                </tr>
+                <tr>
+                    <td>WebAuthn</td>
+                    <td>✅ Full FIDO2</td>
+                    <td>✅ Full FIDO2</td>
+                    <td>Core, non-negotiable</td>
+                </tr>
+                <tr>
+                    <td>TOTP/HOTP</td>
+                    <td>✅ Both</td>
+                    <td>✅ TOTP only (basic)</td>
+                    <td>Lite: simplify anti-replay</td>
+                </tr>
+                <tr>
+                    <td>Recovery codes</td>
+                    <td>✅ 16x codes</td>
+                    <td>✅ 8x codes</td>
+                    <td>Lite: fewer edge cases</td>
+                </tr>
+                <tr>
+                    <td>Admin RBAC</td>
+                    <td>✅ 3 roles</td>
+                    <td>❌ Solo only</td>
+                    <td>Lite: one admin assumption</td>
+                </tr>
+                <tr>
+                    <td>Dual-approval</td>
+                    <td>✅ Included</td>
+                    <td>❌ Skip</td>
+                    <td>Lite: no governance needed</td>
+                </tr>
+                <tr>
+                    <td>GDPR 30-day</td>
+                    <td>✅ Included</td>
+                    <td>❌ Immediate delete</td>
+                    <td>Lite: no legal requirement</td>
+                </tr>
+                <tr>
+                    <td>Postgres</td>
+                    <td>✅ Supported</td>
+                    <td>❌ SQLite only</td>
+                    <td>Lite: no HA needed</td>
+                </tr>
+                <tr>
+                    <td>KEK rotation</td>
+                    <td>✅ Automated jobs</td>
+                    <td>❌ Static key (manual rotate later)</td>
+                    <td>Lite: ops simplicity</td>
+                </tr>
+                <tr>
+                    <td>Effort</td>
+                    <td>13–14 weeks</td>
+                    <td>3–4 weeks (73% reduction)</td>
+                    <td>73% effort savings</td>
+                </tr>
+            </table>
+
+            <p><strong>Decision for Will:</strong> Launch with Lite (3–4 weeks), graduate to Complet features as customers demand them. No re-architecture needed.</p>
+        </section>
+
+        <!-- III. SPEC TECHNIQUE (SHORT) -->
+        <section id="spec">
+            <h2>III. Spécification technique (résumé)</h2>
+
+            <h3>Stack</h3>
+            <ul class="checklist">
+                <li>Backend: Go 1.22+, mono-binary</li>
+                <li>Database: SQLite (Lite), Postgres (Complet)</li>
+                <li>Crypto: AES-256-GCM only (FIPS-ready)</li>
+                <li>API: HTTP/JSON, OpenAPI 3.1</li>
+                <li>Deployment: Docker, systemd, on-premise</li>
+                <li>Admin UI: React, single-page app (minimal JS bundle)</li>
+            </ul>
+
+            <h3>Core APIs</h3>
+            <div class="code-block">
+POST /v1/webauthn/{subject}/register
+POST /v1/webauthn/{subject}/register/complete
+POST /v1/webauthn/{subject}/assert
+POST /v1/webauthn/{subject}/assert/complete
+POST /v1/totp/{subject}/verify
+POST /v1/recovery/{subject}/consume
+GET  /v1/health
+
+POST /admin/v1/subjects/{id}/credentials/{cid}/revoke (admin:full)
+POST /admin/v1/subjects/{id}/throttle/reset (admin:operator)
+GET  /admin/v1/audit?event_type=...&limit=100
+            </div>
+
+            <h3>Security angles (v1 mitigations)</h3>
+            <ul class="checklist">
+                <li>KEK loss → versioning + file backup</li>
+                <li>DB corruption → SQLite WAL + hourly snapshots</li>
+                <li>Admin abuse → dual-approval (Complet only) + immutable audit log</li>
+                <li>Device compromise → counter monotonicity + device binding</li>
+                <li>TOTP replay → CAS (Compare-And-Swap) + backoff</li>
+                <li>Cross-tenant (SaaS) → tenant_id everywhere, RLS phase 6</li>
+            </ul>
+
+            <p><strong>Full spec in CDC markdown files. This section = high-level only.</strong></p>
+        </section>
+
+        <!-- IV. DEVELOPMENT CONSIDERATIONS -->
+        <section id="development">
+            <h2>IV. Development Considerations</h2>
+
+            <h3>Testing strategy</h3>
+            <table>
+                <tr>
+                    <th>Level</th>
+                    <th>Scope</th>
+                    <th>Coverage target</th>
+                </tr>
+                <tr>
+                    <td>Unit tests</td>
+                    <td>Crypto (envelope, KEK), TOTP/HOTP, counter logic</td>
+                    <td>90%+</td>
+                </tr>
+                <tr>
+                    <td>Integration tests</td>
+                    <td>API endpoints, DB schema, RBAC enforcement</td>
+                    <td>80%+</td>
+                </tr>
+                <tr>
+                    <td>Security tests</td>
+                    <td>Attestation validation (mock certs), device binding, replay protection</td>
+                    <td>100%</td>
+                </tr>
+                <tr>
+                    <td>Performance tests</td>
+                    <td>WebAuthn verify <100ms, TOTP verify <50ms</td>
+                    <td>Baseline</td>
+                </tr>
+                <tr>
+                    <td>Conformance tests</td>
+                    <td>WebAuthn L2 spec compliance, TOTP RFC 6238</td>
+                    <td>Full</td>
+                </tr>
+                <tr>
+                    <td>Fuzz tests</td>
+                    <td>Attestation parsing, recovery code format</td>
+                    <td>Continuous</td>
+                </tr>
+            </table>
+
+            <h3>Code quality gates (before merge)</h3>
+            <ul class="checklist">
+                <li>No secrets in code (gitleaks check)</li>
+                <li>Linting (golangci-lint)</li>
+                <li>Type safety (Go compiler)</li>
+                <li>Security (gosec)</li>
+                <li>Coverage >80% (codecov)</li>
+                <li>No panics in prod code (allowed only in init/main)</li>
+            </ul>
+
+            <h3>Crypto review checkpoints</h3>
+            <div class="warning">
+                <strong>⚠️ CRITICAL: Cryptographic operations must be reviewed by someone who's done this before.</strong>
+                <ul>
+                    <li>Envelope format (nonce || ciphertext || tag) ← review before phase 1 lock</li>
+                    <li>KEK derivation & versioning ← security audit</li>
+                    <li>Device binding hash (what goes into hash?) ← threat model review</li>
+                    <li>Counter jump detection thresholds (10 vs 100) ← fuzz testing</li>
+                </ul>
+                <p><strong>Recommendation:</strong> Get one security review before shipping (phase 1.5 → phase 2).</p>
+            </div>
+
+            <h3>Database compatibility testing</h3>
+            <ul class="checklist">
+                <li>SQLite 3.35+ (for JSON1 extension, WAL)</li>
+                <li>Postgres 12+ (for JSON, RLS)</li>
+                <li>Both in CI (parallel pipelines)</li>
+                <li>Migration scripts tested on both</li>
+            </ul>
+
+            <h3>Known complexity areas (high risk)</h3>
+            <div class="risk-grid">
+                <div class="risk-item">
+                    <h5>WebAuthn attestation cert validation</h5>
+                    <p>Certificate chain validation is complex (root chains, CRL, OCSP). Plan 3–5 days for debugging cert issues across vendors (Apple, Google, Yubico, Microsoft).</p>
+                </div>
+                <div class="risk-item">
+                    <h5>Desktop platform interop</h5>
+                    <p>Windows Hello, macOS Face ID, Linux FIDO2 behave differently. Test on all three platforms early. Plan 2–3 days for quirks.</p>
+                </div>
+                <div class="risk-item">
+                    <h5>TOTP anti-replay (CAS)</h5>
+                    <p>Race condition if two auth attempts hit DB simultaneously. Must use DB-level CAS (SQLite: UPDATE WHERE, Postgres: RETURNING).</p>
+                </div>
+                <div class="risk-item">
+                    <h5>Device binding anomaly detection</h5>
+                    <p>Deciding when a "device change" is suspicious vs normal (cert rotate, new Yubikey). Threshold tuning (counter jump 10 vs 100) is empirical.</p>
+                </div>
+                <div class="risk-item">
+                    <h5>Admin dashboard complexity creep</h5>
+                    <p>Keep admin UI minimal (3 clicks max). Resist urge to add "advanced settings" tabs. Write mockups first, freeze scope.</p>
+                </div>
+                <div class="risk-item">
+                    <h5>Audit log immutability enforcement</h5>
+                    <p>DB triggers prevent UPDATE/DELETE on audit_log. Test this rigorously (attacker won't be nice to you).</p>
+                </div>
+            </div>
+
+            <h3>Tech debt to avoid</h3>
+            <ul class="checklist fail">
+                <li>❌ Plaintext secrets in config (use env vars only)</li>
+                <li>❌ Global state for crypto operations (use context + dependency injection)</li>
+                <li>❌ Error messages leaking info (log internally, return generic HTTP 400 externally)</li>
+                <li>❌ Admin operations without audit logging (every admin action = audit entry)</li>
+                <li>❌ Skipping RBAC enforcement for "just this one endpoint" (slippery slope)</li>
+                <li>❌ Hard-coded thresholds (all config = flags + env vars)</li>
+            </ul>
+        </section>
+
+        <!-- V. DEPLOYMENT & CUSTOMER EXPERIENCE (PLG) -->
+        <section id="deployment">
+            <h2>V. Deployment & Customer Experience (PLG Model)</h2>
+
+            <h3>Core principle: ZERO customer support</h3>
+            <p><strong>n0passtemps must be so easy to deploy + run that Will never receives a support email.</strong></p>
+
+            <h3>Installation (target: 5 minutes)</h3>
+
+            <h4>On-premise SaaS (Lite)</h4>
+            <div class="code-block">
+docker run -p 8080:8080 \
+  -e LITE_MODE=true \
+  -e KEK_FILE=/data/kek.txt \
+  -v /data:/data \
+  n0passtemps/n0passtemps
+
+# Done. Access at http://localhost:8080
+# Admin dashboard at http://localhost:8080/admin
+            </div>
+
+            <h4>On-premise (Complet)</h4>
+            <div class="code-block">
+git clone github.com/n0passtemps/n0passtemps
+cd n0passtemps
+
+# Interactive setup (3 questions)
+make setup-wizard
+
+# Outputs:
+# - config.toml (pre-filled)
+# - docker-compose.yml (ready to go)
+# - .env (secrets)
+
+docker-compose up
+
+# Done. Access at http://localhost:8080
+            </div>
+
+            <h4>SaaS (phase 6+)</h4>
+            <div class="code-block">
+1. Visit n0passtemps.io
+2. Sign up (email + password)
+3. Copy API key
+4. Add to your app config
+
+# That's it. Automated billing, no support needed.
+            </div>
+
+            <h3>Admin dashboard (must be obvious)</h3>
+
+            <p><strong>Dashboard shows ONLY:</strong></p>
+            <ul class="checklist">
+                <li>User list (search + filter)</li>
+                <li>Status indicator (green/yellow/red)</li>
+                <li>Revoke credential (1 click)</li>
+                <li>Reissue recovery codes (1 click)</li>
+                <li>View audit log (search + pagination)</li>
+                <li>View alerts (severity filter)</li>
+            </ul>
+
+            <p><strong>Dashboard NEVER shows:</strong></p>
+            <ul class="checklist fail">
+                <li>❌ Complex permission matrices</li>
+                <li>❌ "Advanced settings" sections</li>
+                <li>❌ Technical jargon (KEK, envelope, AAGUID)</li>
+                <li>❌ More than 3 clicks to accomplish anything</li>
+                <li>❌ "Contact support" button</li>
+            </ul>
+
+            <h3>Documentation (FAQ-first)</h3>
+
+            <table>
+                <tr>
+                    <th>Situation</th>
+                    <th>Solution</th>
+                    <th>Location</th>
+                </tr>
+                <tr>
+                    <td>How do I install?</td>
+                    <td>Copy-paste one command</td>
+                    <td>README.md</td>
+                </tr>
+                <tr>
+                    <td>How do I configure?</td>
+                    <td>docker-compose.yml + 3 env vars</td>
+                    <td>INSTALL.md</td>
+                </tr>
+                <tr>
+                    <td>How do I integrate my app?</td>
+                    <td>OpenAPI spec + 5 code examples (curl, Python, Node, Go, bash)</td>
+                    <td>api/openapi.yaml + examples/</td>
+                </tr>
+                <tr>
+                    <td>Dashboard is broken / slow</td>
+                    <td>Health endpoint shows reason. Logs in stdout.</td>
+                    <td>TROUBLESHOOT.md + logs</td>
+                </tr>
+                <tr>
+                    <td>Can't create admin token?</td>
+                    <td>Set admin bearer token in config, restart</td>
+                    <td>ADMIN-GUIDE.md</td>
+                </tr>
+                <tr>
+                    <td>User locked out?</td>
+                    <td>Admin reset throttle via API (1 command)</td>
+                    <td>FAQ.md + API.md</td>
+                </tr>
+                <tr>
+                    <td>Should I use Lite or Complet?</td>
+                    <td>Decision tree in README</td>
+                    <td>README.md</td>
+                </tr>
+            </table>
+
+            <h3>Health monitoring (self-diagnosis)</h3>
+
+            <div class="code-block">
+GET /v1/health
+
+{
+  "status": "ok",                    // "ok" | "degraded" | "error"
+  "version": "1.0.0",
+  "uptime_seconds": 86400,
+  "db": {
+    "status": "ok",                  // or "offline"
+    "latency_ms": 2
+  },
+  "kek": {
+    "status": "ok",
+    "version": 1,
+    "rotation_overdue": false
+  },
+  "tls": {
+    "cert_expires_days": 350
+  },
+  "last_error": null,
+  "timestamp": "2030-01-15T12:34:56Z"
+}
+
+# Customers can hook this into their own monitoring (Datadog, Grafana, etc.)
+# Will never needs to check status manually.
+            </div>
+
+            <h3>No support channels</h3>
+
+            <ul class="checklist fail">
+                <li>❌ No email support (support@n0passtemps.io does NOT exist)</li>
+                <li>❌ No Slack channel (no community Slack)</li>
+                <li>❌ No "Book a call" (no Calendly link)</li>
+                <li>❌ No "Contact sales" (no sales team)</li>
+            </ul>
+
+            <ul class="checklist success">
+                <li>✅ GitHub issues (community answers questions)</li>
+                <li>✅ Comprehensive FAQ</li>
+                <li>✅ Runnable examples (docs/ directory)</li>
+                <li>✅ Self-service TROUBLESHOOT.md</li>
+            </ul>
+        </section>
+
+        <!-- VI. ANTICIPATIONS & RISK MITIGATION -->
+        <section id="anticipations">
+            <h2>VI. Anticipations & Risk Mitigation</h2>
+
+            <h3>Risk: Installation fails for user</h3>
+            <div class="risk-item">
+                <h5>What could go wrong?</h5>
+                <p>User runs docker-compose up, gets error. No support email exists.</p>
+                <h5>Mitigation</h5>
+                <ul class="checklist">
+                    <li>Pre-flight check script (validate Docker, disk space, ports)</li>
+                    <li>Error messages are plain English (not Go stack traces)</li>
+                    <li>TROUBLESHOOT.md covers 95% of install issues (permission, port, disk)</li>
+                    <li>docker-compose.yml is pre-tested on Linux, Mac, Windows</li>
+                </ul>
+            </div>
+
+            <h3>Risk: Customer "hits a bug"</h3>
+            <div class="risk-item">
+                <h5>What could go wrong?</h5>
+                <p>Customer's auth fails. They open a GitHub issue. Will must respond fast.</p>
+                <h5>Mitigation</h5>
+                <ul class="checklist">
+                    <li>Extensive logging (all auth attempts logged, searchable)</li>
+                    <li>Health endpoint + metrics show root cause (DB down? KEK missing?)</li>
+                    <li>Recovery procedure in TROUBLESHOOT.md (restart, restore backup, etc.)</li>
+                    <li>Bug reports include logs (customer must paste /v1/health output)</li>
+                    <li>GitHub issue template guides them to solution before opening issue</li>
+                </ul>
+            </div>
+
+            <h3>Risk: Datacenter goes down (for SaaS phase 6)</h3>
+            <div class="risk-item">
+                <h5>What could go wrong?</h5>
+                <p>Will's SaaS is down. All customers' auth fails.</p>
+                <h5>Mitigation (phase 6+)</h5>
+                <ul class="checklist">
+                    <li>Multi-region Postgres (replicas in different AZ)</li>
+                    <li>Automated failover (RTO <5 minutes)</li>
+                    <li>Status page (status.n0passtemps.io, automated checks)</li>
+                    <li>SLA in Pro tier only (99.5%), Free tier is best-effort</li>
+                    <li>Customers can always fall back to on-premise (no lock-in)</li>
+                </ul>
+            </div>
+
+            <h3>Risk: Security vulnerability discovered (in WebAuthn lib or Go crypto)</h3>
+            <div class="risk-item">
+                <h5>What could go wrong?</h5>
+                <p>CVE in go-webauthn or golang.org/x/crypto. n0passtemps is affected.</p>
+                <h5>Mitigation</h5>
+                <ul class="checklist">
+                    <li>Dependabot enabled (automated dependency updates)</li>
+                    <li>Security advisories monitored (Go security mailing list)</li>
+                    <li>Patch release process documented (can ship hotfix in 2 hours)</li>
+                    <li>Customers on latest version auto-get updates (in SaaS)</li>
+                    <li>On-premise customers get release notes + upgrade instructions</li>
+                </ul>
+            </div>
+
+            <h3>Risk: "My keys/passwords are not encrypting properly"</h3>
+            <div class="risk-item">
+                <h5>What could go wrong?</h5>
+                <p>Customer misconfigures KEK, loses it, can't decrypt secrets.</p>
+                <h5>Mitigation</h5>
+                <ul class="checklist">
+                    <li>KEK backup prompted at init (BACKUP YOUR KEK FILE)</li>
+                    <li>KEK versioning means old keys still decrypted (can rotate slowly)</li>
+                    <li>GDPR right-to-delete doesn't require KEK (mark credentials revoked, purge after 30 days)</li>
+                    <li>Recovery: force re-enrollment (users log in with recovery codes, enroll new credential)</li>
+                    <li>Documentation: "What if I lose my KEK?" (step-by-step recovery)</li>
+                </ul>
+            </div>
+
+            <h3>Risk: Admin abuse (rogue admin revokes all users)</h3>
+            <div class="risk-item">
+                <h5>What could go wrong?</h5>
+                <p>Disgruntled sysadmin revokes all credentials via admin API.</p>
+                <h5>Mitigation (v1 Complet)</h5>
+                <ul class="checklist">
+                    <li>Dual-approval queue (sensitive ops require 2 admins)</li>
+                    <li>Immutable audit log (proof of what happened)</li>
+                    <li>Revoked credentials can be un-revoked within 24h by another admin</li>
+                    <li>Alert on bulk revocation (>10 users in 1 hour)</li>
+                </ul>
+            </div>
+
+            <h3>Risk: Performance degradation (database slow)</h3>
+            <div class="risk-item">
+                <h5>What could go wrong?</h5>
+                <p>Audit log grows, queries slow down. Auth latency >100ms (bad UX).</p>
+                <h5>Mitigation</h5>
+                <ul class="checklist">
+                    <li>DB indexes on tenant_id, subject_id, created_at (queries fast)</li>
+                    <li>Audit log pagination (no big queries)</li>
+                    <li>Postgres for Complet (better query planner, replication for read scaling)</li>
+                    <li>Monitoring recommendations (check slow query log, add indexes if needed)</li>
+                    <li>Documentation: "Tuning database performance" (MONITOR.md)</li>
+                </ul>
+            </div>
+
+            <h3>Risk: Compliance change (GDPR, French law update)</h3>
+            <div class="risk-item">
+                <h5>What could go wrong?</h5>
+                <p>New regulation requires different data retention. n0passtemps doesn't support it.</p>
+                <h5>Mitigation</h5>
+                <ul class="checklist">
+                    <li>Architecture designed for compliance (audit log immutability, GDPR delete, retention policies)</li>
+                    <li>On-premise customers can customize (it's open-source, MIT licensed)</li>
+                    <li>Will can add features if multiple customers need it</li>
+                    <li>SaaS customers get updates automatically (no choice)</li>
+                </ul>
+            </div>
+        </section>
+
+        <!-- VII. PHASE 0 EXACT DELIVERABLES -->
+        <section id="phase0">
+            <h2>VII. Phase 0 Exact Deliverables</h2>
+
+            <p><strong>Objective:</strong> Foundation layer. No auth code yet, just groundwork.</p>
+            <p><strong>Duration:</strong> 2–3 weeks</p>
+
+            <h3>Repo structure</h3>
+            <div class="code-block">
+n0passtemps/
+├─ .github/
+│  ├─ workflows/
+│  │  ├─ ci.yml (Go test, linting, coverage)
+│  │  ├─ security.yml (gosec, gitleaks)
+│  │  └─ release.yml (tag → Docker build → push)
+│  └─ ISSUE_TEMPLATE/ (bug report, feature request)
+│
+├─ api/
+│  └─ openapi.yaml (comprehensive, 3.1)
+│
+├─ cmd/n0passtemps-server/
+│  └─ main.go (entry point)
+│
+├─ internal/
+│  ├─ config/
+│  │  ├─ config.go (parse config.toml + env vars)
+│  │  └─ features.go (Lite vs Complet toggles)
+│  ├─ store/
+│  │  ├─ db.go (interface for SQLite + Postgres)
+│  │  ├─ sqlite/ (implementation)
+│  │  ├─ postgres/ (implementation)
+│  │  └─ migrations/ (SQL files, numbered)
+│  ├─ crypto/
+│  │  ├─ envelope/ (AES-256-GCM encrypt/decrypt)
+│  │  ├─ kek/ (KEK providers: file, vault)
+│  │  └─ zeroize/ (secure memory clearing)
+│  ├─ api/
+│  │  └─ middleware/ (logging, auth, CORS)
+│  ├─ audit/
+│  │  └─ log.go (interface for audit events)
+│  └─ health/
+│     └─ check.go (DB, KEK, TLS cert expiry)
+│
+├─ examples/
+│  ├─ curl/
+│  │  └─ register.sh (register WebAuthn)
+│  ├─ python/
+│  │  └─ verify_totp.py
+│  ├─ node/
+│  │  └─ assert.js
+│  └─ go/
+│     └─ client.go
+│
+├─ docs/
+│  ├─ ARCHITECTURE.md
+│  ├─ DEPLOYMENT.md
+│  ├─ ADMIN-GUIDE.md
+│  ├─ TROUBLESHOOT.md
+│  ├─ FAQ.md
+│  ├─ RBAC.md
+│  ├─ WEBAUTHN.md
+│  ├─ GDPR.md
+│  └─ THREAT-MODEL.md
+│
+├─ test/
+│  ├─ conformance/ (WebAuthn spec compliance)
+│  ├─ security/ (crypto validation)
+│  └─ perf/ (benchmark targets)
+│
+├─ deploy/
+│  ├─ Dockerfile (distroless Go image)
+│  ├─ docker-compose.yml (Lite + Complet examples)
+│  ├─ systemd/
+│  │  └─ n0passtemps.service
+│  └─ kubernetes/ (optional, phase 1b)
+│
+├─ config/
+│  ├─ config.example.toml (pre-filled defaults)
+│  └─ .env.example
+│
+├─ .gitignore
+├─ .github/dependabot.yml
+├─ go.mod, go.sum
+├─ Makefile (make setup-wizard, make test, make build)
+├─ README.md (decision tree, install instructions)
+├─ LICENSE (MIT)
+└─ CONTRIBUTING.md (how to contribute)
+            </div>
+
+            <h3>Phase 0 checklist</h3>
+            <ul class="checklist">
+                <li>GitHub repo created + MIT license</li>
+                <li>OpenAPI 3.1 spec (all endpoints defined, no implementation)</li>
+                <li>Database schema (SQLite + Postgres, identical)</li>
+                <li>Config system (config.toml parsing + env vars)</li>
+                <li>Feature flags (lite_mode, admin_rbac_enabled, etc.)</li>
+                <li>Crypto library skeleton (envelope interface, AES-256-GCM stub)</li>
+                <li>Store interface (DB abstraction for SQLite + Postgres)</li>
+                <li>Migration system (numbered .sql files, auto-run on startup)</li>
+                <li>CI/CD pipeline (.github/workflows for test + security + release)</li>
+                <li>Docker image (distroless, non-root, minimal)</li>
+                <li>Health endpoint (GET /v1/health JSON response)</li>
+                <li>Logging setup (structured JSON logs to stdout)</li>
+                <li>Audit log schema (table + insert function, immutable triggers)</li>
+                <li>Documentation (7 markdown files, comprehensive)</li>
+                <li>Examples (5 language clients, copy-paste examples)</li>
+                <li>Setup wizard (interactive config generation)</li>
+                <li>Makefile (make test, make build, make setup-wizard)</li>
+            </ul>
+
+            <h3>Phase 0 NOT included</h3>
+            <ul class="checklist fail">
+                <li>❌ WebAuthn registration/assertion logic (phase 1)</li>
+                <li>❌ TOTP/HOTP verification (phase 1)</li>
+                <li>❌ Admin dashboard UI (phase 1)</li>
+                <li>❌ Recovery code generation (phase 1)</li>
+                <li>❌ Alert engine (phase 1)</li>
+                <li>❌ SDK libraries (phase 1)</li>
+            </ul>
+
+            <div class="success">
+                <strong>Phase 0 output:</strong> Clean, tested foundation. Ready for phase 1 (auth core implementation).
+            </div>
+        </section>
+
+        <!-- VIII. TIMELINE & RESOURCES -->
+        <section id="timeline">
+            <h2>VIII. Timeline & Resource Planning</h2>
+
+            <h3>v1 Complet (13–14 weeks, 1–2 devs)</h3>
+            <div class="roadmap-phase">
+                <strong>Week 1–2: Phase 0</strong><br>
+                Repo + OpenAPI + DB schema + Config + Docker + CI/CD + Docs skeleton
+            </div>
+            <div class="roadmap-phase">
+                <strong>Week 3–6: Phase 1 (8–10 weeks split into two 2-week sprints)</strong><br>
+                Sprint 1 (Weeks 3–4): WebAuthn register/assert + basic attestation<br>
+                Sprint 2 (Weeks 5–6): TOTP/HOTP + anti-replay + recovery codes
+            </div>
+            <div class="roadmap-phase">
+                <strong>Week 7–9: Admin + Audit + Alerts</strong><br>
+                Sprint 3: Admin RBAC + token mgmt + dual-approval queue<br>
+                Sprint 4: Audit log + alerts engine + GDPR compliance
+            </div>
+            <div class="roadmap-phase">
+                <strong>Week 10–12: SDKs + Testing + Hardening</strong><br>
+                Sprint 5: Node.js SDK + Python SDK + Go SDK<br>
+                Sprint 6: Integration tests + perf tests + security review + documentation
+            </div>
+            <div class="roadmap-phase">
+                <strong>Week 13–14: Release + Launch prep</strong><br>
+                Documentation polish + docker-compose example + setup wizard + GitHub release
+            </div>
+
+            <h3>v1 Lite (3–4 weeks, 1 dev solo)</h3>
+            <div class="roadmap-phase">
+                <strong>Week 1: Phase 0 (same as Complet)</strong><br>
+                Repo + OpenAPI + SQLite schema + Docker + CI/CD
+            </div>
+            <div class="roadmap-phase">
+                <strong>Week 2: WebAuthn + TOTP</strong><br>
+                WebAuthn register/assert (basic attestation)<br>
+                TOTP verify (simple, no HOTP)
+            </div>
+            <div class="roadmap-phase">
+                <strong>Week 3: Recovery codes + Audit</strong><br>
+                Recovery code generation + consumption<br>
+                Simple audit log (append-only, no GDPR cooling-off)
+            </div>
+            <div class="roadmap-phase">
+                <strong>Week 4: Testing + Release</strong><br>
+                Integration tests + documentation + Docker image + GitHub release
+            </div>
+
+            <h3>Resource estimate</h3>
+            <table>
+                <tr>
+                    <th>Role</th>
+                    <th>v1 Complet</th>
+                    <th>v1 Lite</th>
+                </tr>
+                <tr>
+                    <td>Backend dev</td>
+                    <td>1–2 FTE (10–12 weeks)</td>
+                    <td>1 FTE (3–4 weeks)</td>
+                </tr>
+                <tr>
+                    <td>Frontend dev</td>
+                    <td>0.5 FTE (admin dashboard UI)</td>
+                    <td>0 (skip admin UI v1)</td>
+                </tr>
+                <tr>
+                    <td>Security review</td>
+                    <td>1 week (external consultant)</td>
+                    <td>Skip (self-review OK)</td>
+                </tr>
+                <tr>
+                    <td>Product/PM</td>
+                    <td>0.2 FTE (planning + decisions)</td>
+                    <td>0.2 FTE (same)</td>
+                </tr>
+            </table>
+
+            <h3>Dependencies & blockers</h3>
+            <ul class="checklist warn">
+                <li>⚠ WebAuthn cert validation is blocked on finalized cert roots (Apple, Google, Yubico, Microsoft URLs)</li>
+                <li>⚠ Desktop testing requires 3 platforms (Windows, Mac, Linux) → testing VM budget</li>
+                <li>⚠ Postgres testing requires separate Docker container + data → CI needs multi-container setup</li>
+                <li>⚠ Security review is external (time depends on consultant availability)</li>
+            </ul>
+        </section>
+
+        <!-- IX. STATUS & LAUNCH CHECKLIST -->
+        <section id="status">
+            <h2>IX. Status & Launch Checklist</h2>
+
+            <div class="success">
+                <strong>✅ CDC FINALIZED v3 (PLG + Development Strategy)</strong><br>
+                All decisions locked. Architecture + deployment model + development considerations formalized.
+            </div>
+
+            <h3>Pre-Phase 0 checklist (before starting implementation)</h3>
+            <ul class="checklist">
+                <li>GitHub account + organization setup</li>
+                <li>Domain registration (n0passtemps.io or equivalent)</li>
+                <li>Docker Hub account (for image distribution)</li>
+                <li>CI/CD platform selection (GitHub Actions suggested)</li>
+                <li>Incident tracking system (GitHub issues only, no Jira)</li>
+                <li>Documentation host (GitHub wiki, or markdown in repo)</li>
+                <li>Monitoring setup (optional, for SaaS later)</li>
+            </ul>
+
+            <h3>Phase 0 exit criteria (before phase 1 lock)</h3>
+            <ul class="checklist">
+                <li>GitHub repo live + CI/CD passing</li>
+                <li>OpenAPI spec complete + validated</li>
+                <li>Database schema finalized + migrations working</li>
+                <li>Docker image builds + runs without errors</li>
+                <li>All 7 documentation files written (draft quality OK)</li>
+                <li>Setup wizard generates valid config.toml + docker-compose.yml</li>
+                <li>Health endpoint returns valid JSON</li>
+            </ul>
+
+            <h3>Phase 1 exit criteria (before phase 2 lock, v1 MVP ready)</h3>
+            <ul class="checklist">
+                <li>All public APIs implemented (register, assert, verify, consume)</li>
+                <li>Attestation validation working (at least 1 vendor cert tested)</li>
+                <li>TOTP/HOTP anti-replay working (CAS tested)</li>
+                <li>Recovery codes generated + consumed</li>
+                <li>Admin RBAC working + dual-approval queue working</li>
+                <li>Audit log immutable + GDPR delete functional</li>
+                <li>Alert engine firing (10 alert types)</li>
+                <li>SDKs functional (Node, Python, Go clients)</li>
+                <li>Test coverage >80%</li>
+                <li>Security review completed (no critical findings)</li>
+                <li>Performance benchmarks met (WebAuthn <100ms, TOTP <50ms)</li>
+                <li>Documentation complete + examples runnable</li>
+            </ul>
+
+            <h3>Launch readiness (phase 1 → public)</h3>
+            <ul class="checklist">
+                <li>v1.0.0 tag on GitHub</li>
+                <li>Docker image pushed to Docker Hub (n0passtemps/n0passtemps:1.0.0)</li>
+                <li>GitHub release with changelog</li>
+                <li>README updated (install instructions, features, roadmap)</li>
+                <li>Announcement post (HN, r/golang, r/security)</li>
+                <li>Health monitoring active (status page, if SaaS prepped)</li>
+                <li>Runbook for incident response (if SaaS launched alongside)</li>
+            </ul>
+
+            <h3>Post-launch (week 1–4)</h3>
+            <ul class="checklist">
+                <li>Monitor GitHub issues (respond to bugs within 24h)</li>
+                <li>Collect early user feedback (GitHub discussions)</li>
+                <li>Fix critical bugs (hotfix releases as needed)</li>
+                <li>Polish documentation based on user questions</li>
+                <li>Begin phase 2 planning (token rotation, magic link, adaptive risk)</li>
+            </ul>
+
+            <div class="highlight">
+                <strong>🚀 Ready to launch Phase 0?</strong><br>
+                All CDC decisions locked. Next step: Create GitHub repo + CI/CD pipeline + OpenAPI spec.
+            </div>
+        </section>
+
+        <footer>
+            <p>n0passtemps v1 CDC v3 — Complete Specification + Development Strategy + PLG Deployment</p>
+            <p style="font-size: 0.9em; margin-top: 10px;">MIT License | Open-source | Product-Led Growth | On-premise first</p>
+            <p style="font-size: 0.85em; margin-top: 5px; color: #999;">Last updated: 2026-09-17 | Status: LOCKED ✅</p>
+        </footer>
+    </div>
+</body>
+</html>
