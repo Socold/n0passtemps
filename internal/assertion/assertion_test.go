@@ -864,3 +864,42 @@ func TestClaimsJSONTags(t *testing.T) {
 		t.Fatalf("optional claims present when unset: %s", raw)
 	}
 }
+
+// TestVerifyRefusesWhitespaceInsideASegment is the regression test for a
+// verifier that accepted several spellings of one valid token.
+//
+// encoding/base64 discards carriage returns and newlines even through Strict(),
+// so a break inserted into any segment used to decode to the same bytes and
+// verify. One captured assertion therefore yielded an unbounded number of
+// distinct token strings that were all valid, which defeats a replay cache
+// keyed on the token text. RFC 7515 section 3.1 permits no whitespace in the
+// compact serialisation.
+func TestVerifyRefusesWhitespaceInsideASegment(t *testing.T) {
+	iss, _ := newTestIssuer(t)
+	valid, _, err := iss.Issue(testSubject, "", testAudience, []Factor{FactorWebAuthn}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier := newTestVerifier(iss, fixedNow)
+
+	// The control: the token as issued must verify, so a failure below is
+	// about the injected character and nothing else.
+	if _, err := verifier.Verify(valid, testAudience); err != nil {
+		t.Fatalf("the token as issued does not verify: %v", err)
+	}
+
+	parts := strings.Split(valid, ".")
+	for segment, name := range map[int]string{0: "header", 1: "payload", 2: "signature"} {
+		for _, ws := range []string{"\n", "\r", "\r\n", "\t", " "} {
+			mangled := append([]string(nil), parts...)
+			half := len(mangled[segment]) / 2
+			mangled[segment] = mangled[segment][:half] + ws + mangled[segment][half:]
+
+			got, err := verifier.Verify(strings.Join(mangled, "."), testAudience)
+			if !errors.Is(err, ErrInvalidToken) {
+				t.Errorf("%s segment with %q accepted (err=%v, claims=%v); one assertion "+
+					"must have exactly one valid encoding", name, ws, err, got)
+			}
+		}
+	}
+}

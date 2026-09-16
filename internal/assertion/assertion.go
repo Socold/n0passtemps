@@ -578,17 +578,32 @@ func encodeSegment(b []byte) string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-// decodeSegment decodes one compact serialisation segment.
+// decodeSegment decodes one segment of the compact serialisation.
 //
-// RawURLEncoding has no "=" in its alphabet, so a padded segment is rejected,
-// and Strict additionally rejects a final quantum whose unused bits are not
-// zero. Together they leave each segment exactly one valid encoding: a lenient
-// decoder would let an attacker re-encode a captured header or payload into a
-// different string that still carries the same bytes past the signature check
-// of a second, laxer implementation.
+// The alphabet is checked before decoding, because encoding/base64 discards
+// carriage returns and newlines even through Strict(). Without this check a
+// token with a newline inserted into any segment decodes to the same bytes and
+// verifies, so one legitimate assertion yields an unbounded number of distinct
+// token strings that are all valid. An integrator whose replay cache is keyed
+// on the token text rather than on the "jti" claim would be defeated by it, and
+// RFC 7515 section 3.1 admits no whitespace in this serialisation anyway.
+//
+// Strict() is kept as well: it is what refuses a final quantum whose unused
+// bits are not zero, so a segment has exactly one valid encoding.
 func decodeSegment(s string) ([]byte, error) {
 	if s == "" {
 		return nil, ErrInvalidToken
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		case c == '-' || c == '_':
+		default:
+			// This also catches the padding '=' and the standard alphabet's
+			// '+' and '/', none of which belong in base64url.
+			return nil, ErrInvalidToken
+		}
 	}
 	b, err := base64.RawURLEncoding.Strict().DecodeString(s)
 	if err != nil {
