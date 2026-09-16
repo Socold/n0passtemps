@@ -644,9 +644,13 @@ func (s *Server) ceremonyError(r *http.Request, tenantID, subjectID string, call
 			Title:    "this authenticator model is not permitted",
 			Internal: err,
 		}
-	case errors.Is(err, wa.ErrNoCredentials):
-		return Conflict("the subject has no registered authenticator", err)
 	default:
+		// This includes a subject with no registered authenticator. Answering
+		// that case distinctly would tell a caller which of its users have
+		// enrolled, through the one route that is supposed to say nothing but
+		// yes or no. An application that needs to know what to offer reads
+		// GET /v1/subjects/{subject_ref}, which exists for that purpose and is
+		// an explicit, scoped, audited question rather than a side channel.
 		return CeremonyFailed(err)
 	}
 }
