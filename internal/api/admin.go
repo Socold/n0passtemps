@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Socold/n0passtemps/internal/audit"
+	"github.com/Socold/n0passtemps/internal/config"
 	"github.com/Socold/n0passtemps/internal/crypto/recovery"
 	"github.com/Socold/n0passtemps/internal/crypto/token"
 	"github.com/Socold/n0passtemps/internal/store"
@@ -1340,8 +1341,17 @@ func (s *Server) handleAdminRevokeAdminToken(w http.ResponseWriter, r *http.Requ
 		return NotFound(errors.New("admin token does not exist or is already revoked"))
 	}
 
-	if target.Role == store.RoleFull {
-		count, err := s.deps.Store.CountAdminTokensByRole(r.Context(), tenantID, store.RoleFull)
+	// A token already due to expire inside the horizon is not one of the
+	// administrators the guard protects, so revoking it cannot be what leaves
+	// the deployment without one.
+	outlasts := target.ExpiresAt == nil || target.ExpiresAt.After(s.now().UTC().Add(config.MaxRotationGrace))
+	if target.Role == store.RoleFull && outlasts {
+		// Counted at the far end of the longest possible rotation grace, not at
+		// the present. A rotated predecessor still works today and would
+		// otherwise pass for a second administrator; revoking its successor
+		// would then leave nobody once the grace ran out.
+		horizon := s.now().UTC().Add(config.MaxRotationGrace)
+		count, err := s.deps.Store.CountAdminTokensByRole(r.Context(), tenantID, store.RoleFull, horizon)
 		if err != nil {
 			return Internal(err)
 		}

@@ -143,7 +143,7 @@ func bootstrapAdmin(ctx context.Context, cfg *config.Config, st store.Store, rec
 		return fmt.Errorf("-admins must be between 1 and %d, got %d", maxBootstrapAdmins, n)
 	}
 
-	count, err := st.CountAdminTokensByRole(ctx, cfg.TenantID(), store.RoleFull)
+	count, err := st.CountAdminTokensByRole(ctx, cfg.TenantID(), store.RoleFull, time.Now().UTC())
 	if err != nil {
 		return fmt.Errorf("count administrators: %w", err)
 	}
@@ -197,7 +197,7 @@ func bootstrapAdmin(ctx context.Context, cfg *config.Config, st store.Store, rec
 
 // warnIfNoAdministrator tells an operator how to get in on a fresh deployment.
 func warnIfNoAdministrator(ctx context.Context, cfg *config.Config, st store.Store, log *slog.Logger) {
-	count, err := st.CountAdminTokensByRole(ctx, cfg.TenantID(), store.RoleFull)
+	count, err := st.CountAdminTokensByRole(ctx, cfg.TenantID(), store.RoleFull, time.Now().UTC())
 	if err != nil || count > 0 {
 		return
 	}

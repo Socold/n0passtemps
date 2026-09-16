@@ -201,7 +201,7 @@ request an erasure, rewrap the keyring, and decide approvals.
 
 | Control | Effect |
 |---|---|
-| The role split | An auditor changes nothing, not even an alert acknowledgement, because an auditor who can quietly clear an alert can quietly cover a trace. An operator cannot change who may administer the service |
+| The role split | An auditor changes nothing but its own token, which it may rotate, not even an alert acknowledgement, because an auditor who can quietly clear an alert can quietly cover a trace. An operator cannot change who may administer the service |
 | `throttle.admin_revoke_burst`, default 10 | The revoke route is rate limited per administrator. This is the control that replaces reversible revocation; see [ADR 0010](adr/0010-revocation-is-final.md) |
 | `credential.bulk_revoked` alert | Raised above the burst |
 | The last-credential guard | Revoking a subject's only authenticator requires `allow_last: true` |
@@ -213,7 +213,7 @@ request an erasure, rewrap the keyring, and decide approvals.
 **Not mitigated**
 
 - **A full administrator is trusted.** By design. `admin_full` holds all
-  twenty-five permissions, and the only thing standing between it and total
+  twenty-seven permissions, and the only thing standing between it and total
   control is the dual-approval queue on four operations and the audit log
   afterwards. Separation of duty here is a speed bump and a record, not a
   barrier.

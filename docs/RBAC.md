@@ -1,16 +1,18 @@
 # Administrative roles and permissions
 
-Three roles, twenty-five permissions, one mapping. The authority is in
+Three roles, twenty-seven permissions, one mapping. The authority is in
 `internal/rbac/rbac.go`; the matrix below is generated to match it.
 
 ## The design principle
 
 Authority grows with the damage the holder is trusted to cause, and reading is
-never bundled with writing.
+never bundled with writing, other than self-service credential hygiene: every
+role may rotate its own token, and that is the only write an auditor holds. See
+[The self-service rule](#the-self-service-rule).
 
 | Role | Held by | Line it stops at |
 |---|---|---|
-| `admin_auditor` | Someone who reviews the service without operating it | Changes nothing at all, not even an alert acknowledgement. An auditor who can quietly clear an alert can quietly cover a trace, which is the one thing the role exists to prevent. |
+| `admin_auditor` | Someone who reviews the service without operating it | Changes nothing but its own token, not even an alert acknowledgement. An auditor who can quietly clear an alert can quietly cover a trace, which is the one thing the role exists to prevent. |
 | `admin_operator` | Day to day user support | Adds the operations that recover a locked-out user. Stops short of anything that changes who may administer the service, anything that acts on many records at once, and anything that touches key material. |
 | `admin_full` | The operator of the deployment | Holds every permission. |
 
@@ -29,8 +31,9 @@ recognise, for instance after a downgrade, holds nothing.
 
 ## The matrix
 
-The read permissions come first, then the operations an operator may perform,
-then the operations reserved to `admin_full`.
+The read permissions come first, then the one self-service write every role
+holds, then the operations an operator may perform, then the operations reserved
+to `admin_full`.
 
 | # | Permission | `admin_auditor` | `admin_operator` | `admin_full` | Dual-approval candidate |
 |---|---|---|---|---|---|
@@ -44,24 +47,26 @@ then the operations reserved to `admin_full`.
 | 8 | `health.read_detailed` | yes | yes | yes | no |
 | 9 | `api_key.list` | yes | yes | yes | no |
 | 10 | `admin_token.list` | yes | yes | yes | no |
-| 11 | `subject.lock` | no | yes | yes | no |
-| 12 | `subject.unlock` | no | yes | yes | no |
-| 13 | `credential.revoke` | no | yes | yes | no |
-| 14 | `recovery.reissue` | no | yes | yes | no |
-| 15 | `throttle.reset` | no | yes | yes | no |
-| 16 | `alert.acknowledge` | no | yes | yes | no |
-| 17 | `credential.revoke_bulk` | no | no | yes | yes |
-| 18 | `approval.decide` | no | no | yes | no |
-| 19 | `erasure.request` | no | no | yes | yes |
-| 20 | `erasure.cancel` | no | no | yes | no |
-| 21 | `api_key.create` | no | no | yes | no |
-| 22 | `api_key.revoke` | no | no | yes | no |
-| 23 | `admin_token.create` | no | no | yes | yes |
-| 24 | `admin_token.revoke` | no | no | yes | no |
-| 25 | `kek.rotate` | no | no | yes | yes |
+| 11 | `admin_token.rotate_self` | yes | yes | yes | no |
+| 12 | `subject.lock` | no | yes | yes | no |
+| 13 | `subject.unlock` | no | yes | yes | no |
+| 14 | `credential.revoke` | no | yes | yes | no |
+| 15 | `recovery.reissue` | no | yes | yes | no |
+| 16 | `throttle.reset` | no | yes | yes | no |
+| 17 | `alert.acknowledge` | no | yes | yes | no |
+| 18 | `credential.revoke_bulk` | no | no | yes | yes |
+| 19 | `approval.decide` | no | no | yes | no |
+| 20 | `erasure.request` | no | no | yes | yes |
+| 21 | `erasure.cancel` | no | no | yes | no |
+| 22 | `api_key.create` | no | no | yes | no |
+| 23 | `api_key.revoke` | no | no | yes | no |
+| 24 | `api_key.rotate` | no | no | yes | no |
+| 25 | `admin_token.create` | no | no | yes | yes |
+| 26 | `admin_token.revoke` | no | no | yes | no |
+| 27 | `kek.rotate` | no | no | yes | yes |
 
-Counts: `admin_auditor` holds 10, `admin_operator` holds 16, `admin_full` holds
-all 25.
+Counts: `admin_auditor` holds 11, `admin_operator` holds 17, `admin_full` holds
+all 27.
 
 `audit.verify` sits among the read permissions because verification recomputes
 hashes and writes nothing. It does append one audit entry recording that a
@@ -73,6 +78,43 @@ listing can disclose a token, because only a selector and a digest of the
 verifier are ever stored. They are separate permissions rather than a reuse of
 `subject.list`, because sharing a permission between unrelated resources means a
 later decision to withhold one of them has nowhere to express itself.
+
+## The self-service rule
+
+`admin_token.rotate_self` is a write, and every role holds it, the auditor
+included. It is the one exception to "an auditor changes nothing", and it is
+narrow by construction rather than by policy:
+
+- The route is `POST /admin/v1/admin-tokens/self/rotate`. It takes no token
+  identifier, in the path or in the body. The token that is rotated is the one
+  that authenticated the request.
+- The successor carries the same name and the same role, and it cannot outlive
+  the token it replaces: an expiry is inherited, and `expires_in_days` may only
+  bring it forward. The caller ends the call holding exactly the authority it
+  began with, for no longer than it was given.
+- Nothing else is touched: no subject, no record, no other credential. The
+  rotation is audited as `admin_token.rotated`.
+
+Because it changes no authority it is not a dual-approval candidate. There is
+nothing for a second administrator to weigh, and holding it would mean that a
+token its owner believes has leaked stays valid until somebody else is awake.
+
+There is deliberately no permission, and no route, for rotating another
+administrator's token. The response to a rotation carries the successor
+credential, so rotating someone else's token would hand the caller that
+person's next credential, under their name and with their role. That is
+impersonation. Replacing another administrator's token is `admin_token.revoke`
+followed by `admin_token.create`, and the second is approval-gated.
+
+`api_key.rotate` is not self-service and is reserved to `admin_full`. Its
+response carries a working credential for the public surface, so it sits with
+`api_key.create`. Like `api_key.create`, it is not a dual-approval candidate.
+
+In `internal/rbac` the rule is a separate list, `selfServicePermissions`, rather
+than an entry among the read permissions, so the statement that every read
+permission changes no state stays true. A test pins the list to exactly this one
+permission, so granting the auditor a second write means changing that test in
+review.
 
 ## Which route requires which permission
 
@@ -104,9 +146,11 @@ check cannot exist as an open route.
 | `GET /admin/v1/api-keys` | `api_key.list` |
 | `POST /admin/v1/api-keys` | `api_key.create` |
 | `POST /admin/v1/api-keys/{key_id}/revoke` | `api_key.revoke` |
+| `POST /admin/v1/api-keys/{key_id}/rotate` | `api_key.rotate` |
 | `GET /admin/v1/admin-tokens` | `admin_token.list` |
 | `POST /admin/v1/admin-tokens` | `admin_token.create` |
 | `POST /admin/v1/admin-tokens/{token_id}/revoke` | `admin_token.revoke` |
+| `POST /admin/v1/admin-tokens/self/rotate` | `admin_token.rotate_self` |
 | `POST /admin/v1/kek/rewrap` | `kek.rotate` |
 | `GET /admin/v1/health` | `health.read_detailed` |
 

@@ -214,11 +214,19 @@ func (s *Server) mountAdmin(mux *http.ServeMux) {
 	mux.Handle("POST /admin/v1/api-keys", guarded(rbac.PermAPIKeyCreate, s.handleAdminCreateAPIKey))
 	mux.Handle("POST /admin/v1/api-keys/{key_id}/revoke",
 		guarded(rbac.PermAPIKeyRevoke, s.handleAdminRevokeAPIKey))
+	mux.Handle("POST /admin/v1/api-keys/{key_id}/rotate",
+		guarded(rbac.PermAPIKeyRotate, s.handleAdminRotateAPIKey))
 
 	mux.Handle("GET /admin/v1/admin-tokens", guarded(rbac.PermAdminTokenList, s.handleAdminListAdminTokens))
 	mux.Handle("POST /admin/v1/admin-tokens", guarded(rbac.PermAdminTokenCreate, s.handleAdminCreateAdminToken))
 	mux.Handle("POST /admin/v1/admin-tokens/{token_id}/revoke",
 		guarded(rbac.PermAdminTokenRevoke, s.handleAdminRevokeAdminToken))
+
+	// A token rotates itself and only itself, so the path names no token. A
+	// {token_id} segment here would be a route for obtaining another
+	// administrator's successor credential; see handleAdminRotateOwnToken.
+	mux.Handle("POST /admin/v1/admin-tokens/self/rotate",
+		guarded(rbac.PermAdminTokenRotateSelf, s.handleAdminRotateOwnToken))
 
 	// Key management. Adding a key version is a command-line operation on the
 	// keyring file; moving the stored records onto it is this route.

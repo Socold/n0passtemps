@@ -56,11 +56,19 @@ const (
 	EventThrottleReset   = "throttle.reset"
 
 	// Caller credentials.
+	//
+	// A rotation has its own event rather than a created entry followed by a
+	// revoked one. The predecessor is not revoked, it is given an expiry, and
+	// an entry pair would leave a reader to work out that the two credentials
+	// are the same integration. The detail names both identifiers and the
+	// instant the predecessor stops, and never the token.
 	EventAPIKeyCreated     = "api_key.created"
 	EventAPIKeyRevoked     = "api_key.revoked"
+	EventAPIKeyRotated     = "api_key.rotated"
 	EventAPIKeyRejected    = "api_key.rejected"
 	EventAdminTokenCreated = "admin_token.created"
 	EventAdminTokenRevoked = "admin_token.revoked"
+	EventAdminTokenRotated = "admin_token.rotated"
 	EventAdminAuthFailed   = "admin.auth_failed"
 	EventAdminAuthorised   = "admin.authorised"
 	EventAdminDenied       = "admin.denied"

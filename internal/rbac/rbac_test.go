@@ -63,6 +63,21 @@ func TestReadAndWriteSetsPartitionAllPermissions(t *testing.T) {
 			t.Errorf("permission %q is listed as both a read and a write operation", p)
 		}
 	}
+	for _, p := range selfServicePermissions {
+		if !p.Valid() {
+			t.Errorf("self-service permission %q is not declared in AllPermissions", p)
+		}
+		// A self-service permission is a write. Listing one as a read would
+		// make the claim "everything in readPermissions changes no state"
+		// false, and listing one as an operator extra would say the auditor
+		// does not hold it.
+		if slices.Contains(readPermissions, p) {
+			t.Errorf("self-service permission %q is also listed as a read", p)
+		}
+		if slices.Contains(operatorExtras, p) {
+			t.Errorf("self-service permission %q is also listed as an operator extra", p)
+		}
+	}
 }
 
 // TestRoleMatrix states the expected answer for every role and every
@@ -88,6 +103,10 @@ func TestRoleMatrix(t *testing.T) {
 			// anything.
 			PermAPIKeyList,
 			PermAdminTokenList,
+			// The one write an auditor holds. It replaces the caller's own
+			// token and touches nothing else; see
+			// TestAuditorHoldsNoWriteBeyondSelfService.
+			PermAdminTokenRotateSelf,
 		},
 		store.RoleOperator: {
 			PermSubjectList,
@@ -100,6 +119,7 @@ func TestRoleMatrix(t *testing.T) {
 			PermHealthReadFull,
 			PermAPIKeyList,
 			PermAdminTokenList,
+			PermAdminTokenRotateSelf,
 			PermSubjectLock,
 			PermSubjectUnlock,
 			PermCredentialRevoke,
@@ -130,6 +150,7 @@ func TestOperatorIsRefusedTheReservedOperations(t *testing.T) {
 		PermApprovalDecide,
 		PermAPIKeyCreate,
 		PermAPIKeyRevoke,
+		PermAPIKeyRotate,
 		PermAdminTokenCreate,
 		PermAdminTokenRevoke,
 		PermKEKRotate,
@@ -141,17 +162,61 @@ func TestOperatorIsRefusedTheReservedOperations(t *testing.T) {
 	}
 }
 
-func TestAuditorHoldsNoWritePermission(t *testing.T) {
+// TestAuditorHoldsNoWriteBeyondSelfService states the precise rule for the
+// auditor: no write permission other than self-service credential hygiene.
+//
+// The rule used to be "no write permission at all". Rotating one's own token
+// is a write, so that sentence is no longer true, and the test says what is
+// true instead of being loosened: the exception is one named permission, it is
+// pinned below, and every other write is still refused.
+func TestAuditorHoldsNoWriteBeyondSelfService(t *testing.T) {
 	for _, p := range writePermissions(t) {
+		if slices.Contains(selfServicePermissions, p) {
+			if !Allowed(store.RoleAuditor, p) {
+				t.Errorf("%s does not hold the self-service permission %s; an auditor whose "+
+					"token may have leaked must be able to replace it without asking anyone",
+					store.RoleAuditor, p)
+			}
+			continue
+		}
 		if Allowed(store.RoleAuditor, p) {
-			t.Errorf("%s holds the write permission %s; the role exists to be unable to change anything",
-				store.RoleAuditor, p)
+			t.Errorf("%s holds the write permission %s; the role exists to be unable to "+
+				"change anything but its own credential", store.RoleAuditor, p)
 		}
 	}
 	// Stated separately because it is the one an implementation is most
 	// tempted to grant: acknowledging an alert looks harmless and is not.
 	if Allowed(store.RoleAuditor, PermAlertAcknowledge) {
 		t.Errorf("%s may acknowledge alerts", store.RoleAuditor)
+	}
+}
+
+// TestSelfServiceIsExactlyOwnTokenRotation pins the exception.
+//
+// The self-service list is what an auditor may write, so growing it grows the
+// auditor. Anyone adding a second entry has to change this test, which is the
+// point: the decision is made in review rather than by appending to a slice.
+func TestSelfServiceIsExactlyOwnTokenRotation(t *testing.T) {
+	want := []Permission{PermAdminTokenRotateSelf}
+	if !slices.Equal(selfServicePermissions, want) {
+		t.Fatalf("selfServicePermissions = %v, want %v", selfServicePermissions, want)
+	}
+	for _, role := range []store.Role{store.RoleAuditor, store.RoleOperator, store.RoleFull} {
+		if !Allowed(role, PermAdminTokenRotateSelf) {
+			t.Errorf("%s may not rotate its own token", role)
+		}
+	}
+	// Rotating an application's key is not self-service: it hands the caller a
+	// working credential for the public surface.
+	for _, role := range []store.Role{store.RoleAuditor, store.RoleOperator} {
+		if Allowed(role, PermAPIKeyRotate) {
+			t.Errorf("%s holds %s, which must be reserved to %s", role, PermAPIKeyRotate, store.RoleFull)
+		}
+	}
+	// Self-rotation changes no authority, so holding it for a second
+	// administrator would protect nothing.
+	if RequiresApproval(PermAdminTokenRotateSelf) {
+		t.Errorf("%s is a dual-approval candidate", PermAdminTokenRotateSelf)
 	}
 }
 

@@ -2238,6 +2238,86 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /admin/v1/api-keys/{key_id}/rotate:
+    parameters:
+      - $ref: "#/components/parameters/KeyId"
+    post:
+      tags: [Administration]
+      operationId: adminRotateAPIKey
+      summary: Replace an application credential without downtime.
+      description: |
+        Requires `api_key.rotate`, held by admin_full only.
+
+        Mints a successor with the same name, scopes and tenant, and gives the
+        predecessor an expiry of now plus `grace`, in one store transaction.
+        Both keys work until `predecessor_expires_at`, and the predecessor then
+        stops without a further call. Minting a new key and revoking the old
+        one forces either an outage, if the revocation comes first, or an
+        overlap nobody remembers to close, if it comes second; rotation makes
+        the overlap explicit and self-closing.
+
+        `grace` is a duration such as `"24h"`. Absent, it is
+        `features.rotation_grace`. `"0s"` stops the predecessor at once. Above
+        `168h` the request is refused with `400`, because an overlap that long
+        is two live credentials, not a rotation.
+
+        Rotation never extends a credential: a predecessor that already expires
+        sooner keeps its earlier expiry, and `predecessor_expires_at` reports
+        the real instant. The successor does not inherit the predecessor's
+        expiry. It takes `expires_in_days` from the body, or has none, which
+        the response reports as `no_expiry` as minting does.
+
+        A revoked or expired key is refused with `409`. Rotating it would bring
+        back, under a fresh token, an integration somebody switched off.
+
+        The body is optional. The token is returned once.
+      security:
+        - adminToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RotateRequest"
+      responses:
+        "201":
+          description: The successor and its one-time token.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RotateAPIKeyResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            The key is revoked, has already expired, or was revoked while the
+            rotation was in progress. Nothing was minted. Mint a new key
+            instead.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /admin/v1/admin-tokens:
     get:
       tags: [Administration]
@@ -2379,6 +2459,85 @@ paths:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/Problem"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/admin-tokens/self/rotate:
+    post:
+      tags: [Administration]
+      operationId: adminRotateOwnToken
+      summary: Replace the administrative token making the request.
+      description: |
+        Requires `admin_token.rotate_self`, held by admin_auditor,
+        admin_operator and admin_full.
+
+        The token that is rotated is the one that authenticated the request.
+        The path names no token and the body accepts none, and there is
+        deliberately no route for rotating another administrator's token: the
+        response carries the successor credential, so such a route would hand
+        the caller that person's next token, which is impersonation. To replace
+        another administrator's token, revoke it and mint a new one, which is
+        approval-gated.
+
+        The successor has the same name and the same role. Rotating one's own
+        token changes no authority, so it is never held for a second
+        administrator, and it is the one write admin_auditor may perform,
+        because it touches nothing but the caller's own credential.
+
+        For the same reason the successor cannot outlive the token it replaces.
+        It inherits the predecessor's original expiry, if there was one;
+        `expires_in_days` may bring that forward and is refused with `400` if
+        it would push it back.
+
+        `grace` behaves as it does for an API key: absent means
+        `features.rotation_grace`, `"0s"` stops the predecessor at once, above
+        `168h` is refused with `400`, and a predecessor that already expires
+        sooner keeps its earlier expiry.
+
+        The body is optional. The token is returned once. With `"grace": "0s"`
+        a lost response leaves the caller with no working token, which for the
+        only admin_full token means recovering through the bootstrap command.
+      security:
+        - adminToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RotateRequest"
+      responses:
+        "201":
+          description: The successor and its one-time token.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RotateAdminTokenResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: |
+            The token was revoked while the rotation was in progress. Nothing
+            was minted.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "415":
           $ref: "#/components/responses/UnsupportedMediaType"
         "500":
@@ -4545,7 +4704,10 @@ components:
 
         `admin_auditor` reads everything and changes nothing, not even an alert
         acknowledgement: an auditor who can quietly clear an alert can quietly
-        cover a trace, which is the one thing the role exists to prevent.
+        cover a trace, which is the one thing the role exists to prevent. The
+        single exception is self-service credential hygiene: every role may
+        rotate its own token, which touches nothing but the caller's own
+        credential.
 
         `admin_operator` adds the operations that recover a locked-out user:
         lock, unlock, throttle reset, single credential revocation, recovery
@@ -4752,6 +4914,111 @@ components:
             retrievable again.
         warning:
           type: string
+    RotateRequest:
+      type: object
+      title: RotateRequest
+      description: |
+        The optional body of both rotation routes. Unknown fields are refused,
+        so a misspelled `grace` cannot fall back to the default unnoticed.
+      properties:
+        grace:
+          type: string
+          description: |
+            How long the predecessor keeps working beside its successor, as a
+            Go duration: a sequence of decimal numbers with the units `h`, `m`
+            and `s`. Absent or empty means `features.rotation_grace`. `"0s"`
+            stops the predecessor at once. The maximum is `168h`.
+          examples:
+            - 24h
+            - 90m
+            - 0s
+        expires_in_days:
+          type: integer
+          minimum: 0
+          description: |
+            The successor's lifetime in days. Zero or absent means no expiry of
+            the caller's choosing: none at all for an API key, and the
+            predecessor's own expiry, if it had one, for an administrative
+            token. For an administrative token a value that would outlive the
+            predecessor is refused.
+    RotateAPIKeyResult:
+      type: object
+      title: RotateAPIKeyResult
+      required:
+        - api_key
+        - token
+        - warning
+        - no_expiry
+        - unrestricted
+        - predecessor_id
+        - predecessor_expires_at
+      properties:
+        api_key:
+          $ref: "#/components/schemas/APIKey"
+          description: The successor.
+        token:
+          type: string
+          description: |
+            The successor's full `npt_<selector>.<verifier>` token, shown once
+            and not retrievable again.
+        warning:
+          type: string
+        no_expiry:
+          type: boolean
+          description: |
+            True when the successor has no expiry. It never inherits the
+            predecessor's, so this is true whenever `expires_in_days` was zero
+            or absent.
+        unrestricted:
+          type: boolean
+          description: |
+            True when the predecessor held no scopes, and the successor
+            therefore holds none either.
+        predecessor_id:
+          type: string
+          format: uuid
+        predecessor_expires_at:
+          type: string
+          format: date-time
+          description: |
+            The instant the predecessor stops authenticating. It is now plus
+            the grace, or the predecessor's own expiry where that was sooner.
+    RotateAdminTokenResult:
+      type: object
+      title: RotateAdminTokenResult
+      required:
+        - admin_token
+        - token
+        - warning
+        - no_expiry
+        - predecessor_id
+        - predecessor_expires_at
+      properties:
+        admin_token:
+          $ref: "#/components/schemas/AdminToken"
+          description: The successor, with the predecessor's name and role.
+        token:
+          type: string
+          description: |
+            The successor's full `npa_<selector>.<verifier>` token, shown once
+            and not retrievable again.
+        warning:
+          type: string
+        no_expiry:
+          type: boolean
+          description: |
+            True when the successor has no expiry, which is only possible when
+            the predecessor had none.
+        predecessor_id:
+          type: string
+          format: uuid
+          description: Always the token that made the request.
+        predecessor_expires_at:
+          type: string
+          format: date-time
+          description: |
+            The instant the predecessor stops authenticating. It is now plus
+            the grace, or the predecessor's own expiry where that was sooner.
     RevokeAPIKeyResult:
       type: object
       title: RevokeAPIKeyResult

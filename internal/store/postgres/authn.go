@@ -240,14 +240,14 @@ func (s *Store) touchAuthnRow(ctx context.Context, table, id string, at time.Tim
 // expired tokens are excluded because the count exists to stop an operator
 // removing the last usable administrator of a role, and a count that included
 // unusable tokens would report that a fallback exists when it does not.
-func (s *Store) CountAdminTokensByRole(ctx context.Context, tenantID string, role store.Role) (int, error) {
+func (s *Store) CountAdminTokensByRole(ctx context.Context, tenantID string, role store.Role, usableAt time.Time) (int, error) {
 	var n int
 	err := s.pool.QueryRow(ctx, `
 		SELECT COUNT(*) FROM admin_tokens
 		WHERE tenant_id = $1 AND role = $2
 		  AND revoked_at IS NULL
 		  AND (expires_at IS NULL OR expires_at > $3)`,
-		tenantID, string(role), time.Now().UTC()).Scan(&n)
+		tenantID, string(role), usableAt).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("postgres: count admin tokens by role: %w", err)
 	}

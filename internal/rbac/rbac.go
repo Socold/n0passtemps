@@ -16,6 +16,17 @@
 //	               anything that touches key material.
 //	admin_full     holds every permission.
 //
+// There is one deliberate exception to "an auditor changes nothing", and it is
+// stated here so that it is never mistaken for drift: every role, the auditor
+// included, may rotate its own administrative token (admin_token.rotate_self).
+// It is a write, but it touches nothing except the caller's own credential. It
+// changes no subject, no record and nobody's authority, the successor carries
+// the same role, and the rotation is audited. Withholding it would mean an
+// auditor whose token may have leaked has to ask a full administrator to revoke
+// and re-mint it, and the usual result of that friction is a token that is
+// never replaced at all. The split the package enforces is therefore: reading
+// is never bundled with writing, other than self-service credential hygiene.
+//
 // Membership is expressed as an explicit permission set per role rather than as
 // a numeric level. A level invites the assumption that a higher role is a
 // superset of a lower one, which then makes it impossible to grant an operator
@@ -42,9 +53,10 @@ type Permission string
 
 // The administrative permission set.
 //
-// Read permissions are listed first, then the operations an operator may
-// perform, then the operations reserved to admin_full. The grouping is a reading
-// aid only; authority comes from the role sets below.
+// Read permissions are listed first, then the one self-service write every
+// role holds, then the operations an operator may perform, then the operations
+// reserved to admin_full. The grouping is a reading aid only; authority comes
+// from the role sets below.
 const (
 	// Read-only permissions.
 	PermSubjectList    Permission = "subject.list"
@@ -67,6 +79,17 @@ const (
 	PermAPIKeyList     Permission = "api_key.list"
 	PermAdminTokenList Permission = "admin_token.list"
 
+	// Self-service credential hygiene, held by every role.
+	//
+	// The permission covers the caller's own token and nothing else. There is
+	// deliberately no permission, and no route, for rotating another
+	// administrator's token: the response to a rotation carries the successor
+	// credential, so rotating someone else's token would hand the caller that
+	// person's next credential, which is impersonation. Replacing another
+	// administrator's token is a revocation followed by a mint, and the mint is
+	// a dual-approval candidate.
+	PermAdminTokenRotateSelf Permission = "admin_token.rotate_self"
+
 	// User support permissions.
 	PermSubjectLock      Permission = "subject.lock"
 	PermSubjectUnlock    Permission = "subject.unlock"
@@ -82,6 +105,7 @@ const (
 	PermErasureCancel        Permission = "erasure.cancel"
 	PermAPIKeyCreate         Permission = "api_key.create"
 	PermAPIKeyRevoke         Permission = "api_key.revoke"
+	PermAPIKeyRotate         Permission = "api_key.rotate"
 	PermAdminTokenCreate     Permission = "admin_token.create"
 	PermAdminTokenRevoke     Permission = "admin_token.revoke"
 	PermKEKRotate            Permission = "kek.rotate"
@@ -104,6 +128,8 @@ var AllPermissions = []Permission{
 	PermAPIKeyList,
 	PermAdminTokenList,
 
+	PermAdminTokenRotateSelf,
+
 	PermSubjectLock,
 	PermSubjectUnlock,
 	PermCredentialRevoke,
@@ -117,6 +143,7 @@ var AllPermissions = []Permission{
 	PermErasureCancel,
 	PermAPIKeyCreate,
 	PermAPIKeyRevoke,
+	PermAPIKeyRotate,
 	PermAdminTokenCreate,
 	PermAdminTokenRevoke,
 	PermKEKRotate,
@@ -151,6 +178,17 @@ var readPermissions = []Permission{
 	PermAdminTokenList,
 }
 
+// selfServicePermissions are the write operations every role may perform,
+// because each one touches nothing but the caller's own credential.
+//
+// This is the only write an auditor holds. The list is kept separate from
+// readPermissions rather than appended to it, so that the claim "everything in
+// readPermissions changes no state" stays true, and so that a second entry
+// here is a visible decision that a test has to be changed to admit.
+var selfServicePermissions = []Permission{
+	PermAdminTokenRotateSelf,
+}
+
 // operatorExtras are the write operations an operator may perform. Each one
 // affects a single subject and is recoverable by re-enrolment, which is the line
 // the role is drawn on.
@@ -179,6 +217,10 @@ func init() {
 
 	auditor := set(readPermissions...)
 	operator := set(readPermissions...)
+	for _, p := range selfServicePermissions {
+		auditor[p] = struct{}{}
+		operator[p] = struct{}{}
+	}
 	for _, p := range operatorExtras {
 		operator[p] = struct{}{}
 	}

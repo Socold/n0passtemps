@@ -382,7 +382,7 @@ an orthography choice. Recovery codes are
 | Passwords | No | There are none, anywhere |
 | Hash-chained audit log | Yes | SHA-256 chain, verification route, tamper-**evident** rather than tamper-proof |
 | GDPR erasure that keeps the chain verifiable | Yes | Through a salted commitment to the personal fields |
-| Three administrative roles, 25 permissions | Yes | Enforced per route at mount time. `features.admin_rbac` |
+| Three administrative roles, 27 permissions | Yes | Enforced per route at mount time. `features.admin_rbac` |
 | Dual approval | Yes, four operations | Erasure, administrative token creation, revoking every credential of a subject, and the keyring rewrap. An approval is redeemed by the requester, who repeats the identical request with `X-Approval-Id`; self-approval is refused. [ADR 0013](docs/adr/0013-approvals-are-redeemed-not-executed.md) |
 | API key scopes | Yes | `subjects`, `webauthn`, `totp`, `recovery`, `health`. An empty list is unrestricted, and the minting response says so. A key outside its scope gets 403 and the attempt is audited |
 | Revoke every authenticator of a subject | Yes | One transaction covering all WebAuthn credentials and the TOTP secret. Recovery codes are left, and the response reports how many remain |
@@ -436,12 +436,13 @@ Security Top 10 2023, and GDPR Articles 15, 17 and 32.
 |---|---|
 | [README.md](README.md) | This file: what it is, installing it, integrating with it |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Package layout, the request path, the two-pool SQLite arrangement, where each secret lives, the dependency policy |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | What is done, what comes next, and the decisions still open |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | The four supported forms, with a pre-flight checklist, TLS, backup, restore and upgrade for each |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every configuration key, its default, its environment variable, and every message the validator refuses with |
 | [docs/ADMIN-GUIDE.md](docs/ADMIN-GUIDE.md) | Minting and revoking credentials, the five things an operator actually does, the approval queue, verifying the chain |
 | [docs/TROUBLESHOOT.md](docs/TROUBLESHOOT.md) | Symptom first: it will not start, WebAuthn fails, a user is locked out, the keyring is lost |
 | [docs/FAQ.md](docs/FAQ.md) | Short answers, including what this is not |
-| [docs/RBAC.md](docs/RBAC.md) | The 25 permissions against the three roles, and which are dual-approval candidates |
+| [docs/RBAC.md](docs/RBAC.md) | The 27 permissions against the three roles, and which are dual-approval candidates |
 | [docs/WEBAUTHN.md](docs/WEBAUTHN.md) | The ceremony here specifically, the challenge store, the user handle, attestation, the counter, platform notes |
 | [docs/GDPR.md](docs/GDPR.md) | Lawful basis, the personal data inventory, the Article 15 and 17 paths, how the chain survives erasure |
 | [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) | Assets, trust boundaries, nine attackers, and what is not mitigated |

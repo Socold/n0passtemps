@@ -516,6 +516,7 @@ one schema serve both and a deployment can adopt a feature without migrating.
 | `features.erasure_retention` | duration | `720h` (30 days) | `N0PASSTEMPS_FEATURES_ERASURE_RETENTION` | The window in which a pending erasure can still be cancelled. |
 | `features.kek_rotation_reminder` | bool | `true` | `N0PASSTEMPS_FEATURES_KEK_ROTATION_REMINDER` | Reports overdue rotation in the detailed health report, and has the janitor raise the `kek.rotation_overdue` alert. |
 | `features.janitor_interval` | duration | `5m` | `N0PASSTEMPS_FEATURES_JANITOR_INTERVAL` | How often expired challenges, stale throttle buckets, expired approvals and due erasures are swept. |
+| `features.rotation_grace` | duration | `24h` | `N0PASSTEMPS_FEATURES_ROTATION_GRACE` | How long a rotated API key or administrative token keeps working beside its successor when the rotation request names no `grace`. `0s` stops the predecessor at once. At most `168h`; the same maximum applies to a `grace` given in a request. See [ADMIN-GUIDE.md](ADMIN-GUIDE.md#rotating-an-api-key-without-downtime). |
 
 Refused by the validator:
 
@@ -524,6 +525,8 @@ Refused by the validator:
 - `config: features.approval_ttl must be positive when dual_approval is on`
 - `config: features.erasure_retention must be positive when deferred_erasure is on`
 - `config: features.janitor_interval must be positive; expired challenges and due erasures would otherwise never be swept`
+- `config: features.rotation_grace must not be negative; use "0s" to stop a rotated credential at once`
+- `config: features.rotation_grace is 720h0m0s, above the maximum of 168h0m0s; an overlap that long is two live credentials, not a rotation`
 
 ### What lite mode actually changes
 

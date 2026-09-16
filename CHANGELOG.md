@@ -7,7 +7,41 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **API key rotation**, `POST /admin/v1/api-keys/{key_id}/rotate`, behind the
+  new permission `api_key.rotate`, which `admin_full` holds. It mints a
+  successor with the same name, scopes and tenant, and gives the predecessor an
+  expiry of now plus `grace`, in one store transaction. Replacing a key used to
+  mean an outage, if the old one was revoked first, or an overlap nobody
+  remembered to close, if it was revoked second; the overlap is now explicit and
+  closes by itself. A predecessor that already expires sooner keeps its earlier
+  expiry, so rotating a credential never extends its life. The successor does
+  not inherit the predecessor's expiry, and the response reports `no_expiry` as
+  minting does. A revoked or expired key is refused with `409`.
+- **Self-service rotation of an administrative token**,
+  `POST /admin/v1/admin-tokens/self/rotate`, behind the new permission
+  `admin_token.rotate_self`, which all three roles hold. The token rotated is
+  the one that authenticated the request, and the successor keeps its name and
+  role. It changes no authority, so it is not held for approval, and it is the
+  one write `admin_auditor` may perform, because it touches nothing but the
+  caller's own credential. The successor cannot outlive the token it replaces:
+  an expiry is inherited, and `expires_in_days` may only bring it forward.
+  There is deliberately no route for rotating another administrator's token,
+  since the response would hand the caller that person's successor credential.
+  The permission count goes from twenty-five to twenty-seven.
+- **`features.rotation_grace`**, default `24h`, environment variable
+  `N0PASSTEMPS_FEATURES_ROTATION_GRACE`: the overlap used when a rotation
+  request names none. `0s` stops the predecessor at once. The maximum is `168h`,
+  enforced in configuration validation and again per request, where a longer
+  `grace` is refused with `400`.
+- **Audit events `api_key.rotated` and `admin_token.rotated`**. The detail
+  carries the predecessor and successor identifiers, the grace and the instant
+  the predecessor stops. It never carries the token.
+- **`RotateAPIKey` and `RotateAdminToken` on the store interface**, implemented
+  for SQLite and PostgreSQL as one transaction each: a conditional update of the
+  predecessor, then the insert of the successor. A missing, foreign or revoked
+  predecessor yields `ErrNotFound` and nothing is inserted.
 
 ## [1.0.0] - 2026-09-16
 

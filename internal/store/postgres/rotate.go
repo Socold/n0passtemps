@@ -1,0 +1,159 @@
+package postgres
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/Socold/n0passtemps/internal/store"
+)
+
+// RotateAPIKey implements store.AuthnStore.
+//
+// The successor is validated before the transaction opens, so a malformed one
+// is refused without the predecessor having been touched.
+func (s *Store) RotateAPIKey(ctx context.Context, tenantID, predecessorID string, successor *store.APIKey, predecessorExpiresAt time.Time) error {
+	if successor == nil {
+		return errors.New("postgres: rotate api key requires a successor")
+	}
+	if successor.ID == "" || successor.TenantID == "" || successor.Name == "" {
+		return errors.New("postgres: api key requires an id, a tenant and a name")
+	}
+	if successor.Selector == "" || successor.VerifierHash == "" {
+		return errors.New("postgres: api key requires a selector and a verifier hash")
+	}
+	if successor.TenantID != tenantID {
+		// The predecessor is matched on tenantID and the successor is inserted
+		// under its own. Letting the two differ would turn rotation into a way
+		// to mint a credential in a tenant the caller was never checked
+		// against.
+		return errors.New("postgres: rotate api key: the successor belongs to a different tenant")
+	}
+	if successor.CreatedAt.IsZero() {
+		successor.CreatedAt = time.Now().UTC()
+	}
+
+	scopes, err := jsonArray(successor.Scopes)
+	if err != nil {
+		return err
+	}
+
+	err = s.rotateAuthnRow(ctx, "api_keys", tenantID, predecessorID, predecessorExpiresAt,
+		func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `
+				INSERT INTO api_keys (`+apiKeyColumns+`)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+				successor.ID, successor.TenantID, successor.Name, successor.Selector,
+				successor.VerifierHash, scopes, successor.CreatedAt,
+				nullString(successor.CreatedBy), successor.LastUsedAt,
+				successor.ExpiresAt, successor.RevokedAt)
+			return mapError(err)
+		})
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		return fmt.Errorf("postgres: rotate api key: %w", err)
+	}
+	return nil
+}
+
+// RotateAdminToken implements store.AuthnStore. See RotateAPIKey.
+func (s *Store) RotateAdminToken(ctx context.Context, tenantID, predecessorID string, successor *store.AdminToken, predecessorExpiresAt time.Time) error {
+	if successor == nil {
+		return errors.New("postgres: rotate admin token requires a successor")
+	}
+	if successor.ID == "" || successor.TenantID == "" || successor.Name == "" {
+		return errors.New("postgres: admin token requires an id, a tenant and a name")
+	}
+	if successor.Selector == "" || successor.VerifierHash == "" {
+		return errors.New("postgres: admin token requires a selector and a verifier hash")
+	}
+	if !successor.Role.Valid() {
+		return fmt.Errorf("postgres: admin token role %q is not one of the three roles", successor.Role)
+	}
+	if successor.TenantID != tenantID {
+		return errors.New("postgres: rotate admin token: the successor belongs to a different tenant")
+	}
+	if successor.CreatedAt.IsZero() {
+		successor.CreatedAt = time.Now().UTC()
+	}
+
+	err := s.rotateAuthnRow(ctx, "admin_tokens", tenantID, predecessorID, predecessorExpiresAt,
+		func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `
+				INSERT INTO admin_tokens (`+adminTokenColumns+`)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+				successor.ID, successor.TenantID, successor.Name, successor.Selector,
+				successor.VerifierHash, string(successor.Role), successor.CreatedAt,
+				nullString(successor.CreatedBy), successor.LastUsedAt,
+				successor.ExpiresAt, successor.RevokedAt)
+			return mapError(err)
+		})
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		return fmt.Errorf("postgres: rotate admin token: %w", err)
+	}
+	return nil
+}
+
+// rotateAuthnRow performs the rotation shared by the two tables: it bounds the
+// predecessor's life and runs insert, in one transaction.
+//
+// The update is conditional on the expiry moving earlier. A predecessor that
+// already expires sooner is left as it is, because a rotation that pushed an
+// expiry later would be a way to keep a credential alive past the date it was
+// issued to die on. Zero rows affected therefore has two meanings, and the
+// second statement tells them apart: either the predecessor is live and keeps
+// its earlier expiry, in which case the successor is still inserted, or it is
+// missing, in another tenant or revoked, in which case nothing is.
+//
+// The probe takes a row lock. Under READ COMMITTED a concurrent revocation
+// could otherwise commit between the probe and the insert; the lock makes the
+// revocation wait for this transaction, so the order the two are reported in
+// is the order they happened in.
+//
+// table is a package-level literal chosen by the two callers above, never a
+// caller-supplied value, which is the only reason it can be concatenated into
+// the statement at all.
+func (s *Store) rotateAuthnRow(ctx context.Context, table, tenantID, predecessorID string, predecessorExpiresAt time.Time, insert func(pgx.Tx) error) error {
+	if tenantID == "" || predecessorID == "" {
+		return errors.New("rotation requires a tenant and a predecessor id")
+	}
+	if predecessorExpiresAt.IsZero() {
+		// A zero instant would cut the predecessor off in year one. That is
+		// never what a caller meant, so it is refused rather than interpreted.
+		return errors.New("rotation requires the instant the predecessor stops")
+	}
+	at := predecessorExpiresAt.UTC()
+
+	return s.inTx(ctx, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE `+table+` SET expires_at = $1
+			WHERE tenant_id = $2 AND id = $3 AND revoked_at IS NULL
+			  AND (expires_at IS NULL OR expires_at > $1)`,
+			at, tenantID, predecessorID)
+		if err != nil {
+			return mapError(err)
+		}
+		if tag.RowsAffected() == 0 {
+			var found string
+			err := tx.QueryRow(ctx, `
+				SELECT id FROM `+table+`
+				WHERE tenant_id = $1 AND id = $2 AND revoked_at IS NULL
+				FOR UPDATE`,
+				tenantID, predecessorID).Scan(&found)
+			if err != nil {
+				// No row maps to store.ErrNotFound, which is the answer for a
+				// predecessor that is missing, foreign or revoked.
+				return mapError(err)
+			}
+		}
+		return insert(tx)
+	})
+}

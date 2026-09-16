@@ -26,11 +26,11 @@ by `admin.session_ttl`. Both sit behind the same network allow list.
 
 | Role | Can read | Can also do | Cannot |
 |---|---|---|---|
-| `admin_auditor` | Subjects, credentials, the audit log, chain verification, alerts, the approval queue, the detailed health report, the credential inventory | Nothing. It changes no state at all | Acknowledge an alert. An auditor who can quietly clear an alert can quietly cover a trace |
-| `admin_operator` | Everything an auditor can | Lock and unlock a subject, revoke one credential, reissue recovery codes, reset a throttle, acknowledge an alert | Mint or revoke any credential, decide an approval, request or cancel an erasure, revoke every credential of a subject in one call, rewrap the keyring |
+| `admin_auditor` | Subjects, credentials, the audit log, chain verification, alerts, the approval queue, the detailed health report, the credential inventory | Rotate its own token, and nothing else. It changes no other state at all | Acknowledge an alert. An auditor who can quietly clear an alert can quietly cover a trace |
+| `admin_operator` | Everything an auditor can | Lock and unlock a subject, revoke one credential, reissue recovery codes, reset a throttle, acknowledge an alert, rotate its own token | Mint, rotate or revoke any other credential, decide an approval, request or cancel an erasure, revoke every credential of a subject in one call, rewrap the keyring |
 | `admin_full` | Everything | Everything | Nothing |
 
-The full matrix, all twenty-five permissions against all three roles, is in
+The full matrix, all twenty-seven permissions against all three roles, is in
 [RBAC.md](RBAC.md).
 
 With `features.admin_rbac = false`, which `features.lite_mode` implies, every
@@ -230,6 +230,86 @@ curl -sS -X POST "$BASE/admin/v1/api-keys/3f0c7e61-.../revoke" \
   -H 'Content-Type: application/json'
 ```
 
+### Rotating an API key without downtime
+
+Requires `api_key.rotate`, which `admin_full` holds.
+
+Replacing a key by minting a new one and revoking the old one forces a choice.
+Revoke first and the integration is down until it is redeployed. Mint first and
+there are two live keys and a revocation somebody has to remember, and the one
+nobody remembers is how a retired key is still valid when it turns up in a leak
+a year later. Rotation makes the overlap explicit and closes it for you:
+
+```bash
+curl -sS -X POST "$BASE/admin/v1/api-keys/3f0c7e61-.../rotate" \
+  -H "Authorization: Bearer $ADMIN" \
+  -H 'Content-Type: application/json' \
+  -d '{"grace":"24h","expires_in_days":365}'
+```
+
+```json
+{
+  "api_key": {
+    "id": "a94be210-...",
+    "tenant_id": "acme",
+    "name": "billing-app",
+    "scopes": ["subjects", "totp"],
+    "created_at": "2026-09-17T08:14:02Z",
+    "created_by": "b71f...",
+    "expires_at": "2027-09-17T08:14:02Z"
+  },
+  "token": "npt_8d1c4b7a2e9f6035.cXV1eGZvb2JhcmJhenF1dXhmb29iYXJiYXo",
+  "warning": "this token is shown once and cannot be retrieved again",
+  "no_expiry": false,
+  "unrestricted": false,
+  "predecessor_id": "3f0c7e61-...",
+  "predecessor_expires_at": "2026-09-18T08:14:02Z"
+}
+```
+
+The successor carries the same name, scopes and tenant. The old key is given an
+expiry of now plus `grace` in the same database transaction that inserts the new
+one, so there is no moment at which the old key is unbounded and the new one
+exists.
+
+The procedure:
+
+1. Rotate. Store the new token in the integration's secret store.
+2. Redeploy or reload the integration inside the grace window. Both keys work
+   until `predecessor_expires_at`.
+3. Confirm the switch: in `GET /admin/v1/api-keys` the successor's
+   `last_used_at` moves and the predecessor's stops.
+4. Do nothing else. The old key stops at `predecessor_expires_at` without a
+   further call. If the switch is confirmed early and you would rather not
+   wait, revoke the predecessor.
+
+The body is optional, and so is each field in it:
+
+| Field | Meaning |
+|---|---|
+| `grace` | A duration such as `"24h"` or `"90m"`. Absent means `features.rotation_grace`, 24 hours by default. `"0s"` stops the old key at once, which is what you want when the reason for rotating is that the key leaked. Above `168h` the call is refused with 400, because an overlap that long is two live credentials, not a rotation. |
+| `expires_in_days` | The successor's lifetime, as when minting. Absent means none, reported as `no_expiry: true`. |
+
+Three rules are worth knowing before relying on it:
+
+- Rotation never extends a key. A predecessor that already expires sooner than
+  now plus `grace` keeps its earlier expiry, and `predecessor_expires_at` reports
+  the real instant, not the one asked for.
+- The successor does not inherit the predecessor's expiry. A key minted for a
+  year and rotated in month eleven does not produce a successor with a month to
+  live; set `expires_in_days` again if you want one.
+- A revoked or expired key cannot be rotated, and the answer is 409. Rotating
+  it would bring back, under a fresh token, an integration somebody switched
+  off. Mint a new key instead.
+
+If the response is lost, the new token is lost with it: nothing can display it
+again. Rotate the successor, with `"grace":"0s"` since nothing uses it, and the
+original key is still inside its own window while you do.
+
+Each rotation is audited as `api_key.rotated`, against the predecessor, with
+`predecessor_id`, `successor_id`, `grace`, `predecessor_expires_at` and
+`successor_expires_at` in the detail. The token is never in it.
+
 ### An administrative token
 
 Requires `admin_token.create`, and is a dual-approval candidate: with
@@ -274,6 +354,50 @@ The approval is bound to `name` and `role`. `expires_in_days` is not part of
 what the second administrator approved, so it can differ between the two calls;
 state the intended lifetime in the ticket if it matters to you. The full rules
 are under [The dual-approval queue](#the-dual-approval-queue).
+
+### Rotating your own token
+
+Requires `admin_token.rotate_self`, which every role holds, `admin_auditor`
+included.
+
+```bash
+curl -sS -X POST "$BASE/admin/v1/admin-tokens/self/rotate" \
+  -H "Authorization: Bearer $ADMIN" \
+  -H 'Content-Type: application/json' \
+  -d '{"grace":"1h"}'
+```
+
+The response has the shape of the API key one, with `admin_token` in place of
+`api_key`. The successor has the same name and the same role. Put it in your
+password manager, confirm it works, and the old token stops at
+`predecessor_expires_at`. `grace` follows the same rules as for an API key.
+
+The path names no token, on purpose. The token that is rotated is the one that
+authenticated the request, and there is no route for rotating another
+administrator's token. The response carries the successor credential, so such a
+route would hand the caller that person's next token, under their name and with
+their role, which is impersonation. To replace a colleague's token, revoke it
+and mint a new one for them; the mint is held for approval.
+
+Rotating your own token changes no authority, which is why it is not held for a
+second administrator and why an auditor may do it. It is the one write the
+auditor role performs, and it touches nothing but the caller's own credential.
+
+Because it changes no authority, it cannot lengthen a token's life either. A
+token issued with an expiry passes that expiry on to its successor.
+`expires_in_days` may bring it forward and is refused with 400 if it would push
+it back. A token issued for thirty days to a contractor is still gone after
+thirty days, however often it is rotated; a longer life is a new token, minted
+by a full administrator.
+
+One caution. `"grace":"0s"` on the only `admin_full` token, followed by a lost
+response, leaves the deployment with a working administrator nobody holds. The
+last-administrator guard cannot see that, because the successor exists and is
+usable. Keep a grace on a sole administrator's rotation, or accept that the way
+back is `-bootstrap-admin -force` on the host.
+
+Audited as `admin_token.rotated`, with the actor and `predecessor_id` always the
+same token.
 
 ### Why the last full administrator cannot be revoked
 
@@ -825,7 +949,7 @@ append or on a schedule, is what closes this gap. It is not in this release.
 
 | Document | What it covers |
 |---|---|
-| [RBAC.md](RBAC.md) | All twenty-five permissions against the three roles |
+| [RBAC.md](RBAC.md) | All twenty-seven permissions against the three roles |
 | [MONITORING.md](MONITORING.md) | The ten alert types and what to do about each |
 | [GDPR.md](GDPR.md) | The access and erasure paths in full |
 | [TROUBLESHOOT.md](TROUBLESHOOT.md) | Symptom-first diagnosis |

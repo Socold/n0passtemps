@@ -352,6 +352,26 @@ type AuthnStore interface {
 	ListAdminTokens(ctx context.Context, tenantID string) ([]*AdminToken, error)
 	RevokeAdminToken(ctx context.Context, tenantID, id string, at time.Time) error
 
+	// RotateAPIKey inserts successor and bounds the predecessor's life at
+	// predecessorExpiresAt, in one transaction.
+	//
+	// The two writes belong together. A successor minted without the
+	// predecessor being bounded is the unbounded overlap rotation exists to
+	// remove, and a predecessor bounded without a successor is an outage with
+	// a timer on it.
+	//
+	// The predecessor's expiry only ever moves earlier. One that is already
+	// due before predecessorExpiresAt keeps its own expiry, because rotating a
+	// credential must never be a way to extend its life. A predecessor that is
+	// missing, belongs to another tenant or is revoked yields ErrNotFound and
+	// nothing is inserted. Whether an expired predecessor may be rotated is
+	// the caller's decision, since the caller owns the clock.
+	RotateAPIKey(ctx context.Context, tenantID, predecessorID string, successor *APIKey, predecessorExpiresAt time.Time) error
+
+	// RotateAdminToken is RotateAPIKey for an administrative token, with the
+	// same rules.
+	RotateAdminToken(ctx context.Context, tenantID, predecessorID string, successor *AdminToken, predecessorExpiresAt time.Time) error
+
 	// TouchAPIKey and TouchAdminToken record last use. They are called on the
 	// request path, so an implementation may coalesce writes; losing a few
 	// seconds of precision on a "last used" timestamp is acceptable, blocking
@@ -359,7 +379,17 @@ type AuthnStore interface {
 	TouchAPIKey(ctx context.Context, id string, at time.Time) error
 	TouchAdminToken(ctx context.Context, id string, at time.Time) error
 
-	CountAdminTokensByRole(ctx context.Context, tenantID string, role Role) (int, error)
+	// CountAdminTokensByRole counts the tokens of a role that are unrevoked
+	// and still unexpired at usableAt.
+	//
+	// The instant is a parameter because the two callers ask different
+	// questions. Bootstrap asks who can administer now. The guard against
+	// revoking the last full administrator has to ask who will still be able
+	// to once every rotation grace has run out: a rotated token keeps working
+	// for its grace period, so counted at the present it looks like a second
+	// administrator, the guard lets the successor be revoked, and when the
+	// grace ends the deployment has nobody left.
+	CountAdminTokensByRole(ctx context.Context, tenantID string, role Role, usableAt time.Time) (int, error)
 }
 
 // ThrottleStore backs the rate limiter.

@@ -171,6 +171,7 @@ func applyEnv(cfg *Config) error {
 	dur("FEATURES_ERASURE_RETENTION", &cfg.Features.ErasureRetention)
 	boolean("FEATURES_KEK_ROTATION_REMINDER", &cfg.Features.KEKRotationReminder)
 	dur("FEATURES_JANITOR_INTERVAL", &cfg.Features.JanitorInterval)
+	dur("FEATURES_ROTATION_GRACE", &cfg.Features.RotationGrace)
 
 	// LITE_MODE is accepted without the prefix as well, because the published
 	// quickstart uses the short form and changing it would break copied

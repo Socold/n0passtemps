@@ -429,7 +429,21 @@ type Features struct {
 	// JanitorInterval is how often expired challenges, stale throttle
 	// buckets, expired approvals and due erasures are swept.
 	JanitorInterval Duration `toml:"janitor_interval"`
+
+	// RotationGrace is how long a rotated credential keeps working beside its
+	// successor when the rotation request names no grace of its own. Zero
+	// means the predecessor stops at once. It is bounded by MaxRotationGrace.
+	RotationGrace Duration `toml:"rotation_grace"`
 }
+
+// MaxRotationGrace is the longest overlap a rotation may leave between a
+// credential and its successor.
+//
+// Rotation exists to make the overlap explicit and self-closing. An overlap
+// longer than a week is two live credentials rather than a rotation, which is
+// the situation rotation replaces, so the bound is enforced here for the
+// configured default and again per request by the administrative layer.
+const MaxRotationGrace = 168 * time.Hour
 
 // Duration wraps time.Duration so TOML and environment variables can express
 // it as a string such as "30s" or "15m".
@@ -572,6 +586,10 @@ func Default() Config {
 			ErasureRetention:       Duration{30 * 24 * time.Hour},
 			KEKRotationReminder:    true,
 			JanitorInterval:        Duration{5 * time.Minute},
+			// A day covers a deployment that picks the new key up on its next
+			// restart or its next scheduled release, without leaving the old
+			// one alive long enough to be forgotten.
+			RotationGrace: Duration{24 * time.Hour},
 		},
 	}
 }
@@ -990,6 +1008,15 @@ func (c *Config) Validate() error {
 	if c.Features.JanitorInterval.Duration <= 0 {
 		add("config: features.janitor_interval must be positive; expired challenges and " +
 			"due erasures would otherwise never be swept")
+	}
+	if c.Features.RotationGrace.Duration < 0 {
+		add("config: features.rotation_grace must not be negative; use \"0s\" to stop a " +
+			"rotated credential at once")
+	}
+	if c.Features.RotationGrace.Duration > MaxRotationGrace {
+		add("config: features.rotation_grace is %s, above the maximum of %s; an overlap "+
+			"that long is two live credentials, not a rotation",
+			c.Features.RotationGrace.Duration, MaxRotationGrace)
 	}
 
 	return errors.Join(errs...)

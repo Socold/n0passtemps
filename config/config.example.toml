@@ -425,3 +425,11 @@ kek_rotation_reminder = true
 # How often expired challenges, stale throttle buckets, expired approvals and
 # due erasures are swept.
 janitor_interval = "5m"
+
+# How long a rotated API key or administrative token keeps working beside its
+# successor, when the rotation request names no grace of its own. A day covers
+# an integration that picks the new key up on its next release. "0s" stops the
+# old credential at once. The maximum is "168h": an overlap longer than a week
+# is two live credentials, not a rotation, and the same bound applies to a
+# grace given in a request.
+rotation_grace = "24h"

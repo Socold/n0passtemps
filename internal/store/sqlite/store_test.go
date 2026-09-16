@@ -1059,14 +1059,14 @@ func TestAuthnRoundTrip(t *testing.T) {
 
 	// token-2 expired in the past, so it is not a fallback administrator and
 	// must not be counted as one.
-	n, err := s.CountAdminTokensByRole(ctx, "tenant-a", store.RoleFull)
+	n, err := s.CountAdminTokensByRole(ctx, "tenant-a", store.RoleFull, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
 		t.Errorf("usable admin_full tokens = %d, want 1", n)
 	}
-	if n, err = s.CountAdminTokensByRole(ctx, "tenant-b", store.RoleFull); err != nil {
+	if n, err = s.CountAdminTokensByRole(ctx, "tenant-b", store.RoleFull, time.Now()); err != nil {
 		t.Fatal(err)
 	} else if n != 0 {
 		t.Errorf("admin_full tokens under tenant-b = %d, want 0", n)
