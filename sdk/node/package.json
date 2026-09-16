@@ -1,0 +1,44 @@
+{
+  "name": "n0passtemps",
+  "version": "1.0.0",
+  "description": "Client SDK for the n0passtemps passwordless authentication server: API client, offline assertion verification and WebAuthn browser helpers.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./browser": {
+      "types": "./src/browser.d.ts",
+      "default": "./src/browser.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": [
+    "webauthn",
+    "passkeys",
+    "totp",
+    "authentication",
+    "jws",
+    "eddsa"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Socold/n0passtemps.git",
+    "directory": "sdk/node"
+  }
+}
