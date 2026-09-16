@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "n0passtemps"
+version = "1.0.0"
+description = "Client SDK for the n0passtemps authentication server: WebAuthn, TOTP, recovery codes and offline verification of the signed assertion."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [{ name = "Socold" }]
+keywords = ["authentication", "webauthn", "passkeys", "totp", "jws", "ed25519"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+    "Typing :: Typed",
+]
+# No runtime dependency: the client is built on the standard library.
+dependencies = []
+
+[project.optional-dependencies]
+# Assertion verification needs an Ed25519 primitive, which the standard
+# library does not have.
+verify = ["cryptography>=42"]
+
+[project.urls]
+Homepage = "https://github.com/Socold/n0passtemps"
+Source = "https://github.com/Socold/n0passtemps/tree/main/sdk/python"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+n0passtemps = ["py.typed"]
+
+[tool.mypy]
+strict = true
