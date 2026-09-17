@@ -74,7 +74,8 @@ func (s *Server) assessWebAuthn(outcome *wa.AssertionOutcome, th throttle.Result
 //
 // A query that fails is logged and the assessment proceeds without it, rather
 // than failing an authentication that has already succeeded over a signal.
-func (s *Server) assessCodeCeremony(r *http.Request, tenantID, subjectID string, ceremony risk.Ceremony, th throttle.Result) *risk.Assessment {
+func (s *Server) assessCodeCeremony(r *http.Request, tenantID, subjectID string, ceremony risk.Ceremony,
+	th throttle.Result) *risk.Assessment {
 	cfg := s.deps.Config.Risk
 	if !cfg.Enabled {
 		return nil

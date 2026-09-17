@@ -254,7 +254,8 @@ func (s *Server) handleAdminUnlockSubject(w http.ResponseWriter, r *http.Request
 	return s.changeSubjectStatus(w, r, store.SubjectActive, audit.EventSubjectUnlocked)
 }
 
-func (s *Server) changeSubjectStatus(w http.ResponseWriter, r *http.Request, status store.SubjectStatus, eventType string) error {
+func (s *Server) changeSubjectStatus(w http.ResponseWriter, r *http.Request, status store.SubjectStatus,
+	eventType string) error {
 	caller, tenantID, err := s.adminContext(r)
 	if err != nil {
 		return err
@@ -982,7 +983,8 @@ const ApprovalHeader = "X-Approval-Id"
 //
 // held reports that the caller must stop and return err. When held is false the
 // operation may proceed.
-func (s *Server) approvalGate(r *http.Request, caller *Caller, tenantID, operation string, payload map[string]any, reason string) (held bool, err error) {
+func (s *Server) approvalGate(r *http.Request, caller *Caller, tenantID, operation string, payload map[string]any,
+	reason string) (held bool, err error) {
 	if !s.deps.Config.Features.DualApproval {
 		return false, nil
 	}
@@ -1027,7 +1029,8 @@ func (s *Server) approvalGate(r *http.Request, caller *Caller, tenantID, operati
 }
 
 // redeemApproval spends an approved request. See approvalGate for the rules.
-func (s *Server) redeemApproval(r *http.Request, caller *Caller, tenantID, id, operation string, payload map[string]any) error {
+func (s *Server) redeemApproval(r *http.Request, caller *Caller, tenantID, id, operation string,
+	payload map[string]any) error {
 	if _, err := uuid.Parse(id); err != nil {
 		return BadRequest(ApprovalHeader+" is not a valid identifier", err)
 	}

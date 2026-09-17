@@ -126,7 +126,8 @@ func (s *Server) mountPublic(mux *http.ServeMux) {
 	// literally "discoverable" would otherwise make two patterns match one
 	// path.
 	mux.Handle("POST /v1/webauthn/assert/discoverable", authed(ScopeWebAuthn, s.handleDiscoverableAssertBegin))
-	mux.Handle("POST /v1/webauthn/assert/discoverable/complete", authed(ScopeWebAuthn, s.handleDiscoverableAssertComplete))
+	mux.Handle("POST /v1/webauthn/assert/discoverable/complete",
+		authed(ScopeWebAuthn, s.handleDiscoverableAssertComplete))
 
 	mux.Handle("POST /v1/totp/{subject_ref}/enrol", authed(ScopeTOTP, s.handleTOTPEnrol))
 	mux.Handle("POST /v1/totp/{subject_ref}/enrol/confirm", authed(ScopeTOTP, s.handleTOTPConfirm))
@@ -192,7 +193,8 @@ func (s *Server) mountAdmin(mux *http.ServeMux) {
 	mux.Handle("GET /admin/v1/subjects", guarded(rbac.PermSubjectList, s.handleAdminListSubjects))
 	mux.Handle("GET /admin/v1/subjects/{subject_id}", guarded(rbac.PermSubjectRead, s.handleAdminGetSubject))
 	mux.Handle("POST /admin/v1/subjects/{subject_id}/lock", guarded(rbac.PermSubjectLock, s.handleAdminLockSubject))
-	mux.Handle("POST /admin/v1/subjects/{subject_id}/unlock", guarded(rbac.PermSubjectUnlock, s.handleAdminUnlockSubject))
+	mux.Handle("POST /admin/v1/subjects/{subject_id}/unlock",
+		guarded(rbac.PermSubjectUnlock, s.handleAdminUnlockSubject))
 
 	// Credentials.
 	mux.Handle("GET /admin/v1/subjects/{subject_id}/credentials",

@@ -70,7 +70,8 @@ func (s *Store) CreateAdminCredential(ctx context.Context, c *store.AdminCredent
 }
 
 // GetAdminCredentialByID implements store.AdminCredentialStore.
-func (s *Store) GetAdminCredentialByID(ctx context.Context, tenantID, rpID string, credentialID []byte) (*store.AdminCredential, error) {
+func (s *Store) GetAdminCredentialByID(ctx context.Context, tenantID, rpID string,
+	credentialID []byte) (*store.AdminCredential, error) {
 	if len(credentialID) == 0 {
 		return nil, errors.New("sqlite: administrative credential lookup requires a credential id")
 	}
@@ -95,7 +96,8 @@ func (s *Store) GetAdminCredential(ctx context.Context, tenantID, id string) (*s
 }
 
 // ListAdminCredentials implements store.AdminCredentialStore.
-func (s *Store) ListAdminCredentials(ctx context.Context, tenantID, adminTokenID string, includeRevoked bool) ([]*store.AdminCredential, error) {
+func (s *Store) ListAdminCredentials(ctx context.Context, tenantID, adminTokenID string,
+	includeRevoked bool) ([]*store.AdminCredential, error) {
 	query := `SELECT ` + adminCredentialColumns + ` FROM admin_credentials
 		WHERE tenant_id = ? AND admin_token_id = ?`
 	if !includeRevoked {
@@ -219,7 +221,8 @@ func (s *Store) MarkAdminCredentialCloneWarning(ctx context.Context, tenantID, i
 // database while it holds the write lock, because two requests replaying one
 // captured assertion would otherwise both read the stored counter, both find it
 // acceptable and both succeed.
-func (s *Store) AdvanceAdminCredentialSignCount(ctx context.Context, tenantID, id string, expectedPrev, next uint32, usedAt time.Time) error {
+func (s *Store) AdvanceAdminCredentialSignCount(ctx context.Context, tenantID, id string, expectedPrev, next uint32,
+	usedAt time.Time) error {
 	if next <= expectedPrev {
 		// Refused before touching the database. A counter that does not move
 		// forward has either been seen before or comes from a cloned
@@ -301,7 +304,8 @@ func (s *Store) CreateAdminChallenge(ctx context.Context, c *store.AdminChalleng
 // It is ConsumeChallenge over the console's own table, with the same conditional
 // update and the same refusal to distinguish an unknown challenge from an
 // expired or already spent one.
-func (s *Store) ConsumeAdminChallenge(ctx context.Context, tenantID, id string, now time.Time) (*store.AdminChallenge, error) {
+func (s *Store) ConsumeAdminChallenge(ctx context.Context, tenantID, id string, now time.Time) (*store.AdminChallenge,
+	error) {
 	var out *store.AdminChallenge
 
 	err := s.inTx(ctx, func(tx *sql.Tx) error {

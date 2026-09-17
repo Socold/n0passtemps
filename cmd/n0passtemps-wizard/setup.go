@@ -182,7 +182,8 @@ func runSetup(args []string) error {
 		// The real connection string lives in .env because it carries a
 		// password, so the file on its own has no DSN. Validation is run with
 		// the same shape of value the compose file will supply.
-		probe[config.EnvPrefix+"DATABASE_DSN"] = "postgres://n0passtemps:placeholder@postgres:5432/n0passtemps?sslmode=disable"
+		probe[config.EnvPrefix+"DATABASE_DSN"] =
+			"postgres://n0passtemps:placeholder@postgres:5432/n0passtemps?sslmode=disable"
 		probe[config.EnvPrefix+"DATABASE_ALLOW_PLAINTEXT"] = "true"
 	}
 	restore := withTemporaryEnv(probe)

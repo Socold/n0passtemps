@@ -365,7 +365,8 @@ func (s *Store) hashBefore(ctx context.Context, fromSeq int64) ([]byte, error) {
 // hashes cover a salted digest of the personal fields rather than the fields
 // themselves, so destroying the salt removes the ability to recover them while
 // leaving verification intact. See package audit.
-func (s *Store) EraseSubjectAuditEntries(ctx context.Context, tenantID, subjectID, actorID string, now time.Time) (int64, error) {
+func (s *Store) EraseSubjectAuditEntries(ctx context.Context, tenantID, subjectID, actorID string,
+	now time.Time) (int64, error) {
 	if tenantID == "" || subjectID == "" {
 		return 0, errors.New("sqlite: erase requires a tenant and a subject")
 	}

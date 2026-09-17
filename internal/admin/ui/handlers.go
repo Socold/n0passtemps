@@ -187,7 +187,8 @@ func (h *Handler) newPage(r *http.Request, sess *session, title string) *pageDat
 
 // renderMessage shows a refusal or a not-found in the same frame as the rest of
 // the interface, so the operator keeps the navigation and knows where they are.
-func (h *Handler) renderMessage(w http.ResponseWriter, r *http.Request, sess *session, status int, heading, body string) {
+func (h *Handler) renderMessage(w http.ResponseWriter, r *http.Request, sess *session, status int, heading,
+	body string) {
 	pd := h.newPage(r, sess, heading)
 	pd.Data = messageData{Heading: heading, Body: body}
 	h.render(w, r, status, "message", pd)
@@ -246,7 +247,8 @@ func (h *Handler) audited(w http.ResponseWriter, r *http.Request, ev audit.Event
 // A refusal is audited for the same reason a success is: an operator probing for
 // authority they do not hold looks exactly like an operator who mistyped a URL,
 // and only the pattern over time tells the two apart.
-func (h *Handler) auditDenied(w http.ResponseWriter, r *http.Request, sess *session, resourceType, resourceID, reason string) {
+func (h *Handler) auditDenied(w http.ResponseWriter, r *http.Request, sess *session, resourceType, resourceID,
+	reason string) {
 	h.audited(w, r, audit.Event{
 		TenantID:     sess.TenantID,
 		EventType:    audit.EventAdminDenied,
@@ -651,7 +653,8 @@ func (h *Handler) handleSubjectDetail(w http.ResponseWriter, r *http.Request) {
 // Every action on a person re-renders this page, either directly when something
 // has to be shown once, such as a batch of recovery codes, or after a redirect
 // when there is nothing to show but a confirmation.
-func (h *Handler) renderSubject(w http.ResponseWriter, r *http.Request, sess *session, id string, opts subjectRenderOptions) {
+func (h *Handler) renderSubject(w http.ResponseWriter, r *http.Request, sess *session, id string,
+	opts subjectRenderOptions) {
 	ctx := r.Context()
 	tenantID := h.tenantID()
 
@@ -762,7 +765,8 @@ func (h *Handler) renderSubject(w http.ResponseWriter, r *http.Request, sess *se
 // Returning the session and the identifier together is what keeps the four
 // checks in one place. A handler that resolved the identifier before checking
 // the permission would have read a record it was not allowed to see.
-func (h *Handler) actionPreamble(w http.ResponseWriter, r *http.Request, p rbac.Permission, idName string) (*session, string, bool) {
+func (h *Handler) actionPreamble(w http.ResponseWriter, r *http.Request, p rbac.Permission, idName string) (*session,
+	string, bool) {
 	sess := h.requireSession(w, r)
 	if sess == nil {
 		return nil, "", false

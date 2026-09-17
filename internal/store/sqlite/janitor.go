@@ -47,7 +47,8 @@ const janitorLeaseName = "janitor_sweep"
 // run, so the lease is dead before the next interval at any sane interval, and
 // the first pass after it takes over. Nothing has to notice the death, and no
 // operator has to clear the row.
-func (s *Store) TryAcquireJanitorLock(ctx context.Context, owner string, now time.Time, lease time.Duration) (store.JanitorLock, error) {
+func (s *Store) TryAcquireJanitorLock(ctx context.Context, owner string, now time.Time,
+	lease time.Duration) (store.JanitorLock, error) {
 	if owner == "" {
 		return nil, errors.New("sqlite: janitor lock requires an owner")
 	}

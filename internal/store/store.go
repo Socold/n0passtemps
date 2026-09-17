@@ -257,7 +257,8 @@ type CredentialStore interface {
 	// Recovery codes are not touched. They are the user's way back in. Like
 	// RevokeCredential this is final, and a subject with nothing left to
 	// revoke yields two zero counts rather than an error.
-	RevokeAllCredentials(ctx context.Context, tenantID, subjectID, reason string, at time.Time) (credentials int64, totp int64, err error)
+	RevokeAllCredentials(ctx context.Context, tenantID, subjectID, reason string, at time.Time) (credentials int64,
+		totp int64, err error)
 
 	// CountActiveCredentials is used to refuse revoking a subject's last
 	// credential without an explicit override, which would otherwise be an
@@ -298,7 +299,8 @@ type AdminCredentialStore interface {
 
 	// ListAdminCredentials returns the passkeys enrolled for one
 	// administrative token, oldest first.
-	ListAdminCredentials(ctx context.Context, tenantID, adminTokenID string, includeRevoked bool) ([]*AdminCredential, error)
+	ListAdminCredentials(ctx context.Context, tenantID, adminTokenID string, includeRevoked bool) ([]*AdminCredential,
+		error)
 
 	// CountActiveAdminCredentials counts the passkeys of one administrative
 	// token that have not been withdrawn.
@@ -322,7 +324,8 @@ type AdminCredentialStore interface {
 	// families through one piece of bookkeeping.
 	TouchAdminCredential(ctx context.Context, tenantID, id string, usedAt time.Time) error
 	MarkAdminCredentialCloneWarning(ctx context.Context, tenantID, id string) error
-	AdvanceAdminCredentialSignCount(ctx context.Context, tenantID, id string, expectedPrev, next uint32, usedAt time.Time) error
+	AdvanceAdminCredentialSignCount(ctx context.Context, tenantID, id string, expectedPrev, next uint32,
+		usedAt time.Time) error
 
 	// CreateAdminChallenge stores the state of an in-flight console ceremony.
 	CreateAdminChallenge(ctx context.Context, c *AdminChallenge) error
@@ -555,11 +558,13 @@ type AuthnStore interface {
 	// missing, belongs to another tenant or is revoked yields ErrNotFound and
 	// nothing is inserted. Whether an expired predecessor may be rotated is
 	// the caller's decision, since the caller owns the clock.
-	RotateAPIKey(ctx context.Context, tenantID, predecessorID string, successor *APIKey, predecessorExpiresAt time.Time) error
+	RotateAPIKey(ctx context.Context, tenantID, predecessorID string, successor *APIKey,
+		predecessorExpiresAt time.Time) error
 
 	// RotateAdminToken is RotateAPIKey for an administrative token, with the
 	// same rules.
-	RotateAdminToken(ctx context.Context, tenantID, predecessorID string, successor *AdminToken, predecessorExpiresAt time.Time) error
+	RotateAdminToken(ctx context.Context, tenantID, predecessorID string, successor *AdminToken,
+		predecessorExpiresAt time.Time) error
 
 	// TouchAPIKey and TouchAdminToken record last use. They are called on the
 	// request path, so an implementation may coalesce writes; losing a few
@@ -592,7 +597,8 @@ type ThrottleStore interface {
 	// empty for the buckets keyed on an address or an API key. It is recorded
 	// because the bucket key is an opaque hash: without it, purging a subject
 	// could not find their throttle state and would leave it behind.
-	Hit(ctx context.Context, tenantID, bucketKey, subjectID string, window time.Duration, now time.Time, failure bool) (*ThrottleState, error)
+	Hit(ctx context.Context, tenantID, bucketKey, subjectID string, window time.Duration, now time.Time,
+		failure bool) (*ThrottleState, error)
 
 	// Block sets blocked_until on the bucket.
 	Block(ctx context.Context, tenantID, bucketKey string, until time.Time) error
@@ -633,7 +639,8 @@ type ApprovalStore interface {
 	// The implementation must refuse when decidedBy equals the requester: a
 	// two-administrator rule that one administrator can satisfy alone is not a
 	// control. It returns ErrStaleWrite when the request is no longer pending.
-	DecideApproval(ctx context.Context, tenantID, id, decidedBy string, approve bool, note string, at time.Time) (*ApprovalRequest, error)
+	DecideApproval(ctx context.Context, tenantID, id, decidedBy string, approve bool, note string,
+		at time.Time) (*ApprovalRequest, error)
 
 	MarkApprovalExecuted(ctx context.Context, tenantID, id string, execErr error, at time.Time) error
 	ExpireApprovals(ctx context.Context, before time.Time) (int64, error)

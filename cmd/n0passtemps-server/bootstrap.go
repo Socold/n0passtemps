@@ -62,7 +62,8 @@ func keyringAnchor(ctx context.Context, cfg *config.Config, st store.Store, log 
 //
 // The returned string is the only time the token exists in retrievable form.
 // Only its selector and a digest of its verifier are stored.
-func mintBootstrapToken(ctx context.Context, cfg *config.Config, st store.Store, name string) (string, *store.AdminToken, error) {
+func mintBootstrapToken(ctx context.Context, cfg *config.Config, st store.Store, name string) (string,
+	*store.AdminToken, error) {
 	tok, err := token.Generate(token.KindAdmin)
 	if err != nil {
 		return "", nil, fmt.Errorf("generate bootstrap token: %w", err)
@@ -91,7 +92,8 @@ func mintBootstrapToken(ctx context.Context, cfg *config.Config, st store.Store,
 // Returning nil rather than a handler that refuses every request means the
 // routes are never registered at all, so a disabled interface presents no
 // surface to probe.
-func buildAdminUI(cfg *config.Config, st store.Store, rec *audit.Recorder, subjects *subject.Service, rp *webauthn.Service, limiter *throttle.Limiter, log *slog.Logger) (*adminui.Handler, error) {
+func buildAdminUI(cfg *config.Config, st store.Store, rec *audit.Recorder, subjects *subject.Service,
+	rp *webauthn.Service, limiter *throttle.Limiter, log *slog.Logger) (*adminui.Handler, error) {
 	if !cfg.Admin.UIEnabled {
 		log.Info("administration interface disabled by configuration")
 		return nil, nil
@@ -146,7 +148,8 @@ const maxBootstrapAdmins = 5
 // It refuses when a usable full administrator already exists, unless -force is
 // given, for the operator who has lost every token. The audit entry records
 // that the path was used.
-func bootstrapAdmin(ctx context.Context, cfg *config.Config, st store.Store, rec *audit.Recorder, force bool, n int) error {
+func bootstrapAdmin(ctx context.Context, cfg *config.Config, st store.Store, rec *audit.Recorder, force bool,
+	n int) error {
 	if n < 1 || n > maxBootstrapAdmins {
 		return fmt.Errorf("-admins must be between 1 and %d, got %d", maxBootstrapAdmins, n)
 	}

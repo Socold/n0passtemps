@@ -70,7 +70,8 @@ func (s *Store) GetApproval(ctx context.Context, tenantID, id string) (*store.Ap
 //
 // Oldest first, because the queue is worked from the front and a request that
 // sits long enough will expire unactioned.
-func (s *Store) ListApprovals(ctx context.Context, tenantID string, status store.ApprovalStatus, limit int) ([]*store.ApprovalRequest, error) {
+func (s *Store) ListApprovals(ctx context.Context, tenantID string, status store.ApprovalStatus,
+	limit int) ([]*store.ApprovalRequest, error) {
 	where := []string{"tenant_id = ?"}
 	args := []any{tenantID}
 
@@ -127,7 +128,8 @@ func (s *Store) ListApprovals(ctx context.Context, tenantID string, status store
 // also how the losing side of two simultaneous decisions is told that the other
 // one landed first. The conditional UPDATE is what makes that safe: both
 // administrators can read a pending request, but only one write can move it.
-func (s *Store) DecideApproval(ctx context.Context, tenantID, id, decidedBy string, approve bool, note string, at time.Time) (*store.ApprovalRequest, error) {
+func (s *Store) DecideApproval(ctx context.Context, tenantID, id, decidedBy string, approve bool, note string,
+	at time.Time) (*store.ApprovalRequest, error) {
 	if strings.TrimSpace(decidedBy) == "" {
 		return nil, errors.New("sqlite: deciding an approval requires an administrator")
 	}

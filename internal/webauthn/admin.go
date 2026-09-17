@@ -130,7 +130,8 @@ func (w adminCredentialWriter) MarkCloneWarning(ctx context.Context, tenantID, i
 	return w.st.MarkAdminCredentialCloneWarning(ctx, tenantID, id)
 }
 
-func (w adminCredentialWriter) AdvanceSignCount(ctx context.Context, tenantID, id string, expectedPrev, next uint32, usedAt time.Time) error {
+func (w adminCredentialWriter) AdvanceSignCount(ctx context.Context, tenantID, id string, expectedPrev, next uint32,
+	usedAt time.Time) error {
 	return w.st.AdvanceAdminCredentialSignCount(ctx, tenantID, id, expectedPrev, next, usedAt)
 }
 
@@ -252,7 +253,8 @@ func (s *Service) BeginAdminRegistration(ctx context.Context, tok *store.AdminTo
 }
 
 // CompleteAdminRegistration finishes an enrolment and stores the credential.
-func (s *Service) CompleteAdminRegistration(ctx context.Context, tok *store.AdminToken, challengeID string, credentialJSON []byte, label string) (*store.AdminCredential, error) {
+func (s *Service) CompleteAdminRegistration(ctx context.Context, tok *store.AdminToken, challengeID string,
+	credentialJSON []byte, label string) (*store.AdminCredential, error) {
 	if !tok.Usable(s.now().UTC()) {
 		return nil, ErrAdminTokenUnusable
 	}
@@ -402,7 +404,8 @@ type AdminAssertionResult struct {
 // one answer from outside. The wrapped text names which of them it was, for the
 // audit entry and the log line only; it is never shown to the operator. That is
 // the arrangement handleSignInSubmit already uses for a pasted token.
-func (s *Service) CompleteAdminAssertion(ctx context.Context, tenantID, challengeID string, credentialJSON []byte) (*AdminAssertionResult, error) {
+func (s *Service) CompleteAdminAssertion(ctx context.Context, tenantID, challengeID string,
+	credentialJSON []byte) (*AdminAssertionResult, error) {
 	challenge, session, err := s.consumeAdminChallenge(ctx, tenantID, challengeID,
 		store.CeremonyAssertion)
 	if err != nil {
@@ -518,7 +521,8 @@ func (s *Service) CompleteAdminAssertion(ctx context.Context, tenantID, challeng
 // functions rather than one with a flag, because the table a challenge lands in
 // is the thing that keeps the two surfaces apart, and a flag is a thing a caller
 // can pass wrongly.
-func (s *Service) persistAdminChallenge(ctx context.Context, tenantID, adminTokenID string, ceremony store.Ceremony, session *lib.SessionData) (string, time.Time, error) {
+func (s *Service) persistAdminChallenge(ctx context.Context, tenantID, adminTokenID string, ceremony store.Ceremony,
+	session *lib.SessionData) (string, time.Time, error) {
 	raw, err := json.Marshal(session)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("webauthn: marshal session: %w", err)
@@ -548,7 +552,8 @@ func (s *Service) persistAdminChallenge(ctx context.Context, tenantID, adminToke
 
 // consumeAdminChallenge marks a console challenge used and returns its session
 // data.
-func (s *Service) consumeAdminChallenge(ctx context.Context, tenantID, challengeID string, want store.Ceremony) (*store.AdminChallenge, *lib.SessionData, error) {
+func (s *Service) consumeAdminChallenge(ctx context.Context, tenantID, challengeID string,
+	want store.Ceremony) (*store.AdminChallenge, *lib.SessionData, error) {
 	c, err := s.store.ConsumeAdminChallenge(ctx, tenantID, challengeID, s.now().UTC())
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, nil, ErrChallengeNotFound

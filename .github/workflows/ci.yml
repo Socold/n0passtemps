@@ -59,6 +59,12 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # Not the whole of 'make lint': the style budget in docs/ROADMAP.md is not
+      # empty yet, so running all of it here would fail every build. This runs
+      # the categories that are at zero, so that a cleared one stays cleared.
+      - name: Lint, the budget categories that are already at zero
+        run: make lint-cleared
+
       - name: Build every package
         run: go build ./...
 

@@ -445,7 +445,7 @@ Security Top 10 2023, and GDPR Articles 15, 17 and 32.
 | [docs/RBAC.md](docs/RBAC.md) | The 27 permissions against the three roles, and which are dual-approval candidates |
 | [docs/WEBAUTHN.md](docs/WEBAUTHN.md) | The ceremony here specifically, the challenge store, the user handle, attestation, the counter, platform notes |
 | [docs/GDPR.md](docs/GDPR.md) | Lawful basis, the personal data inventory, the Article 15 and 17 paths, how the chain survives erasure |
-| [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) | Assets, trust boundaries, nine attackers, and what is not mitigated |
+| [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) | Assets, trust boundaries, ten attackers, and what is not mitigated |
 | [docs/MONITORING.md](docs/MONITORING.md) | What to scrape, the ten alert types and their responses, log fields, database tuning |
 | [docs/SIEM.md](docs/SIEM.md) | Getting the two log streams into a SIEM: why there is no syslog client, the field mapping to ECS and OCSF, the closed audit event vocabulary, and what a sink receiver has to do |
 | [docs/adr/README.md](docs/adr/README.md) | Eighteen architecture decision records: the deliberate deviations from the original specification, and the convention itself |

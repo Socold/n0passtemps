@@ -152,7 +152,8 @@ func (r *Recorder) Errored(ctx context.Context, ev Event) error {
 // Verify walks the chain from fromSeq and reports the first broken sequence
 // number, or zero when the range is intact. The result is itself recorded, so
 // that a verification run and its outcome are part of the history.
-func (r *Recorder) Verify(ctx context.Context, tenantID string, fromSeq int64) (checked int64, brokenAt int64, err error) {
+func (r *Recorder) Verify(ctx context.Context, tenantID string, fromSeq int64) (checked int64, brokenAt int64,
+	err error) {
 	checked, brokenAt, err = r.store.VerifyChain(ctx, fromSeq)
 	if err != nil {
 		return checked, brokenAt, fmt.Errorf("audit: verify chain: %w", err)

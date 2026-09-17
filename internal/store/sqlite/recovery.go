@@ -26,7 +26,8 @@ const recoveryColumns = `id, tenant_id, subject_id, batch_id, selector, verifier
 // counters and the audit trail would then disagree about how many codes the
 // subject actually used. Codes that have genuinely been consumed are left in
 // place: they are evidence of an authentication and belong in the trail.
-func (s *Store) ReplaceRecoveryCodes(ctx context.Context, tenantID, subjectID, batchID string, codes []*store.RecoveryCode) error {
+func (s *Store) ReplaceRecoveryCodes(ctx context.Context, tenantID, subjectID, batchID string,
+	codes []*store.RecoveryCode) error {
 	if tenantID == "" || subjectID == "" || batchID == "" {
 		return errors.New("sqlite: recovery batch requires a tenant, a subject and a batch id")
 	}

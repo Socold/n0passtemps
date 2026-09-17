@@ -26,7 +26,8 @@ const ticketColumns = `id, tenant_id, subject_id, selector, verifier_hash, issue
 // that a ticket was issued and superseded, and a redemption attempt against it
 // is then refused by the state of the row rather than by a missing one, which
 // keeps the two cases indistinguishable to whoever presents it.
-func (s *Store) ReplaceEnrolmentTicket(ctx context.Context, tenantID, subjectID string, t *store.EnrolmentTicket) error {
+func (s *Store) ReplaceEnrolmentTicket(ctx context.Context, tenantID, subjectID string,
+	t *store.EnrolmentTicket) error {
 	if tenantID == "" || subjectID == "" {
 		return errors.New("postgres: enrolment ticket requires a tenant and a subject")
 	}
@@ -85,7 +86,8 @@ func (s *Store) ReplaceEnrolmentTicket(ctx context.Context, tenantID, subjectID 
 // A consumed, revoked or expired ticket is still returned, so that the caller
 // can verify the hashed half before deciding and a spent ticket costs the same
 // to reject as one that never existed.
-func (s *Store) GetEnrolmentTicketBySelector(ctx context.Context, tenantID, selector string) (*store.EnrolmentTicket, error) {
+func (s *Store) GetEnrolmentTicketBySelector(ctx context.Context, tenantID, selector string) (*store.EnrolmentTicket,
+	error) {
 	if selector == "" {
 		return nil, errors.New("postgres: enrolment ticket lookup requires a selector")
 	}

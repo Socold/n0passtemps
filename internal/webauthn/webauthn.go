@@ -217,7 +217,8 @@ type BeginRegistrationResult struct {
 //
 // The subject's existing credentials are excluded, so an authenticator already
 // enrolled cannot be enrolled twice and the browser can tell the user why.
-func (s *Service) BeginRegistration(ctx context.Context, subject *store.Subject, label string) (*BeginRegistrationResult, error) {
+func (s *Service) BeginRegistration(ctx context.Context, subject *store.Subject,
+	label string) (*BeginRegistrationResult, error) {
 	if !subject.Active() {
 		return nil, ErrSubjectInactive
 	}
@@ -276,7 +277,8 @@ func (s *Service) BeginRegistration(ctx context.Context, subject *store.Subject,
 //
 // credentialJSON is the raw PublicKeyCredential the browser produced, forwarded
 // verbatim by the integrating application.
-func (s *Service) CompleteRegistration(ctx context.Context, subject *store.Subject, challengeID string, credentialJSON []byte, label string) (*store.Credential, error) {
+func (s *Service) CompleteRegistration(ctx context.Context, subject *store.Subject, challengeID string,
+	credentialJSON []byte, label string) (*store.Credential, error) {
 	if !subject.Active() {
 		return nil, ErrSubjectInactive
 	}
@@ -452,7 +454,8 @@ type AssertionOutcome struct {
 // read at the start. Two concurrent completions of the same assertion therefore
 // have exactly one winner: the loser sees a stale write and is refused, which
 // is what stops the same signed assertion being accepted twice.
-func (s *Service) CompleteAssertion(ctx context.Context, subject *store.Subject, challengeID string, credentialJSON []byte) (*AssertionOutcome, error) {
+func (s *Service) CompleteAssertion(ctx context.Context, subject *store.Subject, challengeID string,
+	credentialJSON []byte) (*AssertionOutcome, error) {
 	if !subject.Active() {
 		return nil, ErrSubjectInactive
 	}
@@ -530,7 +533,8 @@ type credentialWriter interface {
 // The named, the discoverable and the console completion paths share it. The
 // counter bookkeeping is the part of an assertion easiest to get subtly wrong,
 // so w decides which table the writes land in and nothing else varies.
-func (s *Service) recordAssertion(ctx context.Context, w credentialWriter, rec *store.Credential, validated *lib.Credential, parsed *protocol.ParsedCredentialAssertionData) (*AssertionOutcome, error) {
+func (s *Service) recordAssertion(ctx context.Context, w credentialWriter, rec *store.Credential,
+	validated *lib.Credential, parsed *protocol.ParsedCredentialAssertionData) (*AssertionOutcome, error) {
 	outcome := &AssertionOutcome{
 		Credential: rec,
 		// Read from the authenticator data of THIS ceremony, not from the
@@ -573,7 +577,8 @@ func (s *Service) recordAssertion(ctx context.Context, w credentialWriter, rec *
 		if err := w.MarkCloneWarning(ctx, rec.TenantID, rec.ID); err != nil {
 			return nil, fmt.Errorf("webauthn: record clone warning: %w", err)
 		}
-		if err := w.TouchCredential(ctx, rec.TenantID, rec.ID, usedAt); err != nil && !errors.Is(err, store.ErrNotFound) {
+		err := w.TouchCredential(ctx, rec.TenantID, rec.ID, usedAt)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return nil, fmt.Errorf("webauthn: record credential use: %w", err)
 		}
 	} else {
@@ -651,7 +656,8 @@ func (s *Service) BeginDiscoverableAssertion(ctx context.Context, tenantID strin
 // let anyone present their own authenticator alongside somebody else's handle
 // and be told they are that person. The handle is still checked, because a
 // response whose two halves disagree is not one this service issued.
-func (s *Service) CompleteDiscoverableAssertion(ctx context.Context, tenantID, challengeID string, credentialJSON []byte) (*store.Subject, *AssertionOutcome, error) {
+func (s *Service) CompleteDiscoverableAssertion(ctx context.Context, tenantID, challengeID string,
+	credentialJSON []byte) (*store.Subject, *AssertionOutcome, error) {
 	challenge, session, err := s.consumeChallenge(ctx, tenantID, challengeID,
 		store.CeremonyAssertion)
 	if err != nil {
@@ -748,7 +754,8 @@ func (s *Service) CompleteDiscoverableAssertion(ctx context.Context, tenantID, c
 }
 
 // persistChallenge stores the ceremony state and returns its identifier.
-func (s *Service) persistChallenge(ctx context.Context, tenantID, subjectID string, ceremony store.Ceremony, session *lib.SessionData) (string, time.Time, error) {
+func (s *Service) persistChallenge(ctx context.Context, tenantID, subjectID string, ceremony store.Ceremony,
+	session *lib.SessionData) (string, time.Time, error) {
 	raw, err := json.Marshal(session)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("webauthn: marshal session: %w", err)
@@ -792,7 +799,8 @@ func decodeChallenge(encoded string) []byte {
 }
 
 // consumeChallenge marks the challenge used and returns its session data.
-func (s *Service) consumeChallenge(ctx context.Context, tenantID, challengeID string, want store.Ceremony) (*store.Challenge, *lib.SessionData, error) {
+func (s *Service) consumeChallenge(ctx context.Context, tenantID, challengeID string,
+	want store.Ceremony) (*store.Challenge, *lib.SessionData, error) {
 	c, err := s.store.ConsumeChallenge(ctx, tenantID, challengeID, s.now().UTC())
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, nil, ErrChallengeNotFound

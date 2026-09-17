@@ -195,7 +195,8 @@ func renderEnv(a answers) string {
 			"# back to plaintext without saying so. Inside a compose network the\n" +
 			"# connection never leaves the host, which is why disable is acceptable here\n" +
 			"# and verify-full is required against a managed instance.\n" +
-			"N0PASSTEMPS_DATABASE_DSN=postgres://n0passtemps:${POSTGRES_PASSWORD}@postgres:5432/n0passtemps?sslmode=disable\n\n")
+			"N0PASSTEMPS_DATABASE_DSN=postgres://n0passtemps:${POSTGRES_PASSWORD}" +
+			"@postgres:5432/n0passtemps?sslmode=disable\n\n")
 	}
 
 	b.WriteString("# Where the container's port is published. Keep it on loopback unless a\n" +

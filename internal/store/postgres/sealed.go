@@ -63,7 +63,8 @@ func sealedStatementsFor(kind store.SealedKind) (sealedStatements, error) {
 //
 // The walk spans every tenant, because the keyring it serves is shared by all
 // of them; see the interface.
-func (s *Store) ListSealed(ctx context.Context, kind store.SealedKind, afterID string, limit int) ([]store.SealedRecord, error) {
+func (s *Store) ListSealed(ctx context.Context, kind store.SealedKind, afterID string, limit int) ([]store.SealedRecord,
+	error) {
 	stmts, err := sealedStatementsFor(kind)
 	if err != nil {
 		return nil, err

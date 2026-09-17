@@ -121,7 +121,8 @@ func requireSignedBlob(raw []byte) error {
 
 	switch strings.ToLower(strings.TrimSpace(header.Alg)) {
 	case "", "none":
-		return errors.New("the JWT declares no signature algorithm; an unsigned file cannot be a source of trust anchors")
+		return errors.New("the JWT declares no signature algorithm; " +
+			"an unsigned file cannot be a source of trust anchors")
 	}
 	if strings.HasPrefix(strings.ToUpper(header.Alg), "HS") {
 		// A symmetric algorithm has no place here: the verifier holds no

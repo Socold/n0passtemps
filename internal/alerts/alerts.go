@@ -457,7 +457,8 @@ func (e *Engine) AuthFailureBurst(ctx context.Context, tenantID, subjectID strin
 // network is the value the limiter buckets on, which is a /64 for IPv6 rather
 // than a single address, so the alert names the same thing the limit applied
 // to.
-func (e *Engine) AuthFailureBurstFromNetwork(ctx context.Context, tenantID, network string, count int) (*store.Alert, error) {
+func (e *Engine) AuthFailureBurstFromNetwork(ctx context.Context, tenantID, network string, count int) (*store.Alert,
+	error) {
 	return e.Raise(ctx, Input{
 		TenantID:   tenantID,
 		Type:       TypeAuthFailureIP,
@@ -472,24 +473,30 @@ func (e *Engine) AuthFailureBurstFromNetwork(ctx context.Context, tenantID, netw
 //
 // The assertion itself is not refused, so this alert is the only record that a
 // device may have been cloned.
-func (e *Engine) SignCountRegression(ctx context.Context, tenantID, subjectID, credentialID string, stored, presented uint32) (*store.Alert, error) {
+func (e *Engine) SignCountRegression(ctx context.Context, tenantID, subjectID, credentialID string, stored,
+	presented uint32) (*store.Alert, error) {
+	summary := fmt.Sprintf("Signature counter did not advance, stored %d and the assertion presented %d",
+		stored, presented)
 	return e.Raise(ctx, Input{
 		TenantID:   tenantID,
 		Type:       TypeSignCountRegression,
 		SubjectID:  subjectID,
 		ResourceID: credentialID,
-		Summary:    fmt.Sprintf("Signature counter did not advance, stored %d and the assertion presented %d", stored, presented),
+		Summary:    summary,
 		Detail:     map[string]any{"stored_sign_count": stored, "presented_sign_count": presented},
 	})
 }
 
 // BulkRevocation reports revocations above the configured burst.
-func (e *Engine) BulkRevocation(ctx context.Context, tenantID, actorID string, revoked, burst int) (*store.Alert, error) {
+func (e *Engine) BulkRevocation(ctx context.Context, tenantID, actorID string, revoked, burst int) (*store.Alert,
+	error) {
+	summary := fmt.Sprintf("%d credentials revoked by one administrator, the configured burst is %d",
+		revoked, burst)
 	return e.Raise(ctx, Input{
 		TenantID:   tenantID,
 		Type:       TypeBulkRevocation,
 		ResourceID: actorID,
-		Summary:    fmt.Sprintf("%d credentials revoked by one administrator, the configured burst is %d", revoked, burst),
+		Summary:    summary,
 		Detail:     map[string]any{"revoked": revoked, "burst": burst, "actor_id": actorID},
 	})
 }
@@ -505,7 +512,8 @@ func (e *Engine) RecoveryExhausted(ctx context.Context, tenantID, subjectID stri
 }
 
 // RecoveryLow reports a subject below the configured low watermark.
-func (e *Engine) RecoveryLow(ctx context.Context, tenantID, subjectID string, remaining, watermark int) (*store.Alert, error) {
+func (e *Engine) RecoveryLow(ctx context.Context, tenantID, subjectID string, remaining, watermark int) (*store.Alert,
+	error) {
 	return e.Raise(ctx, Input{
 		TenantID:  tenantID,
 		Type:      TypeRecoveryLow,
@@ -563,14 +571,17 @@ func (e *Engine) AuditChainBroken(ctx context.Context, tenantID string, brokenAt
 // without opening the audit log. issuedBy names the credential that asked for
 // it, because the question after an unexpected override is always which
 // integration or which operator made the call.
-func (e *Engine) TicketFactorOverride(ctx context.Context, tenantID, subjectID, ticketID, issuedBy string, credentials int, totp bool) (*store.Alert, error) {
+func (e *Engine) TicketFactorOverride(ctx context.Context, tenantID, subjectID, ticketID, issuedBy string,
+	credentials int, totp bool) (*store.Alert, error) {
+	summary := fmt.Sprintf(
+		"Enrolment ticket issued over an existing factor: %d active credentials, totp confirmed %t",
+		credentials, totp)
 	return e.Raise(ctx, Input{
 		TenantID:   tenantID,
 		Type:       TypeTicketFactorOverride,
 		SubjectID:  subjectID,
 		ResourceID: ticketID,
-		Summary: fmt.Sprintf("Enrolment ticket issued over an existing factor: %d active credentials, totp confirmed %t",
-			credentials, totp),
+		Summary:    summary,
 		Detail: map[string]any{
 			"active_credentials": credentials,
 			"totp_confirmed":     totp,
@@ -594,7 +605,8 @@ func (e *Engine) TicketFactorOverride(ctx context.Context, tenantID, subjectID, 
 // The fingerprint covers the type and the endpoint, so a receiver that has been
 // down for an hour is one row with a rising occurrence count rather than one
 // row per retry.
-func (e *Engine) AuditSinkFailing(ctx context.Context, tenantID, endpoint string, pending int64, reason string) (*store.Alert, error) {
+func (e *Engine) AuditSinkFailing(ctx context.Context, tenantID, endpoint string, pending int64,
+	reason string) (*store.Alert, error) {
 	return e.Raise(ctx, Input{
 		TenantID:   tenantID,
 		Type:       TypeAuditSinkFailing,
@@ -606,7 +618,8 @@ func (e *Engine) AuditSinkFailing(ctx context.Context, tenantID, endpoint string
 }
 
 // KEKRotationOverdue reports a key encryption key past its rotation interval.
-func (e *Engine) KEKRotationOverdue(ctx context.Context, tenantID, keyVersion string, age, interval time.Duration) (*store.Alert, error) {
+func (e *Engine) KEKRotationOverdue(ctx context.Context, tenantID, keyVersion string, age,
+	interval time.Duration) (*store.Alert, error) {
 	return e.Raise(ctx, Input{
 		TenantID:   tenantID,
 		Type:       TypeKEKRotationOverdue,
@@ -627,7 +640,8 @@ func (e *Engine) KEKRotationOverdue(ctx context.Context, tenantID, keyVersion st
 // of high assessments against one subject collapses onto one row with a rising
 // occurrence count. Including the reasons would split that run into a row per
 // combination, which is the flood the fingerprint exists to prevent.
-func (e *Engine) RiskHigh(ctx context.Context, tenantID, subjectID string, score int, reasons []string) (*store.Alert, error) {
+func (e *Engine) RiskHigh(ctx context.Context, tenantID, subjectID string, score int, reasons []string) (*store.Alert,
+	error) {
 	return e.Raise(ctx, Input{
 		TenantID:  tenantID,
 		Type:      TypeRiskHigh,

@@ -65,7 +65,8 @@ const janitorSweepLockKey int64 = 7731116966443686148
 // comment is the required notice: the lock lives on the connection rather than
 // on a clock, so there is no expiry to compute and no clock skew between
 // replicas to get wrong.
-func (s *Store) TryAcquireJanitorLock(ctx context.Context, owner string, _ time.Time, _ time.Duration) (store.JanitorLock, error) {
+func (s *Store) TryAcquireJanitorLock(ctx context.Context, owner string, _ time.Time,
+	_ time.Duration) (store.JanitorLock, error) {
 	if owner == "" {
 		return nil, errors.New("postgres: janitor lock requires an owner")
 	}

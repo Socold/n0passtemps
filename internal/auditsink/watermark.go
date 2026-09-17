@@ -75,7 +75,8 @@ func loadWatermark(path string, log *slog.Logger) (*watermark, error) {
 	default:
 		var f watermarkFile
 		if err := json.Unmarshal(raw, &f); err != nil {
-			log.Error("the audit sink watermark is not readable as JSON, delivery restarts from the beginning of the log",
+			log.Error("the audit sink watermark is not readable as JSON, "+
+				"delivery restarts from the beginning of the log",
 				slog.String("path", path), slog.Any("error", err))
 		} else if f.DeliveredThroughSeq > 0 {
 			w.seq = f.DeliveredThroughSeq

@@ -824,12 +824,13 @@ func Default() Config {
 			// kek.rotate gates the rewrap of stored records onto the current key.
 			// Adding a key version to the keyring file remains a command-line
 			// operation and is not reachable through the API.
-			DualApprovalOperations: []string{"credential.revoke_bulk", "subject.erase", "admin_token.create", "kek.rotate"},
-			ApprovalTTL:            Duration{24 * time.Hour},
-			DeferredErasure:        true,
-			ErasureRetention:       Duration{30 * 24 * time.Hour},
-			KEKRotationReminder:    true,
-			JanitorInterval:        Duration{5 * time.Minute},
+			DualApprovalOperations: []string{"credential.revoke_bulk", "subject.erase", "admin_token.create",
+				"kek.rotate"},
+			ApprovalTTL:         Duration{24 * time.Hour},
+			DeferredErasure:     true,
+			ErasureRetention:    Duration{30 * 24 * time.Hour},
+			KEKRotationReminder: true,
+			JanitorInterval:     Duration{5 * time.Minute},
 			// A day covers a deployment that picks the new key up on its next
 			// restart or its next scheduled release, without leaving the old
 			// one alive long enough to be forgotten.

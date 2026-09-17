@@ -73,7 +73,8 @@ func (s *Store) CreateAdminCredential(ctx context.Context, c *store.AdminCredent
 }
 
 // GetAdminCredentialByID implements store.AdminCredentialStore.
-func (s *Store) GetAdminCredentialByID(ctx context.Context, tenantID, rpID string, credentialID []byte) (*store.AdminCredential, error) {
+func (s *Store) GetAdminCredentialByID(ctx context.Context, tenantID, rpID string,
+	credentialID []byte) (*store.AdminCredential, error) {
 	if len(credentialID) == 0 {
 		return nil, errors.New("postgres: administrative credential lookup requires a credential id")
 	}
@@ -98,7 +99,8 @@ func (s *Store) GetAdminCredential(ctx context.Context, tenantID, id string) (*s
 }
 
 // ListAdminCredentials implements store.AdminCredentialStore.
-func (s *Store) ListAdminCredentials(ctx context.Context, tenantID, adminTokenID string, includeRevoked bool) ([]*store.AdminCredential, error) {
+func (s *Store) ListAdminCredentials(ctx context.Context, tenantID, adminTokenID string,
+	includeRevoked bool) ([]*store.AdminCredential, error) {
 	query := `SELECT ` + adminCredentialColumns + ` FROM admin_credentials
 		WHERE tenant_id = $1 AND admin_token_id = $2`
 	if !includeRevoked {
@@ -196,7 +198,8 @@ func (s *Store) MarkAdminCredentialCloneWarning(ctx context.Context, tenantID, i
 // statement, so a concurrent attempt re-evaluates its own WHERE clause against
 // the committed row and matches nothing, which is exactly-once under READ
 // COMMITTED without a transaction or a raised isolation level.
-func (s *Store) AdvanceAdminCredentialSignCount(ctx context.Context, tenantID, id string, expectedPrev, next uint32, usedAt time.Time) error {
+func (s *Store) AdvanceAdminCredentialSignCount(ctx context.Context, tenantID, id string, expectedPrev, next uint32,
+	usedAt time.Time) error {
 	if next <= expectedPrev {
 		// Refused before touching the database. A counter that does not move
 		// forward has either been seen before or comes from a cloned
@@ -265,7 +268,8 @@ func (s *Store) CreateAdminChallenge(ctx context.Context, c *store.AdminChalleng
 // It is ConsumeChallenge over the console's own table, including the RETURNING
 // clause that makes the mark and the read one statement with nothing between
 // them for a concurrent consumer to slip into.
-func (s *Store) ConsumeAdminChallenge(ctx context.Context, tenantID, id string, now time.Time) (*store.AdminChallenge, error) {
+func (s *Store) ConsumeAdminChallenge(ctx context.Context, tenantID, id string, now time.Time) (*store.AdminChallenge,
+	error) {
 	row := s.pool.QueryRow(ctx, `
 		UPDATE admin_webauthn_challenges SET consumed_at = $1
 		WHERE tenant_id = $2 AND id = $3 AND consumed_at IS NULL AND expires_at > $1

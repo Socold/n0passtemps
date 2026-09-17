@@ -88,7 +88,8 @@ func (s *Store) GetCredential(ctx context.Context, tenantID, id string) (*store.
 // This is the assertion path lookup: the authenticator reports a credential ID
 // and the relying party it was created for, and the pair addresses the unique
 // index directly.
-func (s *Store) GetCredentialByID(ctx context.Context, tenantID, rpID string, credentialID []byte) (*store.Credential, error) {
+func (s *Store) GetCredentialByID(ctx context.Context, tenantID, rpID string, credentialID []byte) (*store.Credential,
+	error) {
 	if len(credentialID) == 0 {
 		return nil, errors.New("postgres: credential lookup requires a credential id")
 	}
@@ -103,7 +104,8 @@ func (s *Store) GetCredentialByID(ctx context.Context, tenantID, rpID string, cr
 //
 // Revoked credentials are excluded unless asked for, so the common case reads
 // through the partial index the schema declares for it.
-func (s *Store) ListCredentials(ctx context.Context, tenantID, subjectID string, includeRevoked bool) ([]*store.Credential, error) {
+func (s *Store) ListCredentials(ctx context.Context, tenantID, subjectID string,
+	includeRevoked bool) ([]*store.Credential, error) {
 	query := `SELECT ` + credentialColumns + ` FROM webauthn_credentials
 		WHERE tenant_id = $1 AND subject_id = $2`
 	if !includeRevoked {
@@ -160,7 +162,8 @@ func (s *Store) ListCredentials(ctx context.Context, tenantID, subjectID string,
 // the stored one is refused. A revoked credential reaches the same outcome: the
 // caller's response is the same rejection either way, and distinguishing it here
 // would only invite a caller to treat one of the two as recoverable.
-func (s *Store) AdvanceSignCount(ctx context.Context, tenantID, id string, expectedPrev, next uint32, usedAt time.Time) error {
+func (s *Store) AdvanceSignCount(ctx context.Context, tenantID, id string, expectedPrev, next uint32,
+	usedAt time.Time) error {
 	if next <= expectedPrev {
 		// Refused before touching the database. A counter that does not move
 		// forward has either been seen before or comes from a cloned
@@ -269,7 +272,8 @@ func (s *Store) RevokeCredential(ctx context.Context, tenantID, id, reason strin
 //
 // The tenant predicate is on both statements. A subject identifier from another
 // tenant matches nothing and yields two zero counts.
-func (s *Store) RevokeAllCredentials(ctx context.Context, tenantID, subjectID, reason string, at time.Time) (int64, int64, error) {
+func (s *Store) RevokeAllCredentials(ctx context.Context, tenantID, subjectID, reason string, at time.Time) (int64,
+	int64, error) {
 	if tenantID == "" || subjectID == "" {
 		return 0, 0, errors.New("postgres: revoking all credentials requires a tenant and a subject")
 	}

@@ -153,7 +153,8 @@ func (e *throttledError) Error() string { return "rate limit reached on dimensio
 // counters this call already fetched, rather than querying for them again on
 // the authentication path. Callers with no use for it ignore it, which is why
 // it is a return value and not an out parameter.
-func (s *Server) recordAttempt(r *http.Request, tenantID, subjectID string, dims map[throttle.Dimension]string, failure bool) throttle.Result {
+func (s *Server) recordAttempt(r *http.Request, tenantID, subjectID string, dims map[throttle.Dimension]string,
+	failure bool) throttle.Result {
 	if s.deps.Limiter == nil || len(dims) == 0 {
 		return throttle.Result{Allowed: true}
 	}

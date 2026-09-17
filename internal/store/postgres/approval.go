@@ -71,7 +71,8 @@ func (s *Store) GetApproval(ctx context.Context, tenantID, id string) (*store.Ap
 //
 // Oldest first, because the queue is worked from the front and a request that
 // sits long enough will expire unactioned.
-func (s *Store) ListApprovals(ctx context.Context, tenantID string, status store.ApprovalStatus, limit int) ([]*store.ApprovalRequest, error) {
+func (s *Store) ListApprovals(ctx context.Context, tenantID string, status store.ApprovalStatus,
+	limit int) ([]*store.ApprovalRequest, error) {
 	var a argset
 	where := []string{"tenant_id = " + a.add(tenantID)}
 
@@ -131,7 +132,8 @@ func (s *Store) ListApprovals(ctx context.Context, tenantID string, status store
 // with that update. requested_by and expires_at are written once at insert and
 // never modified, so the two values the classification depends on cannot change
 // under it, and the status is guarded by the update itself.
-func (s *Store) DecideApproval(ctx context.Context, tenantID, id, decidedBy string, approve bool, note string, at time.Time) (*store.ApprovalRequest, error) {
+func (s *Store) DecideApproval(ctx context.Context, tenantID, id, decidedBy string, approve bool, note string,
+	at time.Time) (*store.ApprovalRequest, error) {
 	if strings.TrimSpace(decidedBy) == "" {
 		return nil, errors.New("postgres: deciding an approval requires an administrator")
 	}

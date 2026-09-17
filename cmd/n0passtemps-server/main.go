@@ -56,9 +56,12 @@ func run() error {
 		showVersion = flag.Bool("version", false, "print the version and exit")
 		checkOnly   = flag.Bool("check-config", false, "validate the configuration and exit without starting")
 		migrateOnly = flag.Bool("migrate", false, "apply pending migrations and exit")
-		bootstrap   = flag.Bool("bootstrap-admin", false, "create the first administrative token, print it once and exit")
-		force       = flag.Bool("force", false, "with -bootstrap-admin, create a token even though an administrator already exists")
-		admins      = flag.Int("admins", 1, "with -bootstrap-admin, how many administrative tokens to create; use 2 when dual approval is on")
+		bootstrap   = flag.Bool("bootstrap-admin", false,
+			"create the first administrative token, print it once and exit")
+		force = flag.Bool("force", false,
+			"with -bootstrap-admin, create a token even though an administrator already exists")
+		admins = flag.Int("admins", 1,
+			"with -bootstrap-admin, how many administrative tokens to create; use 2 when dual approval is on")
 	)
 	flag.Parse()
 
@@ -300,7 +303,8 @@ func loadRetiredKeys(paths []string) ([]ed25519.PublicKey, error) {
 // network access at all. Every other failure stops the start, because a
 // deployment that believes its audit log is being witnessed and is not would
 // only find out from an alert nobody had reason to expect.
-func openAuditSink(cfg *config.Config, st store.Store, al *alerts.Engine, log *slog.Logger) (*auditsink.Shipper, error) {
+func openAuditSink(cfg *config.Config, st store.Store, al *alerts.Engine, log *slog.Logger) (*auditsink.Shipper,
+	error) {
 	shipper, err := auditsink.New(auditsink.Options{
 		Config:        cfg.Audit.Sink,
 		TenantID:      cfg.TenantID(),
@@ -356,7 +360,8 @@ func openStore(ctx context.Context, cfg *config.Config, log *slog.Logger) (store
 }
 
 // ensureTenant provisions the single tenant a v1 deployment serves.
-func ensureTenant(ctx context.Context, cfg *config.Config, st store.Store, rec *audit.Recorder, log *slog.Logger) error {
+func ensureTenant(ctx context.Context, cfg *config.Config, st store.Store, rec *audit.Recorder,
+	log *slog.Logger) error {
 	id := cfg.TenantID()
 
 	if _, err := st.GetTenant(ctx, id); err == nil {
@@ -396,7 +401,8 @@ func ensureTenant(ctx context.Context, cfg *config.Config, st store.Store, rec *
 // It is off by default because the cost is linear in the size of the log. An
 // operator who turns it on wants the service to refuse to start on a broken
 // chain rather than serve traffic while its own record is untrustworthy.
-func verifyChainOnStart(ctx context.Context, cfg *config.Config, rec *audit.Recorder, al *alerts.Engine, log *slog.Logger) error {
+func verifyChainOnStart(ctx context.Context, cfg *config.Config, rec *audit.Recorder, al *alerts.Engine,
+	log *slog.Logger) error {
 	start := time.Now()
 	checked, brokenAt, err := rec.Verify(ctx, cfg.TenantID(), 1)
 	if err != nil {

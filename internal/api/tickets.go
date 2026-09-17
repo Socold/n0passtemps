@@ -212,7 +212,8 @@ func (s *Server) handleAdminIssueEnrolmentTicket(w http.ResponseWriter, r *http.
 // the alert cannot differ between them. A route-specific copy of this logic is
 // how the administrative surface would quietly end up with a weaker rule than
 // the public one.
-func (s *Server) issueTicket(r *http.Request, caller *Caller, tenantID string, sub *store.Subject, req ticketIssueRequest) (*ticketIssueResponse, error) {
+func (s *Server) issueTicket(r *http.Request, caller *Caller, tenantID string, sub *store.Subject,
+	req ticketIssueRequest) (*ticketIssueResponse, error) {
 	ctx := r.Context()
 
 	credentials, totpConfirmed, err := s.subjectFactors(ctx, tenantID, sub.ID)
@@ -317,7 +318,8 @@ func (s *Server) issueTicket(r *http.Request, caller *Caller, tenantID string, s
 // It is a side effect of a decision already taken, so a failure to raise it is
 // logged and the issuance stands. The audit entry carries the same facts, which
 // is what keeps the record complete when the alert table refuses a write.
-func (s *Server) alertTicketOverride(r *http.Request, tenantID, subjectID string, ticket *store.EnrolmentTicket, credentials int, totpConfirmed bool) {
+func (s *Server) alertTicketOverride(r *http.Request, tenantID, subjectID string, ticket *store.EnrolmentTicket,
+	credentials int, totpConfirmed bool) {
 	if s.deps.Alerts == nil {
 		return
 	}
@@ -333,7 +335,8 @@ func (s *Server) alertTicketOverride(r *http.Request, tenantID, subjectID string
 // not proved they can produce codes from it, so treating it as a factor would
 // refuse a ticket to somebody who has no way in at all, which is the one person
 // the feature exists for.
-func (s *Server) subjectFactors(ctx context.Context, tenantID, subjectID string) (credentials int, totpConfirmed bool, err error) {
+func (s *Server) subjectFactors(ctx context.Context, tenantID, subjectID string) (credentials int, totpConfirmed bool,
+	err error) {
 	creds, err := s.deps.Store.ListCredentials(ctx, tenantID, subjectID, false)
 	if err != nil {
 		return 0, false, Internal(err)
@@ -593,7 +596,8 @@ func (s *Server) handleTicketRegisterComplete(w http.ResponseWriter, r *http.Req
 // being refused, and there is no better answer available: a revocation that
 // cannot be written leaves a credential an operator has to remove by hand, which
 // is why it is logged at error level and audited with the ticket named.
-func (s *Server) undoUnauthorisedEnrolment(r *http.Request, tenantID, subjectID string, caller *Caller, ticket *store.EnrolmentTicket, cred *store.Credential) {
+func (s *Server) undoUnauthorisedEnrolment(r *http.Request, tenantID, subjectID string, caller *Caller,
+	ticket *store.EnrolmentTicket, cred *store.Credential) {
 	ctx := r.Context()
 	reason := "enrolment ticket was already spent"
 
@@ -628,7 +632,8 @@ func (s *Server) undoUnauthorisedEnrolment(r *http.Request, tenantID, subjectID 
 // own outcome against the same buckets. Without that, a ceremony that failed
 // after the ticket verified would leave no trace in the limiter, and an attacker
 // holding one valid ticket could hammer the completion route unbounded.
-func (s *Server) resolveTicket(r *http.Request, caller *Caller, tenantID, presented string) (*store.EnrolmentTicket, *store.Subject, map[throttle.Dimension]string, error) {
+func (s *Server) resolveTicket(r *http.Request, caller *Caller, tenantID, presented string) (*store.EnrolmentTicket,
+	*store.Subject, map[throttle.Dimension]string, error) {
 	ctx := r.Context()
 
 	selector, verifier, splitErr := recovery.Split(presented)

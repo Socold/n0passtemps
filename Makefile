@@ -65,8 +65,9 @@ define require_tool
 command -v $(1) >/dev/null 2>&1 || { echo "$(1) is not on PATH; install the pinned version with:"; echo "  go install $(2)"; exit 1; }
 endef
 
-.PHONY: help build build-all test test-race test-integration cover lint sec \
-	secrets fmt fmt-check vet tidy migrate-check docker setup-wizard clean ci
+.PHONY: help build build-all test test-race test-integration cover lint \
+	lint-cleared sec secrets fmt fmt-check vet tidy migrate-check docker \
+	setup-wizard clean ci
 
 help: ## List the available targets
 	@awk 'BEGIN { FS = ":.*?## " } \
@@ -110,6 +111,22 @@ cover: ## Write coverage.out and print the total statement coverage
 lint: ## Run golangci-lint with the repository configuration
 	@$(call require_tool,golangci-lint,github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION))
 	golangci-lint run ./...
+
+# The categories of the style budget that still have findings. The whole of
+# 'lint' cannot be wired into CI until the backlog is empty, and a category
+# cleared with nothing enforcing it fills back up, so lint-cleared runs
+# everything except these and a category leaves the list as it reaches nought.
+# See docs/ROADMAP.md.
+#
+# Expressed as what to disable rather than what to enable, because --enable adds
+# to the set in .golangci.yml instead of replacing it: a target written the
+# other way round silently ran every linter and passed while three categories
+# were failing.
+UNCLEARED_LINTERS ?= govet,revive,gocritic,gocyclo
+
+lint-cleared: ## Run every linter except the budget categories that still have findings
+	@$(call require_tool,golangci-lint,github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION))
+	golangci-lint run ./... --disable=$(UNCLEARED_LINTERS)
 
 # gosec runs without -no-fail: a clean report is the baseline, so a new finding
 # stops the build rather than waiting to be noticed in a report. -conf carries
@@ -174,5 +191,8 @@ setup-wizard: ## Run the interactive setup tool (writes config.toml, docker-comp
 clean: ## Remove build output and coverage data
 	rm -rf $(BIN_DIR) $(DIST_DIR) $(COVER_FILE) coverage.html
 
-ci: fmt-check vet lint migrate-check test-race cover sec secrets build ## Run the full gate, in the order CI runs it
+# lint-cleared rather than lint, because lint cannot pass while the style budget
+# in docs/ROADMAP.md is not empty, and a gate CONTRIBUTING.md asks contributors
+# to pass has to be one that can pass. Run 'make lint' to see the backlog.
+ci: fmt-check vet lint-cleared migrate-check test-race cover sec secrets build ## Run the full gate, in the order CI runs it
 	@echo "ci gate passed for $(VERSION)"

@@ -58,7 +58,8 @@ const subjectBucketPredicate = `tenant_id = $1 AND subject_id = $2`
 // failures increments only when failure is true, because a user who
 // authenticates successfully fifty times in an afternoon has done nothing that
 // should count towards a lockout.
-func (s *Store) Hit(ctx context.Context, tenantID, bucketKey, subjectID string, window time.Duration, now time.Time, failure bool) (*store.ThrottleState, error) {
+func (s *Store) Hit(ctx context.Context, tenantID, bucketKey, subjectID string, window time.Duration, now time.Time,
+	failure bool) (*store.ThrottleState, error) {
 	if tenantID == "" || bucketKey == "" {
 		return nil, errors.New("postgres: throttle hit requires a tenant and a bucket key")
 	}

@@ -75,7 +75,8 @@ func exitCodeFor(err error) int {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, "n0passtemps-wizard prepares a deployment.\n\nUsage:\n  n0passtemps-wizard <command> [flags]\n\nCommands:\n")
+	fmt.Fprint(os.Stderr, "n0passtemps-wizard prepares a deployment.\n\n"+
+		"Usage:\n  n0passtemps-wizard <command> [flags]\n\nCommands:\n")
 	for _, c := range commands {
 		fmt.Fprintf(os.Stderr, "  %-14s %s\n", c.name, c.summary)
 	}

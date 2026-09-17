@@ -252,9 +252,10 @@ type rule struct {
 // rules is the policy, in reporting order.
 var rules = []rule{
 	{
-		reason:  ReasonSignatureCounterStalled,
-		weight:  40,
-		meaning: "the authenticator's signature counter did not advance, which is the documented signal for two copies of one credential private key in use",
+		reason: ReasonSignatureCounterStalled,
+		weight: 40,
+		meaning: "the authenticator's signature counter did not advance, which is the " +
+			"documented signal for two copies of one credential private key in use",
 		applies: func(in Input, _ config.Risk, _ time.Time) bool {
 			return in.CloneWarning
 		},
@@ -307,9 +308,10 @@ var rules = []rule{
 		},
 	},
 	{
-		reason:  ReasonCredentialNew,
-		weight:  10,
-		meaning: "the credential was registered within the configured window, so a freshly enrolled authenticator is authenticating immediately",
+		reason: ReasonCredentialNew,
+		weight: 10,
+		meaning: "the credential was registered within the configured window, so a " +
+			"freshly enrolled authenticator is authenticating immediately",
 		applies: func(in Input, cfg config.Risk, now time.Time) bool {
 			if in.CredentialCreatedAt.IsZero() {
 				return false
@@ -318,9 +320,10 @@ var rules = []rule{
 		},
 	},
 	{
-		reason:  ReasonRecentFailuresSubject,
-		weight:  10,
-		meaning: "at least one attempt against this subject failed inside the current throttle window before this one succeeded",
+		reason: ReasonRecentFailuresSubject,
+		weight: 10,
+		meaning: "at least one attempt against this subject failed inside the current " +
+			"throttle window before this one succeeded",
 		applies: func(in Input, _ config.Risk, _ time.Time) bool {
 			// One failure is enough to fire, because the throttle window
 			// already bounds how long it counts for and the weight is set so
@@ -342,9 +345,10 @@ var rules = []rule{
 		},
 	},
 	{
-		reason:  ReasonTOTPOnly,
-		weight:  10,
-		meaning: "the subject holds no WebAuthn credential, so the factor that authenticated them is phishable and there is no stronger one to fall back on",
+		reason: ReasonTOTPOnly,
+		weight: 10,
+		meaning: "the subject holds no WebAuthn credential, so the factor that " +
+			"authenticated them is phishable and there is no stronger one to fall back on",
 		applies: func(in Input, _ config.Risk, _ time.Time) bool {
 			return in.Ceremony == CeremonyTOTP && in.WebAuthnCredentials == 0
 		},

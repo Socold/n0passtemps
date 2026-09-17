@@ -552,7 +552,8 @@ func (s *Server) handleAssertComplete(w http.ResponseWriter, r *http.Request) er
 // ceremony is worth does not depend on how the subject came to be known, and
 // two copies of this would be two places for the factor list, the reported
 // signals and the risk claim to drift apart.
-func (s *Server) finishWebAuthnAssertion(w http.ResponseWriter, r *http.Request, caller *Caller, tenantID string, sub *store.Subject, outcome *wa.AssertionOutcome, assessed *risk.Assessment) error {
+func (s *Server) finishWebAuthnAssertion(w http.ResponseWriter, r *http.Request, caller *Caller, tenantID string,
+	sub *store.Subject, outcome *wa.AssertionOutcome, assessed *risk.Assessment) error {
 	factors := []assertion.Factor{assertion.FactorWebAuthn}
 	if outcome.UserVerified {
 		factors = append(factors, assertion.FactorWebAuthnUV)
@@ -723,7 +724,8 @@ func (s *Server) handleDiscoverableAssertComplete(w http.ResponseWriter, r *http
 // authenticators legitimately report a constant zero, and a platform
 // authenticator synchronised across devices does the same. Refusing on this
 // signal would lock out a large share of ordinary users.
-func (s *Server) reportCloneWarning(r *http.Request, tenantID string, sub *store.Subject, outcome *wa.AssertionOutcome) {
+func (s *Server) reportCloneWarning(r *http.Request, tenantID string, sub *store.Subject,
+	outcome *wa.AssertionOutcome) {
 	s.audited(r, audit.Event{
 		TenantID:     tenantID,
 		EventType:    audit.EventSignCountRegression,
@@ -753,7 +755,8 @@ func (s *Server) reportCloneWarning(r *http.Request, tenantID string, sub *store
 // audit log, where an operator can read it, and not to the caller, who would
 // otherwise be able to tell an expired challenge from a wrong signature from an
 // unknown credential and probe the configuration accordingly.
-func (s *Server) ceremonyError(r *http.Request, tenantID, subjectID string, caller *Caller, eventType string, err error) error {
+func (s *Server) ceremonyError(r *http.Request, tenantID, subjectID string, caller *Caller, eventType string,
+	err error) error {
 	s.audited(r, audit.Event{
 		TenantID:  tenantID,
 		EventType: eventType,

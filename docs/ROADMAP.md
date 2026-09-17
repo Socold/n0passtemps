@@ -15,7 +15,7 @@ idea.
 | 2, this document | Complete. All three specified themes answered, and all five candidates of 2.4 landed |
 | 3, a key the process cannot read | Part one landed, part two rejected, part three waits on hardware to test it against. See below and [ADR 0018](adr/0018-reducing-the-blast-radius-of-a-central-key.md) |
 | 6, hosted offering | Not started, and not planned before the on-premise product has users |
-| Maintenance | The style budget below is the only work this document still owes |
+| Maintenance | The style budget below. Two of its six categories are cleared and enforced in CI; four remain |
 
 Two phase 1 exit criteria deserve an honest note.
 
@@ -326,22 +326,34 @@ be burned down deliberately instead of drifting.
 The pinned linter could not run at all until 1.1.0: `v2.6.0` cannot read the
 export data of the toolchain this project builds with, so every `make lint`
 ended with one `typecheck` error and no analysis. With the pin moved and the
-misconfigurations corrected, the correctness linters report nothing and the
-`errcheck` backlog has been cleared. What remains is 423 findings from the
+misconfigurations corrected, the correctness linters report nothing, and
+`errcheck` and `lll` are both at nought. What remains is 303 findings from the
 budget linters, which accumulated in code written while nothing was checking
 it:
 
 | Linter | Count | What it is |
 |---|---|---|
 | `govet` (`shadow`) | 175 | A nested `err` shadowing an outer one. Idiomatic in most cases, and the check is famously noisy, but it is also how a handled error becomes an unhandled one |
-| `lll` | 119 | Lines past 120 columns |
-| `gocritic` | 82 | Diagnostic, style and performance suggestions |
+| `gocritic` | 81 | Diagnostic, style and performance suggestions |
 | `revive` | 33 | Mostly missing doc comments on methods with unexported receivers |
 | `gocyclo` | 14 | Functions past 15 branches |
 
-None is a defect today, and none of them is `errcheck`, which was the one
-category worth reading line by line. Clearing it turned up two real faults and
-one class of false positive, all recorded in the changelog.
+None is a defect today. Two categories have been cleared so far, and both
+returned something for the effort. `errcheck` turned up two real faults and one
+class of false positive. `lll` turned up none, as expected of a line-length
+rule, but it did turn up how the backlog had been measured: 127 lines were over
+the limit rather than the 119 a full `golangci-lint run` reported, because eight
+were not in that report at all. They appeared as soon as the other linters were
+switched off. A count taken from a run that enables everything is therefore a
+lower bound, and the numbers above are to be read as such.
+
+Almost all of the 127 were function declarations, wrapped at a parameter with
+no change to what they do. The few that were not are of three kinds: a long
+message split across two string literals, which changes no bytes; three
+`if err := f(); err != nil && !errors.Is(...)` lines where the call is hoisted
+out so the condition fits; and three alert summaries hoisted into a local so
+that wrapping them inside a struct literal did not force gofmt to re-align
+every neighbouring field.
 
 The `shadow` count grew by ten with the signing key rotation, every one of them
 `if err := f(); err != nil` in a test, which is the form the surrounding files
@@ -352,10 +364,21 @@ point of a budget is to be visible: it goes to zero when the category is cleared
 across the tree, in one deliberate pass, and not by writing unidiomatic Go at
 the edges in the meantime.
 
-`make lint` is deliberately not wired into CI while this stands. Wiring it in is
-the exit criterion, not the starting point: the backlog goes to zero first, and
-`errcheck` is where to start, since an unchecked error in a test can hide a
-passing assertion.
+**A cleared category is enforced from then on.** `make lint` as a whole still
+cannot run in CI while the table above is not empty, but a category cleared with
+nothing watching it fills straight back up, and the next reader has no way to
+tell a deliberate exception from a regression. `make lint-cleared` runs
+everything except the categories still listed above, and CI runs it on every
+push. A category leaves `UNCLEARED_LINTERS` in the Makefile as it reaches
+nought, so the gate tightens one category at a time and the exit criterion is
+reached when that variable is empty and `lint-cleared` and `lint` are the same
+command.
+
+It is written as what to disable rather than what to enable because
+golangci-lint's `--enable` adds to the set in `.golangci.yml` instead of
+replacing it. The first version of the target used `--default=none --enable=`
+and passed while three categories were failing, which is the failure mode a
+gate has to not have.
 
 ## Phase 6, hosted offering
 

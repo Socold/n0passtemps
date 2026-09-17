@@ -14,7 +14,8 @@ import (
 //
 // The successor is validated before the transaction opens, so a malformed one
 // is refused without the predecessor having been touched.
-func (s *Store) RotateAPIKey(ctx context.Context, tenantID, predecessorID string, successor *store.APIKey, predecessorExpiresAt time.Time) error {
+func (s *Store) RotateAPIKey(ctx context.Context, tenantID, predecessorID string, successor *store.APIKey,
+	predecessorExpiresAt time.Time) error {
 	if successor == nil {
 		return errors.New("sqlite: rotate api key requires a successor")
 	}
@@ -61,7 +62,8 @@ func (s *Store) RotateAPIKey(ctx context.Context, tenantID, predecessorID string
 }
 
 // RotateAdminToken implements store.AuthnStore. See RotateAPIKey.
-func (s *Store) RotateAdminToken(ctx context.Context, tenantID, predecessorID string, successor *store.AdminToken, predecessorExpiresAt time.Time) error {
+func (s *Store) RotateAdminToken(ctx context.Context, tenantID, predecessorID string, successor *store.AdminToken,
+	predecessorExpiresAt time.Time) error {
 	if successor == nil {
 		return errors.New("sqlite: rotate admin token requires a successor")
 	}
@@ -118,7 +120,8 @@ func (s *Store) RotateAdminToken(ctx context.Context, tenantID, predecessorID st
 // table is a package-level literal chosen by the two callers above, never a
 // caller-supplied value, which is the only reason it can be concatenated into
 // the statement at all.
-func (s *Store) rotateAuthnRow(ctx context.Context, table, tenantID, predecessorID string, predecessorExpiresAt time.Time, insert func(*sql.Tx) error) error {
+func (s *Store) rotateAuthnRow(ctx context.Context, table, tenantID, predecessorID string,
+	predecessorExpiresAt time.Time, insert func(*sql.Tx) error) error {
 	if tenantID == "" || predecessorID == "" {
 		return errors.New("rotation requires a tenant and a predecessor id")
 	}

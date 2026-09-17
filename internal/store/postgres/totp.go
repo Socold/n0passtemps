@@ -142,7 +142,8 @@ func (s *Store) RevokeTOTPSecret(ctx context.Context, tenantID, id string, at ti
 // A false Accepted with a nil error is not a fault. It means the caller lost
 // the race, or the step was already spent, and the correct response is to
 // reject the authentication.
-func (s *Store) ConsumeTOTPStep(ctx context.Context, tenantID, id string, expectedPrev, step int64) (store.TOTPConsumeResult, error) {
+func (s *Store) ConsumeTOTPStep(ctx context.Context, tenantID, id string, expectedPrev,
+	step int64) (store.TOTPConsumeResult, error) {
 	var result store.TOTPConsumeResult
 
 	if step <= expectedPrev {

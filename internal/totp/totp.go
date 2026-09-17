@@ -149,7 +149,8 @@ func (p Params) Validate() error {
 // The caller owns the result and must zeroize it once it has been sealed.
 func GenerateSecret(n int) ([]byte, error) {
 	if n < MinSecretBytes {
-		return nil, fmt.Errorf("%w: RFC 4226 section 4 requires at least 128 bits and recommends 160, got %d bytes", ErrShortSecret, n)
+		return nil, fmt.Errorf("%w: RFC 4226 section 4 requires at least 128 bits and recommends 160, got %d bytes",
+			ErrShortSecret, n)
 	}
 	secret := make([]byte, n)
 	if _, err := rand.Read(secret); err != nil {

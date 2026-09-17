@@ -226,7 +226,8 @@ func (s *Sealer) Rewrap(sealed []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	plaintext, err := dekGCM.Open(nil, sealed[headerSize:headerSize+nonceSize], sealed[headerSize+nonceSize:], sealed[:headerSize])
+	plaintext, err := dekGCM.Open(nil, sealed[headerSize:headerSize+nonceSize], sealed[headerSize+nonceSize:],
+		sealed[:headerSize])
 	if err != nil {
 		return nil, ErrUnsealFailed
 	}

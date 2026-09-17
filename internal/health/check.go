@@ -191,7 +191,8 @@ func (c *Checker) SetAuditSinkProbe(endpoint string, fn AuditSinkProbe) {
 // rather than derived because the keyring file records no history; an operator
 // who rotates without updating it will see rotation reported as overdue, which
 // is the safe direction to be wrong in.
-func New(cfg *config.Config, st store.Store, keyring KeyringInspector, kekRotatedAt time.Time, clock func() time.Time) *Checker {
+func New(cfg *config.Config, st store.Store, keyring KeyringInspector, kekRotatedAt time.Time,
+	clock func() time.Time) *Checker {
 	if clock == nil {
 		clock = time.Now
 	}

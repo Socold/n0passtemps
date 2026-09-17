@@ -38,7 +38,8 @@ const throttleColumns = `bucket_key, tenant_id, subject_id, window_start, attemp
 // failures increments only when failure is true, because a user who
 // authenticates successfully fifty times in an afternoon has done nothing that
 // should count towards a lockout.
-func (s *Store) Hit(ctx context.Context, tenantID, bucketKey, subjectID string, window time.Duration, now time.Time, failure bool) (*store.ThrottleState, error) {
+func (s *Store) Hit(ctx context.Context, tenantID, bucketKey, subjectID string, window time.Duration, now time.Time,
+	failure bool) (*store.ThrottleState, error) {
 	if tenantID == "" || bucketKey == "" {
 		return nil, errors.New("sqlite: throttle hit requires a tenant and a bucket key")
 	}

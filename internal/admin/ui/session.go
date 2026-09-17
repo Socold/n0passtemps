@@ -119,7 +119,8 @@ const sessionBytes = 32
 // The cookie value is returned to the caller and never retained: only its digest
 // is stored, so this function is the last place in the process that holds the
 // live credential.
-func (s *sessionStore) mint(now time.Time, tok *store.AdminToken, idle, absolute time.Duration) (string, *session, error) {
+func (s *sessionStore) mint(now time.Time, tok *store.AdminToken, idle, absolute time.Duration) (string, *session,
+	error) {
 	value, err := randomToken(sessionBytes)
 	if err != nil {
 		return "", nil, err

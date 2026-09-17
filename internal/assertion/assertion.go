@@ -263,7 +263,8 @@ func WithRetiredKeys(keys ...ed25519.PublicKey) IssuerOption {
 // costs security.
 func NewIssuer(priv ed25519.PrivateKey, issuer string, ttl, skew time.Duration, opts ...IssuerOption) (*Issuer, error) {
 	if len(priv) != ed25519.PrivateKeySize {
-		return nil, fmt.Errorf("%w: private key has %d bytes, want %d", ErrInvalidKey, len(priv), ed25519.PrivateKeySize)
+		return nil, fmt.Errorf("%w: private key has %d bytes, want %d", ErrInvalidKey, len(priv),
+			ed25519.PrivateKeySize)
 	}
 	if issuer == "" {
 		return nil, fmt.Errorf("%w: issuer must not be empty", ErrInvalidKey)
@@ -341,7 +342,8 @@ func WithRisk(a risk.Assessment) IssueOption {
 // subject authenticated by no means at all, which no application should be
 // asked to interpret. credentialID may be nil when no WebAuthn factor was
 // used.
-func (i *Issuer) Issue(subjectID, tenantID, audience string, factors []Factor, credentialID []byte, opts ...IssueOption) (token string, claims *Claims, err error) {
+func (i *Issuer) Issue(subjectID, tenantID, audience string, factors []Factor, credentialID []byte,
+	opts ...IssueOption) (token string, claims *Claims, err error) {
 	if subjectID == "" {
 		return "", nil, fmt.Errorf("%w: subject id is empty", ErrInvalidClaims)
 	}
@@ -645,7 +647,8 @@ func LoadPrivateKeyPEM(path string) (ed25519.PrivateKey, error) {
 		return nil, fmt.Errorf("assertion: stat %q: %w", abs, err)
 	}
 	if mode := info.Mode().Perm(); mode&0o077 != 0 {
-		return nil, fmt.Errorf("%w: %q is mode %#o, must not be readable by group or other (chmod 600)", ErrInsecureKeyMode, abs, mode)
+		return nil, fmt.Errorf("%w: %q is mode %#o, must not be readable by group or other (chmod 600)",
+			ErrInsecureKeyMode, abs, mode)
 	}
 
 	// #nosec G304 -- the signing key path comes from the operator's configuration, and its mode is checked above
@@ -676,7 +679,8 @@ func LoadPrivateKeyPEM(path string) (ed25519.PrivateKey, error) {
 	}
 	priv, ok := parsed.(ed25519.PrivateKey)
 	if !ok {
-		return nil, fmt.Errorf("%w: %q holds a %T, and this package signs only with Ed25519", ErrNotEd25519, abs, parsed)
+		return nil, fmt.Errorf("%w: %q holds a %T, and this package signs only with Ed25519", ErrNotEd25519, abs,
+			parsed)
 	}
 	if len(priv) != ed25519.PrivateKeySize {
 		return nil, fmt.Errorf("%w: %q holds %d bytes", ErrInvalidKey, abs, len(priv))

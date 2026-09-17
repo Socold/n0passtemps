@@ -299,7 +299,8 @@ func sortedVersions(set map[uint32]struct{}) []uint32 {
 // Log lines carry the record's identifier and key version and never its bytes.
 // The sealed value is ciphertext, but a log is kept for longer and read by more
 // people than the database, and nothing in it helps diagnose a failure.
-func (s *Server) rewrapOne(ctx context.Context, sealer *envelope.Sealer, kind store.SealedKind, rec store.SealedRecord, current uint32, report *rewrapReport, inUse map[uint32]struct{}) {
+func (s *Server) rewrapOne(ctx context.Context, sealer *envelope.Sealer, kind store.SealedKind, rec store.SealedRecord,
+	current uint32, report *rewrapReport, inUse map[uint32]struct{}) {
 	version, err := envelope.KEKVersion(rec.Sealed)
 	if err != nil {
 		// Not an envelope at all, so there is no version to report. It shows

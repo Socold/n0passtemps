@@ -200,7 +200,8 @@ func (l *Limiter) Check(ctx context.Context, tenantID string, dims map[Dimension
 // first threshold trips would leave the remaining counters short, and an
 // attacker could then keep one dimension permanently below its limit by making
 // sure another trips first.
-func (l *Limiter) Record(ctx context.Context, tenantID string, dims map[Dimension]string, failure bool) (Result, error) {
+func (l *Limiter) Record(ctx context.Context, tenantID string, dims map[Dimension]string, failure bool) (Result,
+	error) {
 	if !l.cfg.Enabled {
 		return Result{Allowed: true}, nil
 	}
@@ -317,7 +318,8 @@ func (l *Limiter) ResetSubject(ctx context.Context, tenantID, subjectID string) 
 	if err := l.store.ResetThrottle(ctx, tenantID, key); err != nil && !errors.Is(err, store.ErrNotFound) {
 		errs = append(errs, fmt.Errorf("throttle: reset subject bucket: %w", err))
 	}
-	if _, err := l.store.ResetSubjectThrottles(ctx, tenantID, subjectID); err != nil && !errors.Is(err, store.ErrNotFound) {
+	_, err := l.store.ResetSubjectThrottles(ctx, tenantID, subjectID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		errs = append(errs, fmt.Errorf("throttle: reset subject buckets: %w", err))
 	}
 	return errors.Join(errs...)

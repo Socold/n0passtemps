@@ -82,7 +82,8 @@ type Janitor struct {
 }
 
 // New builds a Janitor.
-func New(cfg *config.Config, st store.Store, rec *audit.Recorder, al *alerts.Engine, log *slog.Logger, clock func() time.Time) *Janitor {
+func New(cfg *config.Config, st store.Store, rec *audit.Recorder, al *alerts.Engine, log *slog.Logger,
+	clock func() time.Time) *Janitor {
 	if clock == nil {
 		clock = time.Now
 	}
@@ -317,7 +318,8 @@ func (j *Janitor) purgeDueErasures(ctx context.Context, now time.Time) (int64, e
 			continue
 		}
 
-		if err := j.store.PurgeSubject(ctx, er.TenantID, er.SubjectID); err != nil && !errors.Is(err, store.ErrNotFound) {
+		err = j.store.PurgeSubject(ctx, er.TenantID, er.SubjectID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			errs = append(errs, err)
 			j.log.ErrorContext(ctx, "subject not purged for due erasure",
 				slog.String("erasure_id", er.ID), slog.Any("error", err))

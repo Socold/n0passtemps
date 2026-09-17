@@ -267,7 +267,8 @@ func (s *Store) touchAuthnRow(ctx context.Context, table, id string, at time.Tim
 // expired tokens are excluded because the count exists to stop an operator
 // removing the last usable administrator of a role, and a count that included
 // unusable tokens would report that a fallback exists when it does not.
-func (s *Store) CountAdminTokensByRole(ctx context.Context, tenantID string, role store.Role, usableAt time.Time) (int, error) {
+func (s *Store) CountAdminTokensByRole(ctx context.Context, tenantID string, role store.Role, usableAt time.Time) (int,
+	error) {
 	var n int
 	err := s.read.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM admin_tokens
