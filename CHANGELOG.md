@@ -5,9 +5,208 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] - 2026-09-18
 
 ### Added
+
+- **API key rotation**, `POST /admin/v1/api-keys/{key_id}/rotate`, behind the
+  new permission `api_key.rotate`, which `admin_full` holds. It mints a
+  successor with the same name, scopes and tenant, and gives the predecessor an
+  expiry of now plus `grace`, in one store transaction. Replacing a key used to
+  mean an outage, if the old one was revoked first, or an overlap nobody
+  remembered to close, if it was revoked second; the overlap is now explicit and
+  closes by itself. A predecessor that already expires sooner keeps its earlier
+  expiry, so rotating a credential never extends its life. The successor does
+  not inherit the predecessor's expiry, and the response reports `no_expiry` as
+  minting does. A revoked or expired key is refused with `409`.
+- **Self-service rotation of an administrative token**,
+  `POST /admin/v1/admin-tokens/self/rotate`, behind the new permission
+  `admin_token.rotate_self`, which all three roles hold. The token rotated is
+  the one that authenticated the request, and the successor keeps its name and
+  role. It changes no authority, so it is not held for approval, and it is the
+  one write `admin_auditor` may perform, because it touches nothing but the
+  caller's own credential. The successor cannot outlive the token it replaces:
+  an expiry is inherited, and `expires_in_days` may only bring it forward.
+  There is deliberately no route for rotating another administrator's token,
+  since the response would hand the caller that person's successor credential.
+  The permission count goes from twenty-five to twenty-seven.
+- **`features.rotation_grace`**, default `24h`, environment variable
+  `N0PASSTEMPS_FEATURES_ROTATION_GRACE`: the overlap used when a rotation
+  request names none. `0s` stops the predecessor at once. The maximum is `168h`,
+  enforced in configuration validation and again per request, where a longer
+  `grace` is refused with `400`.
+- **Audit events `api_key.rotated` and `admin_token.rotated`**. The detail
+  carries the predecessor and successor identifiers, the grace and the instant
+  the predecessor stops. It never carries the token.
+- **`RotateAPIKey` and `RotateAdminToken` on the store interface**, implemented
+  for SQLite and PostgreSQL as one transaction each: a conditional update of the
+  predecessor, then the insert of the successor. A missing, foreign or revoked
+  predecessor yields `ErrNotFound` and nothing is inserted.
+- **Enrolment tickets**, the answer to the magic-link question in
+  [docs/ROADMAP.md](docs/ROADMAP.md) section 2.2. A ticket is a single-use,
+  short-lived secret that permits exactly one thing: starting and completing one
+  WebAuthn registration for the subject it names. It never produces a signed
+  assertion, so a stolen ticket lets an attacker enrol an authenticator of their
+  own, which is audited and revocable, rather than hand them a session. The
+  service does not deliver tickets and has no SMTP dependency: it returns the
+  ticket once, in the issuing response, and delivery is the integrating
+  application's responsibility, which is where the knowledge of the user and of
+  the channel actually lives.
+
+  The secret uses the recovery-code construction unchanged, from
+  `internal/crypto/recovery`: twenty characters of Crockford base32 split into a
+  six-character indexed selector and a fourteen-character verifier stored as an
+  Argon2id PHC string. Four routes:
+
+  - `POST /v1/subjects/{subject_ref}/enrolment-ticket`, scope `tickets`, for
+    onboarding a user who holds no authenticator yet.
+  - `POST /admin/v1/subjects/{subject_id}/enrolment-ticket`, permission
+    `enrolment_ticket.issue`, for a user who has lost every authenticator they
+    had.
+  - `POST /v1/enrolment/register` and `POST /v1/enrolment/register/complete`,
+    scope `tickets`, the only two routes that accept a ticket.
+
+  The ticket travels in the request body on both redemption routes, never in a
+  path. A path reaches the access log of every reverse proxy, load balancer and
+  monitoring agent in front of the service, and a `Referer` header and browser
+  history besides; a body does not. The routes are therefore named for what they
+  do rather than for a parameter they do not carry, which is the same choice
+  already made for `POST /v1/recovery/{subject_ref}/consume`.
+
+  Starting the ceremony does not spend the ticket, because consumption records
+  which credential the ticket produced and that does not exist until the
+  ceremony completes; a browser that refuses the prompt would otherwise send the
+  user back to the helpdesk. Single use is a compare-and-swap in the store,
+  conditional on the ticket being unconsumed, unrevoked and unexpired, with
+  exactly one winner under concurrency. If the swap loses after the credential
+  was created, that credential is revoked and the request refused.
+
+  A wrong ticket, an expired one, a consumed one, a revoked one and one whose
+  subject is locked or pending erasure all produce the same `401` with no
+  detail. The reason is audited as `enrolment_ticket.rejected`. Redemption is
+  rate limited per source address and per ticket selector, so guessing one
+  ticket costs the per-subject failure budget and spraying across many costs the
+  per-address budget.
+- **`enrolment_ticket.issue`**, a new permission held by `admin_operator` and
+  `admin_full`. It guards issuing and, deliberately, withdrawing: whoever may
+  put a ticket into circulation must be able to take it out, and an operator who
+  had to find a full administrator to withdraw their own mis-delivery would in
+  practice wait for the expiry instead. `POST
+  /admin/v1/enrolment-tickets/{ticket_id}/revoke` is that route. The permission
+  count goes from twenty-seven to twenty-eight, and `admin_operator` from
+  seventeen to eighteen.
+- **`tickets` scope** on the public surface, covering the issuing route and both
+  redemption routes. It is separate from `webauthn` even though redemption runs
+  a registration ceremony: a key holding `webauthn` can enrol an authenticator
+  only for a user who is present, while a key holding `tickets` can mint a
+  secret that enrols one later through a channel the key does not control.
+- **`[tickets]` configuration**, two keys. `tickets.ttl`, default `1h`,
+  environment variable `N0PASSTEMPS_TICKETS_TTL`, bounds how long a ticket may
+  be redeemed for; the maximum is 24h, enforced in validation, because the
+  lifetime is the whole window in which an intercepted ticket can be used and
+  anything longer is a standing credential rather than a hand-off.
+  `tickets.require_existing_factor_default`, default `true`, environment
+  variable `N0PASSTEMPS_TICKETS_REQUIRE_EXISTING_FACTOR_DEFAULT`, refuses to
+  issue a ticket with `409` for a subject who already holds an active
+  authenticator or a confirmed TOTP secret. A request may override it with
+  `require_existing_factor: false`, which is the caller stating that the
+  existing factor is unusable. Both the refusal and the override are audited,
+  and the override raises an alert: a ticket is a way in for someone with no
+  factor, and issued silently for an account that has factors it is an
+  account-takeover primitive for whoever controls delivery. An unconfirmed TOTP
+  secret does not count as a factor, because the user has not proved they can
+  produce codes from it.
+- **Audit events `enrolment_ticket.issued`, `.redeemed`, `.rejected` and
+  `.revoked`**. The issuance detail records the expiry, the reason, what factors
+  the subject held and whether the guard was overridden; the redemption detail
+  records which credential the ticket produced. The registration a ticket drives
+  is also audited in the ordinary `webauthn.registration.*` family, with `via:
+  enrolment_ticket` and the ticket identifier in the detail, so an operator
+  reviewing enrolments sees it without knowing to look for tickets.
+- **Alert `enrolment_ticket.factor_override`**, warning severity, raised on
+  every ticket issued over an existing factor. It is a warning rather than
+  critical because critical is reserved for a control that has failed on its
+  own, and here a control was overridden deliberately by an authorised caller
+  with a legitimate use; it is not informational because the override is exactly
+  the step an attacker who controls delivery needs. The alert count goes from
+  ten to twelve, with the risk signal above.
+- **`TicketStore` on the store interface**, implemented for SQLite and
+  PostgreSQL. `ReplaceEnrolmentTicket` revokes any live ticket for the subject
+  and inserts the new one in one transaction, so tickets never accumulate; a
+  partial unique index over unconsumed, unrevoked rows per subject is the
+  backstop. `ConsumeEnrolmentTicket` records the credential the redemption
+  produced. `DeleteExpiredEnrolmentTickets` is the janitor sweep, cross-tenant
+  like the others, and is counted in its result.
+- **Migration `0003_enrolment_tickets`** for both engines.
+- **A new attacker in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md)**: whoever
+  controls ticket delivery. Not delivering tickets transfers that risk whole to
+  the integrating application, which is the right place for it and is not the
+  same as making it disappear, so the section says what the transfer costs.
+- **Risk signals**, reported on every completed authentication and never
+  enforced. A new `internal/risk` package assesses a ceremony against a table of
+  nine reasons, each with a weight, and two score thresholds, and reports one of
+  `low`, `elevated` or `high`. The service never refuses an authentication on
+  risk alone: it knows how the subject proved themselves and the integrating
+  application knows what they are about to do, so the application takes the
+  step-up decision. The nine reasons are `signature_counter_stalled`,
+  `authenticator_binding_changed`, `user_verification_absent`,
+  `recovery_code_used`, `credential_dormant`, `credential_new`,
+  `recent_failures_subject`, `recent_failures_network` and `totp_only`. Every
+  one is derived from a signal the service already collected while completing
+  the ceremony, so nothing new is collected about anyone. There is no model, no
+  training data and no third-party feed, which is why the feature is called
+  risk signals and not adaptive authentication. `risk.Assess` is a pure
+  function of its inputs, so an assessment can be recomputed from the audit
+  entry that recorded it. See [docs/RISK.md](docs/RISK.md).
+- **An optional `risk` claim on the assertion**, `{"level", "reasons",
+  "score"}`, attached through the new `assertion.WithRisk` issue option. It is
+  omitted from the token entirely when `risk.enabled` is false, rather than
+  present and empty, so a verifier written against a deployment that does not
+  report risk is unaffected by one that does. The verifier does not require it,
+  and will not: an optional claim a verifier insists on is not optional.
+- **`risk_level` and `risk_reasons` on the three completion responses**, beside
+  `factors`. They are unsigned, so a caller must take its step-up decision from
+  the verified assertion and not from the response body; the handler comments,
+  the OpenAPI description and [docs/RISK.md](docs/RISK.md) all say so.
+- **A `risk` key on the `assertion.completed`, `totp.verified` and
+  `recovery.consumed` audit details**, carrying the same level, reasons and
+  score as the claim, from the same value.
+- **Alert type `risk.high`** at warning severity, raised when an assessment
+  comes out high. Nothing has failed when it fires, since the ceremony verified
+  and every control held, so it is not critical; it is more specific than a
+  failure burst and concerns an authentication that succeeded, so it is not
+  informational either. It collapses by fingerprint onto one row per subject.
+  `elevated` raises nothing, because an ordinary recovery-code redemption
+  reaches it and alerting on that would bury the rest of the stream. The alert
+  count goes from eleven to twelve.
+- **A `[risk]` configuration section**: `enabled` (default true), `elevated_at`
+  (20) and `high_at` (40), `dormant_after` (`2160h`), `new_credential_within`
+  (`1h`), and a `[risk.weights]` table of per-reason overrides. The scalars are
+  settable as `N0PASSTEMPS_RISK_*`; the weight table is file-only, because the
+  weights are the policy and belong in the reviewed file rather than in one
+  deployment's environment. Validation refuses an unknown reason key, a
+  negative weight, a threshold below one and `elevated_at` at or above
+  `high_at`, and it does so whether or not reporting is enabled, so that
+  turning it on later cannot turn a file that loaded yesterday into one that
+  refuses to.
+- **`throttle.Result.Counters`**, the per-dimension attempt and failure counts
+  the limiter already read. Risk reporting takes the per-subject and
+  per-network failure counts from there, so the two failure reasons cost no
+  extra query on the authentication path.
+
+- **The `risk` claim in all three SDKs.** `Claims.Risk` in Go (with
+  `HasRiskReason` and the `RiskLow`/`RiskElevated`/`RiskHigh` constants),
+  `Claims.risk` in Python (a frozen `Risk` dataclass) and `claims.risk` in
+  Node. An absent claim reads as "the deployment does not report risk", which
+  is deliberately not the same value as a low assessment: treating the two
+  alike would turn every step-up off the day an operator disabled the feature,
+  and each SDK says so where a caller will read it. A claim that is present
+  but malformed invalidates the assertion in all three, because accepting the
+  token and dropping the claim would report "risk was not reported" when it
+  was, failing open on the one signal the application asked for. Unknown
+  members and unrecognised reasons are carried through, so a deployment newer
+  than the library stays verifiable.
+
 - **Usernameless sign-in**, `POST /v1/webauthn/assert/discoverable` and
   `.../complete`, behind the existing `webauthn` scope. There is no
   `subject_ref` in the path: the options carry no allow list, so the browser
@@ -279,225 +478,6 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
-- **The wizard discarded the error from closing a file it had just written.**
-  `writeFile` is what puts a keyring, a signing key or a configuration file on
-  disk, and a close that fails is how a short file comes to exist: the bytes
-  are accepted by the kernel and never reach the disk. The error is now checked
-  and reported, so an artefact that looks written and does not open is refused
-  at the moment it is created rather than discovered by `verify` long
-  afterwards.
-- **`-bootstrap-admin` could lose an administrative token silently.** The
-  tokens are minted, stored as a digest and audited before they are printed, so
-  a write to standard output that failed left the deployment with a full
-  administrator nobody holds while the command still exited zero. Redirecting
-  the output to a file on a full disk was enough to cause it. Every write is
-  now checked and a failure is reported, naming what was lost and what to do
-  about it.
-
-## [1.1.0] - 2026-09-19
-
-### Added
-
-- **API key rotation**, `POST /admin/v1/api-keys/{key_id}/rotate`, behind the
-  new permission `api_key.rotate`, which `admin_full` holds. It mints a
-  successor with the same name, scopes and tenant, and gives the predecessor an
-  expiry of now plus `grace`, in one store transaction. Replacing a key used to
-  mean an outage, if the old one was revoked first, or an overlap nobody
-  remembered to close, if it was revoked second; the overlap is now explicit and
-  closes by itself. A predecessor that already expires sooner keeps its earlier
-  expiry, so rotating a credential never extends its life. The successor does
-  not inherit the predecessor's expiry, and the response reports `no_expiry` as
-  minting does. A revoked or expired key is refused with `409`.
-- **Self-service rotation of an administrative token**,
-  `POST /admin/v1/admin-tokens/self/rotate`, behind the new permission
-  `admin_token.rotate_self`, which all three roles hold. The token rotated is
-  the one that authenticated the request, and the successor keeps its name and
-  role. It changes no authority, so it is not held for approval, and it is the
-  one write `admin_auditor` may perform, because it touches nothing but the
-  caller's own credential. The successor cannot outlive the token it replaces:
-  an expiry is inherited, and `expires_in_days` may only bring it forward.
-  There is deliberately no route for rotating another administrator's token,
-  since the response would hand the caller that person's successor credential.
-  The permission count goes from twenty-five to twenty-seven.
-- **`features.rotation_grace`**, default `24h`, environment variable
-  `N0PASSTEMPS_FEATURES_ROTATION_GRACE`: the overlap used when a rotation
-  request names none. `0s` stops the predecessor at once. The maximum is `168h`,
-  enforced in configuration validation and again per request, where a longer
-  `grace` is refused with `400`.
-- **Audit events `api_key.rotated` and `admin_token.rotated`**. The detail
-  carries the predecessor and successor identifiers, the grace and the instant
-  the predecessor stops. It never carries the token.
-- **`RotateAPIKey` and `RotateAdminToken` on the store interface**, implemented
-  for SQLite and PostgreSQL as one transaction each: a conditional update of the
-  predecessor, then the insert of the successor. A missing, foreign or revoked
-  predecessor yields `ErrNotFound` and nothing is inserted.
-- **Enrolment tickets**, the answer to the magic-link question in
-  [docs/ROADMAP.md](docs/ROADMAP.md) section 2.2. A ticket is a single-use,
-  short-lived secret that permits exactly one thing: starting and completing one
-  WebAuthn registration for the subject it names. It never produces a signed
-  assertion, so a stolen ticket lets an attacker enrol an authenticator of their
-  own, which is audited and revocable, rather than hand them a session. The
-  service does not deliver tickets and has no SMTP dependency: it returns the
-  ticket once, in the issuing response, and delivery is the integrating
-  application's responsibility, which is where the knowledge of the user and of
-  the channel actually lives.
-
-  The secret uses the recovery-code construction unchanged, from
-  `internal/crypto/recovery`: twenty characters of Crockford base32 split into a
-  six-character indexed selector and a fourteen-character verifier stored as an
-  Argon2id PHC string. Four routes:
-
-  - `POST /v1/subjects/{subject_ref}/enrolment-ticket`, scope `tickets`, for
-    onboarding a user who holds no authenticator yet.
-  - `POST /admin/v1/subjects/{subject_id}/enrolment-ticket`, permission
-    `enrolment_ticket.issue`, for a user who has lost every authenticator they
-    had.
-  - `POST /v1/enrolment/register` and `POST /v1/enrolment/register/complete`,
-    scope `tickets`, the only two routes that accept a ticket.
-
-  The ticket travels in the request body on both redemption routes, never in a
-  path. A path reaches the access log of every reverse proxy, load balancer and
-  monitoring agent in front of the service, and a `Referer` header and browser
-  history besides; a body does not. The routes are therefore named for what they
-  do rather than for a parameter they do not carry, which is the same choice
-  already made for `POST /v1/recovery/{subject_ref}/consume`.
-
-  Starting the ceremony does not spend the ticket, because consumption records
-  which credential the ticket produced and that does not exist until the
-  ceremony completes; a browser that refuses the prompt would otherwise send the
-  user back to the helpdesk. Single use is a compare-and-swap in the store,
-  conditional on the ticket being unconsumed, unrevoked and unexpired, with
-  exactly one winner under concurrency. If the swap loses after the credential
-  was created, that credential is revoked and the request refused.
-
-  A wrong ticket, an expired one, a consumed one, a revoked one and one whose
-  subject is locked or pending erasure all produce the same `401` with no
-  detail. The reason is audited as `enrolment_ticket.rejected`. Redemption is
-  rate limited per source address and per ticket selector, so guessing one
-  ticket costs the per-subject failure budget and spraying across many costs the
-  per-address budget.
-- **`enrolment_ticket.issue`**, a new permission held by `admin_operator` and
-  `admin_full`. It guards issuing and, deliberately, withdrawing: whoever may
-  put a ticket into circulation must be able to take it out, and an operator who
-  had to find a full administrator to withdraw their own mis-delivery would in
-  practice wait for the expiry instead. `POST
-  /admin/v1/enrolment-tickets/{ticket_id}/revoke` is that route. The permission
-  count goes from twenty-seven to twenty-eight, and `admin_operator` from
-  seventeen to eighteen.
-- **`tickets` scope** on the public surface, covering the issuing route and both
-  redemption routes. It is separate from `webauthn` even though redemption runs
-  a registration ceremony: a key holding `webauthn` can enrol an authenticator
-  only for a user who is present, while a key holding `tickets` can mint a
-  secret that enrols one later through a channel the key does not control.
-- **`[tickets]` configuration**, two keys. `tickets.ttl`, default `1h`,
-  environment variable `N0PASSTEMPS_TICKETS_TTL`, bounds how long a ticket may
-  be redeemed for; the maximum is 24h, enforced in validation, because the
-  lifetime is the whole window in which an intercepted ticket can be used and
-  anything longer is a standing credential rather than a hand-off.
-  `tickets.require_existing_factor_default`, default `true`, environment
-  variable `N0PASSTEMPS_TICKETS_REQUIRE_EXISTING_FACTOR_DEFAULT`, refuses to
-  issue a ticket with `409` for a subject who already holds an active
-  authenticator or a confirmed TOTP secret. A request may override it with
-  `require_existing_factor: false`, which is the caller stating that the
-  existing factor is unusable. Both the refusal and the override are audited,
-  and the override raises an alert: a ticket is a way in for someone with no
-  factor, and issued silently for an account that has factors it is an
-  account-takeover primitive for whoever controls delivery. An unconfirmed TOTP
-  secret does not count as a factor, because the user has not proved they can
-  produce codes from it.
-- **Audit events `enrolment_ticket.issued`, `.redeemed`, `.rejected` and
-  `.revoked`**. The issuance detail records the expiry, the reason, what factors
-  the subject held and whether the guard was overridden; the redemption detail
-  records which credential the ticket produced. The registration a ticket drives
-  is also audited in the ordinary `webauthn.registration.*` family, with `via:
-  enrolment_ticket` and the ticket identifier in the detail, so an operator
-  reviewing enrolments sees it without knowing to look for tickets.
-- **Alert `enrolment_ticket.factor_override`**, warning severity, raised on
-  every ticket issued over an existing factor. It is a warning rather than
-  critical because critical is reserved for a control that has failed on its
-  own, and here a control was overridden deliberately by an authorised caller
-  with a legitimate use; it is not informational because the override is exactly
-  the step an attacker who controls delivery needs. The alert count goes from
-  ten to twelve, with the risk signal above.
-- **`TicketStore` on the store interface**, implemented for SQLite and
-  PostgreSQL. `ReplaceEnrolmentTicket` revokes any live ticket for the subject
-  and inserts the new one in one transaction, so tickets never accumulate; a
-  partial unique index over unconsumed, unrevoked rows per subject is the
-  backstop. `ConsumeEnrolmentTicket` records the credential the redemption
-  produced. `DeleteExpiredEnrolmentTickets` is the janitor sweep, cross-tenant
-  like the others, and is counted in its result.
-- **Migration `0003_enrolment_tickets`** for both engines.
-- **A new attacker in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md)**: whoever
-  controls ticket delivery. Not delivering tickets transfers that risk whole to
-  the integrating application, which is the right place for it and is not the
-  same as making it disappear, so the section says what the transfer costs.
-- **Risk signals**, reported on every completed authentication and never
-  enforced. A new `internal/risk` package assesses a ceremony against a table of
-  nine reasons, each with a weight, and two score thresholds, and reports one of
-  `low`, `elevated` or `high`. The service never refuses an authentication on
-  risk alone: it knows how the subject proved themselves and the integrating
-  application knows what they are about to do, so the application takes the
-  step-up decision. The nine reasons are `signature_counter_stalled`,
-  `authenticator_binding_changed`, `user_verification_absent`,
-  `recovery_code_used`, `credential_dormant`, `credential_new`,
-  `recent_failures_subject`, `recent_failures_network` and `totp_only`. Every
-  one is derived from a signal the service already collected while completing
-  the ceremony, so nothing new is collected about anyone. There is no model, no
-  training data and no third-party feed, which is why the feature is called
-  risk signals and not adaptive authentication. `risk.Assess` is a pure
-  function of its inputs, so an assessment can be recomputed from the audit
-  entry that recorded it. See [docs/RISK.md](docs/RISK.md).
-- **An optional `risk` claim on the assertion**, `{"level", "reasons",
-  "score"}`, attached through the new `assertion.WithRisk` issue option. It is
-  omitted from the token entirely when `risk.enabled` is false, rather than
-  present and empty, so a verifier written against a deployment that does not
-  report risk is unaffected by one that does. The verifier does not require it,
-  and will not: an optional claim a verifier insists on is not optional.
-- **`risk_level` and `risk_reasons` on the three completion responses**, beside
-  `factors`. They are unsigned, so a caller must take its step-up decision from
-  the verified assertion and not from the response body; the handler comments,
-  the OpenAPI description and [docs/RISK.md](docs/RISK.md) all say so.
-- **A `risk` key on the `assertion.completed`, `totp.verified` and
-  `recovery.consumed` audit details**, carrying the same level, reasons and
-  score as the claim, from the same value.
-- **Alert type `risk.high`** at warning severity, raised when an assessment
-  comes out high. Nothing has failed when it fires, since the ceremony verified
-  and every control held, so it is not critical; it is more specific than a
-  failure burst and concerns an authentication that succeeded, so it is not
-  informational either. It collapses by fingerprint onto one row per subject.
-  `elevated` raises nothing, because an ordinary recovery-code redemption
-  reaches it and alerting on that would bury the rest of the stream. The alert
-  count goes from eleven to twelve.
-- **A `[risk]` configuration section**: `enabled` (default true), `elevated_at`
-  (20) and `high_at` (40), `dormant_after` (`2160h`), `new_credential_within`
-  (`1h`), and a `[risk.weights]` table of per-reason overrides. The scalars are
-  settable as `N0PASSTEMPS_RISK_*`; the weight table is file-only, because the
-  weights are the policy and belong in the reviewed file rather than in one
-  deployment's environment. Validation refuses an unknown reason key, a
-  negative weight, a threshold below one and `elevated_at` at or above
-  `high_at`, and it does so whether or not reporting is enabled, so that
-  turning it on later cannot turn a file that loaded yesterday into one that
-  refuses to.
-- **`throttle.Result.Counters`**, the per-dimension attempt and failure counts
-  the limiter already read. Risk reporting takes the per-subject and
-  per-network failure counts from there, so the two failure reasons cost no
-  extra query on the authentication path.
-
-- **The `risk` claim in all three SDKs.** `Claims.Risk` in Go (with
-  `HasRiskReason` and the `RiskLow`/`RiskElevated`/`RiskHigh` constants),
-  `Claims.risk` in Python (a frozen `Risk` dataclass) and `claims.risk` in
-  Node. An absent claim reads as "the deployment does not report risk", which
-  is deliberately not the same value as a low assessment: treating the two
-  alike would turn every step-up off the day an operator disabled the feature,
-  and each SDK says so where a caller will read it. A claim that is present
-  but malformed invalidates the assertion in all three, because accepting the
-  token and dropping the claim would report "risk was not reported" when it
-  was, failing open on the one signal the application asked for. Unknown
-  members and unrecognised reasons are carried through, so a deployment newer
-  than the library stays verifiable.
-
-### Fixed
-
 - **Alerts never reached the database.** `alerts.Engine.Raise` built the row
   without an identifier, and both store backends refuse an alert that has none,
   so every condition the service detected was logged as "alert could not be
@@ -532,6 +512,21 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **`rows.Err()` was not checked** in the SQLite smoke test, where an
   iteration cut short would have read as a schema with fewer tables than it
   has.
+
+- **The wizard discarded the error from closing a file it had just written.**
+  `writeFile` is what puts a keyring, a signing key or a configuration file on
+  disk, and a close that fails is how a short file comes to exist: the bytes
+  are accepted by the kernel and never reach the disk. The error is now checked
+  and reported, so an artefact that looks written and does not open is refused
+  at the moment it is created rather than discovered by `verify` long
+  afterwards.
+- **`-bootstrap-admin` could lose an administrative token silently.** The
+  tokens are minted, stored as a digest and audited before they are printed, so
+  a write to standard output that failed left the deployment with a full
+  administrator nobody holds while the command still exited zero. Redirecting
+  the output to a file on a full disk was enough to cause it. Every write is
+  now checked and a failure is reported, naming what was lost and what to do
+  about it.
 
 ## [1.0.0] - 2026-09-16
 

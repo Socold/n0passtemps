@@ -33,14 +33,22 @@ this in front of something that matters should read
 
 ## Steps that need the maintainer
 
-Done since this table was first written: `main` and both tags are pushed, the
-release workflow builds and publishes the image and the archives, and every
-pinned action SHA was verified against the GitHub API.
+Done since this table was first written: `main`, `v1.1.0` and `sdk/go/v1.1.0`
+are pushed, private vulnerability reporting is enabled, and every pinned action
+SHA was verified against the GitHub API.
+
+The claim that stood here before, that the release workflow builds and
+publishes the image and the archives, was true of the workflow that cut 1.0.0
+and not of the one that replaced it. The rewrite left an action's `uses` block
+attached to the step that replaced it, which GitHub refuses before it creates a
+job, so every push produced a run that failed in zero seconds. It was never
+seen because the file was not pushed until the tag was. The tag was re-cut on
+the fix, which is why `v1.1.0` names a commit later than `release: 1.1.0` and
+why the 1.1.0 entry in [../CHANGELOG.md](../CHANGELOG.md) carries what had
+accumulated after it.
 
 | Step | Why it cannot be automated from here |
 |---|---|
-| Push the `v1.1.0` tag | Rewrites nothing, but starts a publish, so it stays a deliberate act |
-| Enable private vulnerability reporting | A repository setting; [SECURITY.md](../SECURITY.md) points at it |
 | Publish `sdk/node` and `sdk/python` | npm and PyPI accounts. The Go SDK needs no registry, only the `sdk/go/v1.1.0` tag |
 | Announce | The specification names the venues; the wording is personal |
 
