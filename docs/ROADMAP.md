@@ -412,6 +412,18 @@ replacing it. The first version of the target used `--default=none --enable=`
 and passed while three categories were failing, which is the failure mode a
 gate has to not have.
 
+## Around the core
+
+[EXTENSIONS.md](EXTENSIONS.md) is the standing answer to "could it also do X".
+It is separate from this document on purpose: this one is what the core owes,
+that one is what could sit beside it without the core becoming something else.
+The position it records is that the engine stays narrow and that optional
+modules around it are open, decided by whether the thing is on the trust path
+rather than by what category it belongs to.
+
+Nothing in it is built, and its ordering is a guess at what integrators find
+hard. The first report from somebody actually integrating this should change it.
+
 ## Phase 6, hosted offering
 
 Out of scope until the on-premise product has users. The groundwork that is

@@ -167,6 +167,8 @@ integrators find hard rather than a report of what they said.
 
 ## Related
 
+- [EXTENSIONS.md](../EXTENSIONS.md), the working document this record compresses,
+  and the place to add to when the question comes up again
 - [ADR 0016](0016-ship-the-audit-chain-to-an-external-witness.md), why the audit
   sink is a control rather than an integration
 - [ADR 0018](0018-reducing-the-blast-radius-of-a-central-key.md), the refusal to

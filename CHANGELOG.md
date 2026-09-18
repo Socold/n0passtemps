@@ -52,6 +52,21 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   what this does not do for the assertion signing key, and why: Ed25519 and
   TPM 2.0 do not meet in the field.
 
+- **[docs/EXTENSIONS.md](docs/EXTENSIONS.md)**, the standing answer to "could it
+  also do X": what is core and stays core, what is an adapter, what would be a
+  different product, and a list of candidates in the order their value divided by
+  their cost puts them. Nothing in it is built.
+
+  The position is that the engine stays narrow and that optional modules around
+  it are open. What decides which is which is not the category but whether the
+  thing is on the trust path: key providers and the audit sink are, whatever
+  their category, and SDKs, user interfaces and packaging are not. The extension
+  boundary is the HTTP API rather than a Go package, because `internal/` stays as
+  it is and an adapter that has to speak HTTP can be written in any language.
+
+  See [ADR 0020](docs/adr/0020-core-and-adapters.md), which is proposed rather
+  than accepted.
+
 - **`make lint-cleared` and `make test-tpm`.** The first runs every linter except
   the style budget categories that still have findings, so a cleared category
   stays cleared; CI runs it on every push. The second starts a software TPM and
