@@ -97,15 +97,15 @@ func (s *Store) ListSealed(ctx context.Context, kind store.SealedKind, afterID s
 // a gap in which an upsert could reseal a subject reference, and the write that
 // followed would overwrite the newer value with a rewrap of the older one.
 func (s *Store) ReplaceSealed(ctx context.Context, kind store.SealedKind, id string, old, replacement []byte) error {
-	stmts, err := sealedStatementsFor(kind)
-	if err != nil {
-		return err
+	stmts, stmtErr := sealedStatementsFor(kind)
+	if stmtErr != nil {
+		return stmtErr
 	}
 	if id == "" || len(old) == 0 || len(replacement) == 0 {
 		return errors.New("sqlite: replacing a sealed record requires an id and both values")
 	}
 
-	err = s.inTx(ctx, func(tx *sql.Tx) error {
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx, stmts.replace, replacement, id, old)
 		if err != nil {
 			return mapError(err)

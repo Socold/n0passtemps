@@ -111,7 +111,7 @@ func newHarness(t *testing.T, tune ...func(*config.Config)) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	if err := st.Migrate(context.Background()); err != nil {
+	if err = st.Migrate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -133,7 +133,7 @@ func newHarness(t *testing.T, tune ...func(*config.Config)) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cfg.Assertion.SigningKeyPath, priv, 0o600); err != nil {
+	if err = os.WriteFile(cfg.Assertion.SigningKeyPath, priv, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	signingKey, err := assertion.LoadPrivateKeyPEM(cfg.Assertion.SigningKeyPath)

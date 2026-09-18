@@ -170,7 +170,8 @@ func (a *virtualAuthenticator) create(options any) ([]byte, error) {
 	}
 
 	for _, d := range pk.ExcludeCredentials {
-		id, err := base64.RawURLEncoding.DecodeString(d.ID)
+		var id []byte
+		id, err = base64.RawURLEncoding.DecodeString(d.ID)
 		if err != nil {
 			return nil, fmt.Errorf("authenticator: excluded id is not base64url: %w", err)
 		}
@@ -187,7 +188,7 @@ func (a *virtualAuthenticator) create(options any) ([]byte, error) {
 	a.nextCredentialID = nil
 	if credID == nil {
 		credID = make([]byte, 32)
-		if _, err := rand.Read(credID); err != nil {
+		if _, err = rand.Read(credID); err != nil {
 			return nil, fmt.Errorf("authenticator: generate credential id: %w", err)
 		}
 	}

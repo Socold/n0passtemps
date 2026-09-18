@@ -101,12 +101,12 @@ func run() error {
 	// The keyring comes first. Nothing that touches a sealed secret can be
 	// built without it, and an operator who has misplaced it should learn so
 	// immediately rather than after the listener is up.
-	keyring, err := openKeyring(cfg)
+	ring, err := openKeyring(cfg)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		if c, ok := keyring.(interface{ Close() error }); ok {
+		if c, ok := ring.(interface{ Close() error }); ok {
 			_ = c.Close()
 		}
 	}()
@@ -116,13 +116,13 @@ func run() error {
 		return err
 	}
 	defer func() {
-		if err := st.Close(); err != nil {
-			log.Error("store did not close cleanly", slog.Any("error", err))
+		if closeErr := st.Close(); closeErr != nil {
+			log.Error("store did not close cleanly", slog.Any("error", closeErr))
 		}
 	}()
 
 	if cfg.Database.AutoMigrate || *migrateOnly {
-		if err := st.Migrate(ctx); err != nil {
+		if err = st.Migrate(ctx); err != nil {
 			return fmt.Errorf("apply migrations: %w", err)
 		}
 	}
@@ -131,7 +131,7 @@ func run() error {
 		return nil
 	}
 
-	sealer := envelope.NewSealer(keyring)
+	sealer := envelope.NewSealer(ring)
 
 	subjects, err := subject.New(cfg.Subject, st, sealer, time.Now)
 	if err != nil {
@@ -187,7 +187,7 @@ func run() error {
 		return fmt.Errorf("webauthn relying party: %w", err)
 	}
 
-	if err := ensureTenant(ctx, cfg, st, recorder, log); err != nil {
+	if err = ensureTenant(ctx, cfg, st, recorder, log); err != nil {
 		return err
 	}
 
@@ -199,13 +199,13 @@ func run() error {
 	// The keyring records no history, so the rotation reminder is anchored on
 	// the age of the database rather than on when the key actually changed. It
 	// errs towards reporting rotation as overdue, which is the safe direction.
-	checker := health.New(cfg, st, keyring, keyringAnchor(ctx, cfg, st, log), time.Now)
+	checker := health.New(cfg, st, ring, keyringAnchor(ctx, cfg, st, log), time.Now)
 	if shipper != nil {
 		checker.SetAuditSinkProbe(shipper.Endpoint(), shipper.Probe)
 	}
 
 	if cfg.Audit.VerifyOnStart {
-		if err := verifyChainOnStart(ctx, cfg, recorder, alertEngine, log); err != nil {
+		if err = verifyChainOnStart(ctx, cfg, recorder, alertEngine, log); err != nil {
 			return err
 		}
 	}

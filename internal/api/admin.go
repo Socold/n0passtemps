@@ -115,7 +115,7 @@ func (s *Server) handleAdminListSubjects(w http.ResponseWriter, r *http.Request)
 		f.Status = store.SubjectStatus(st)
 	}
 	if ref := r.URL.Query().Get("subject_ref"); ref != "" {
-		if err := s.deps.Subjects.ValidateRef(ref); err != nil {
+		if err = s.deps.Subjects.ValidateRef(ref); err != nil {
 			return BadRequest("subject_ref is not acceptable: "+err.Error(), err)
 		}
 		f.RefHMAC = s.deps.Subjects.RefHMAC(ref)
@@ -348,7 +348,7 @@ func (s *Server) handleAdminRevokeCredential(w http.ResponseWriter, r *http.Requ
 
 	var req revokeRequest
 	if r.ContentLength > 0 {
-		if err := decodeJSON(r, &req); err != nil {
+		if err = decodeJSON(r, &req); err != nil {
 			return err
 		}
 	}
@@ -363,7 +363,7 @@ func (s *Server) handleAdminRevokeCredential(w http.ResponseWriter, r *http.Requ
 	// rogue or mistaken script is stopped after the burst rather than allowed
 	// to empty the table and be undone afterwards.
 	dims := map[throttle.Dimension]string{throttle.DimAdminRevoke: caller.ActorID()}
-	if err := s.checkThrottle(r, tenantID, dims); err != nil {
+	if err = s.checkThrottle(r, tenantID, dims); err != nil {
 		return err
 	}
 
@@ -561,7 +561,7 @@ func (s *Server) handleAdminRequestErasure(w http.ResponseWriter, r *http.Reques
 
 	var req erasureRequestBody
 	if r.ContentLength > 0 {
-		if err := decodeJSON(r, &req); err != nil {
+		if err = decodeJSON(r, &req); err != nil {
 			return err
 		}
 	}
@@ -697,25 +697,22 @@ func (s *Server) handleAdminQueryAudit(w http.ResponseWriter, r *http.Request) e
 		Limit:     s.queryLimit(r, 100),
 	}
 	if v := q.Get("after_seq"); v != "" {
-		n, err := strconv.ParseInt(v, 10, 64)
+		f.AfterSeq, err = strconv.ParseInt(v, 10, 64)
 		if err != nil {
 			return BadRequest("after_seq must be an integer", err)
 		}
-		f.AfterSeq = n
 	}
 	if v := q.Get("since"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
+		f.Since, err = time.Parse(time.RFC3339, v)
 		if err != nil {
 			return BadRequest("since must be an RFC 3339 timestamp", err)
 		}
-		f.Since = t
 	}
 	if v := q.Get("until"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
+		f.Until, err = time.Parse(time.RFC3339, v)
 		if err != nil {
 			return BadRequest("until must be an RFC 3339 timestamp", err)
 		}
-		f.Until = t
 	}
 
 	entries, err := s.deps.Store.QueryAudit(r.Context(), tenantID, f)
@@ -748,11 +745,10 @@ func (s *Server) handleAdminVerifyAudit(w http.ResponseWriter, r *http.Request) 
 
 	from := int64(1)
 	if v := r.URL.Query().Get("from_seq"); v != "" {
-		n, err := strconv.ParseInt(v, 10, 64)
-		if err != nil || n < 1 {
+		from, err = strconv.ParseInt(v, 10, 64)
+		if err != nil || from < 1 {
 			return BadRequest("from_seq must be a positive integer", err)
 		}
-		from = n
 	}
 
 	checked, brokenAt, err := s.deps.Recorder.Verify(r.Context(), tenantID, from)
@@ -897,7 +893,7 @@ func (s *Server) decideApproval(w http.ResponseWriter, r *http.Request, approve 
 
 	var req approvalDecisionRequest
 	if r.ContentLength > 0 {
-		if err := decodeJSON(r, &req); err != nil {
+		if err = decodeJSON(r, &req); err != nil {
 			return err
 		}
 	}
@@ -993,7 +989,7 @@ func (s *Server) approvalGate(r *http.Request, caller *Caller, tenantID, operati
 	}
 
 	if id := r.Header.Get(ApprovalHeader); id != "" {
-		if err := s.redeemApproval(r, caller, tenantID, id, operation, payload); err != nil {
+		if err = s.redeemApproval(r, caller, tenantID, id, operation, payload); err != nil {
 			return true, err
 		}
 		return false, nil
@@ -1141,7 +1137,7 @@ func (s *Server) handleAdminCreateAPIKey(w http.ResponseWriter, r *http.Request)
 	}
 
 	var req createKeyRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err = decodeJSON(r, &req); err != nil {
 		return err
 	}
 	if strings.TrimSpace(req.Name) == "" {
@@ -1204,7 +1200,7 @@ func (s *Server) handleAdminCreateAdminToken(w http.ResponseWriter, r *http.Requ
 	}
 
 	var req createKeyRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err = decodeJSON(r, &req); err != nil {
 		return err
 	}
 	if strings.TrimSpace(req.Name) == "" {
@@ -1216,8 +1212,9 @@ func (s *Server) handleAdminCreateAdminToken(w http.ResponseWriter, r *http.Requ
 
 	// Minting an administrative credential is the operation that grants
 	// authority, so it is a candidate for the approval queue.
-	if held, err := s.approvalGate(r, caller, tenantID, "admin_token.create",
-		map[string]any{"name": req.Name, "role": string(req.Role)}, ""); held {
+	held, err := s.approvalGate(r, caller, tenantID, "admin_token.create",
+		map[string]any{"name": req.Name, "role": string(req.Role)}, "")
+	if held {
 		return err
 	}
 

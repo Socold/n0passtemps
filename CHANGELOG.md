@@ -122,6 +122,23 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   typo at one of four literals would have created a second event family that no
   saved query selects. They are constants now.
 
+- **The `govet` (`shadow`) style budget is at zero.** 179 sites, not the 175
+  recorded, for the same measurement reason as `lll` below. 152 were an `if`
+  statement's init in the same function as the variable they shadowed, with
+  nothing reading that variable before it was written again, and became `=`. 8
+  were in closures over an enclosing function's variable, where writing to the
+  capture is a different program, and were renamed. 18 declared another variable
+  as well and were restructured, usually by assigning straight into the field the
+  temporary was copied to. Which site was which was decided by a program over the
+  syntax tree rather than by eye; [docs/ROADMAP.md](docs/ROADMAP.md) records the
+  division and the bug in the first version of that program.
+
+  **`gocritic`'s `sloppyReassign` is disabled as a consequence**, with the
+  reasoning in `.golangci.yml`. It and `shadow` contradict each other on exactly
+  these lines and cannot both be at nought: clearing `shadow` moved 51 findings
+  into `gocritic`. `shadow` stays because it catches a bug and the other catches
+  a looseness.
+
 - **The `lll` style budget is at zero, and it was never 119.** 127 lines were
   past 120 columns; the missing eight appeared as soon as the other linters were
   switched off. A count taken from a run that enables everything is a lower

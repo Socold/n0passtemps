@@ -360,7 +360,7 @@ func (i *Issuer) Issue(subjectID, tenantID, audience string, factors []Factor, c
 	}
 
 	jti := make([]byte, jtiBytes)
-	if _, err := rand.Read(jti); err != nil {
+	if _, err = rand.Read(jti); err != nil {
 		return "", nil, fmt.Errorf("assertion: read random: %w", err)
 	}
 
@@ -541,7 +541,7 @@ func (v *Verifier) Verify(token string, expectedAudience string) (*Claims, error
 		return nil, ErrInvalidToken
 	}
 	var hdr joseHeader
-	if err := json.Unmarshal(rawHeader, &hdr); err != nil {
+	if err = json.Unmarshal(rawHeader, &hdr); err != nil {
 		return nil, ErrInvalidToken
 	}
 

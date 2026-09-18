@@ -342,7 +342,7 @@ func newSealer(tb testing.TB) *envelope.Sealer {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	if err := os.WriteFile(path, body, 0o600); err != nil {
+	if err = os.WriteFile(path, body, 0o600); err != nil {
 		tb.Fatal(err)
 	}
 

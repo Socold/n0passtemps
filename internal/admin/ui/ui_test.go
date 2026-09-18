@@ -96,12 +96,12 @@ func newHarness(t *testing.T, tune ...func(*config.Config)) *harness {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	if err := st.Migrate(context.Background()); err != nil {
+	if err = st.Migrate(context.Background()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 
 	now := time.Date(2024, 6, 5, 9, 0, 0, 0, time.UTC)
-	if err := st.CreateTenant(context.Background(), &store.Tenant{
+	if err = st.CreateTenant(context.Background(), &store.Tenant{
 		ID: testTenantID, Name: "Test deployment", Status: "active",
 		CreatedAt: now, UpdatedAt: now,
 	}); err != nil {

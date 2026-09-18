@@ -163,7 +163,7 @@ func LoadTPMProvider(path, device string, dataDirs ...string) (*TPMProvider, err
 	if err != nil {
 		return nil, fmt.Errorf("kek: resolve %q: %w", path, err)
 	}
-	if err := checkNotInDataDir(abs, dataDirs); err != nil {
+	if err = checkNotInDataDir(abs, dataDirs); err != nil {
 		return nil, err
 	}
 	if device == "" {
@@ -215,7 +215,7 @@ func SealKeyring(t transport.TPM, plain []byte) ([]byte, error) {
 	_ = ring.Close()
 
 	fileKey := make([]byte, tpmFileKeySize)
-	if _, err := io.ReadFull(rand.Reader, fileKey); err != nil {
+	if _, err = io.ReadFull(rand.Reader, fileKey); err != nil {
 		return nil, fmt.Errorf("kek: generate the file key: %w", err)
 	}
 	defer zeroize.Bytes(fileKey)

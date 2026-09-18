@@ -242,14 +242,14 @@ func TestRevokeAllIsHeldForASecondAdministrator(t *testing.T) {
 	approvalID := asString(t, queued["id"], "queued.id")
 
 	approver := h.mintAdminToken("approver", store.RoleFull)
-	if res := h.do(http.MethodPost, "/admin/v1/approvals/"+approvalID+"/approve", approver, nil); res.Status != http.StatusOK {
+	if res = h.do(http.MethodPost, "/admin/v1/approvals/"+approvalID+"/approve", approver, nil); res.Status != http.StatusOK {
 		t.Fatalf("approve = %d; body: %s", res.Status, res.Raw)
 	}
 
 	// The approval is bound to the subject and the reason the approver read.
 	hdr := map[string]string{ApprovalHeader: approvalID}
 	altered := map[string]any{"reason": "something else"}
-	if res := h.doWith(http.MethodPost, path, requester, altered, hdr); res.Status != http.StatusForbidden {
+	if res = h.doWith(http.MethodPost, path, requester, altered, hdr); res.Status != http.StatusForbidden {
 		t.Errorf("redeeming with a different reason = %d, want 403", res.Status)
 	}
 	if n, _ := activeFactors(t, h, subjectID); n != 2 {
@@ -449,7 +449,8 @@ func TestRewrapAll(t *testing.T) {
 	for _, kind := range []store.SealedKind{store.SealedTOTP, store.SealedSubjectRef} {
 		after := ""
 		for {
-			page, err := st.ListSealed(ctx, kind, after, 100)
+			var page []store.SealedRecord
+			page, err = st.ListSealed(ctx, kind, after, 100)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -457,11 +458,13 @@ func TestRewrapAll(t *testing.T) {
 				break
 			}
 			for _, rec := range page {
-				version, err := envelope.KEKVersion(rec.Sealed)
+				var version uint32
+				version, err = envelope.KEKVersion(rec.Sealed)
 				if err != nil || version != 2 {
 					t.Errorf("%s %s reports version %d (%v), want 2", kind, rec.ID, version, err)
 				}
-				plain, err := v2only.Unseal(rec.Sealed)
+				var plain []byte
+				plain, err = v2only.Unseal(rec.Sealed)
 				if err != nil {
 					t.Errorf("%s %s does not unseal without the old key: %v", kind, rec.ID, err)
 					continue
@@ -505,7 +508,7 @@ func TestRewrapAll(t *testing.T) {
 		t.Fatal(err)
 	}
 	for id, sealed := range map[string][]byte{"!orphan": orphan, "~late": late} {
-		if _, err := st.UpsertSubject(ctx, &store.Subject{
+		if _, err = st.UpsertSubject(ctx, &store.Subject{
 			ID: id, TenantID: testTenant, RefHMAC: []byte("hmac-" + id), RefSealed: sealed,
 		}); err != nil {
 			t.Fatal(err)
@@ -548,7 +551,7 @@ func TestRewrapAllHonoursCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.UpsertSubject(context.Background(), &store.Subject{
+	if _, err = st.UpsertSubject(context.Background(), &store.Subject{
 		ID: uuid.NewString(), TenantID: testTenant, RefHMAC: []byte("hmac"), RefSealed: sealed,
 	}); err != nil {
 		t.Fatal(err)

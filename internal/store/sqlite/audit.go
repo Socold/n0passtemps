@@ -55,7 +55,7 @@ func (s *Store) Append(ctx context.Context, e *store.AuditEntry) (*store.AuditEn
 		// commits to has to be known beforehand. Taking lastSeq+1 is exact
 		// here because this transaction holds the write lock and the column is
 		// AUTOINCREMENT, which never reuses a value.
-		if err := audit.Prepare(e, lastSeq+1, prevHash); err != nil {
+		if err = audit.Prepare(e, lastSeq+1, prevHash); err != nil {
 			return err
 		}
 
@@ -403,7 +403,7 @@ func (s *Store) EraseSubjectAuditEntries(ctx context.Context, tenantID, subjectI
 		if err != nil {
 			return err
 		}
-		if err := audit.Prepare(tombstone, lastSeq+1, prevHash); err != nil {
+		if err = audit.Prepare(tombstone, lastSeq+1, prevHash); err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `
@@ -453,7 +453,7 @@ func (s *Store) PruneAuditLog(ctx context.Context, tenantID string, before time.
 		}
 
 		var count int64
-		if err := tx.QueryRowContext(ctx,
+		if err = tx.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM audit_log WHERE seq <= ?`, lastSeq).Scan(&count); err != nil {
 			return fmt.Errorf("sqlite: count prunable entries: %w", err)
 		}
@@ -475,10 +475,10 @@ func (s *Store) PruneAuditLog(ctx context.Context, tenantID string, before time.
 		if err != nil {
 			return err
 		}
-		if err := audit.Prepare(marker, headSeq+1, prevHash); err != nil {
+		if err = audit.Prepare(marker, headSeq+1, prevHash); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `
+		if _, err = tx.ExecContext(ctx, `
 			INSERT INTO audit_log (
 				seq, tenant_id, occurred_at, event_type, actor_type, actor_id,
 				subject_id, resource_type, resource_id, outcome, source_ip,
@@ -491,7 +491,7 @@ func (s *Store) PruneAuditLog(ctx context.Context, tenantID string, before time.
 			return mapError(err)
 		}
 
-		if _, err := tx.ExecContext(ctx, `
+		if _, err = tx.ExecContext(ctx, `
 			INSERT INTO audit_checkpoints (
 				id, tenant_id, pruned_through_seq, pruned_through_hash,
 				entries_removed, audit_seq, created_at

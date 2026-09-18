@@ -195,7 +195,7 @@ func kekRotate(args []string) error {
 	defer zeroize.Bytes(raw)
 
 	var doc keyringFile
-	if err := json.Unmarshal(raw, &doc); err != nil {
+	if err = json.Unmarshal(raw, &doc); err != nil {
 		return fmt.Errorf("parse %s: %w", *path, err)
 	}
 	if len(doc.Keys) == 0 {
@@ -204,7 +204,8 @@ func kekRotate(args []string) error {
 
 	next := doc.Current
 	for v := range doc.Keys {
-		n, err := strconv.ParseUint(v, 10, 32)
+		var n uint64
+		n, err = strconv.ParseUint(v, 10, 32)
 		if err != nil {
 			return fmt.Errorf("key version %q is not a number", v)
 		}
@@ -215,7 +216,7 @@ func kekRotate(args []string) error {
 	next++
 
 	key := make([]byte, kek.KeySize)
-	if _, err := rand.Read(key); err != nil {
+	if _, err = rand.Read(key); err != nil {
 		return fmt.Errorf("generate key: %w", err)
 	}
 	defer zeroize.Bytes(key)
@@ -401,10 +402,10 @@ func assertionKeyRotate(args []string) error {
 	}
 	defer zeroize.Bytes(outgoingPrivPEM)
 
-	if err := writeFile(prevPub, outgoingPubPEM, 0o644, false); err != nil {
+	if err = writeFile(prevPub, outgoingPubPEM, 0o644, false); err != nil {
 		return err
 	}
-	if err := writeFile(prevPriv, outgoingPrivPEM, 0o600, false); err != nil {
+	if err = writeFile(prevPriv, outgoingPrivPEM, 0o600, false); err != nil {
 		return err
 	}
 
@@ -416,7 +417,7 @@ func assertionKeyRotate(args []string) error {
 
 	// Only now is the live key replaced. Everything above can fail without the
 	// deployment having changed.
-	if err := writeFile(*path, priv, 0o600, true); err != nil {
+	if err = writeFile(*path, priv, 0o600, true); err != nil {
 		return err
 	}
 

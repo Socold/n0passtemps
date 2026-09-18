@@ -14,11 +14,11 @@ func TestMigrateSmoke(t *testing.T) {
 	}
 	defer func() { _ = s.Close() }()
 	ctx := context.Background()
-	if err := s.Migrate(ctx); err != nil {
+	if err = s.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
 	// Idempotence.
-	if err := s.Migrate(ctx); err != nil {
+	if err = s.Migrate(ctx); err != nil {
 		t.Fatalf("second migrate: %v", err)
 	}
 	rows, err := s.read.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' ORDER BY name`)
@@ -29,14 +29,14 @@ func TestMigrateSmoke(t *testing.T) {
 	var names []string
 	for rows.Next() {
 		var n string
-		if err := rows.Scan(&n); err != nil {
+		if err = rows.Scan(&n); err != nil {
 			t.Fatalf("scan table name: %v", err)
 		}
 		names = append(names, n)
 	}
 	// Without this an iteration cut short reads as a schema with fewer tables
 	// than it has, which is the failure this smoke test exists to notice.
-	if err := rows.Err(); err != nil {
+	if err = rows.Err(); err != nil {
 		t.Fatalf("iterate table names: %v", err)
 	}
 	t.Logf("tables: %v", names)

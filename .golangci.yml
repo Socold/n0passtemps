@@ -145,6 +145,18 @@ linters:
         # Fires on the guard-clause style used throughout the store and handler
         # code, where the early return is the point.
         - ifElseChain
+        # Contradicts govet's shadow, which is enabled above, on the same lines.
+        # sloppyReassign asks for "if err := f(); err != nil" wherever the value
+        # is used only inside the if; shadow refuses that form whenever an err
+        # already exists in the function. Both cannot be at nought on the same
+        # code, so one of them is a written decision rather than a default.
+        #
+        # shadow stays because it catches a bug and this one catches a style: a
+        # variable declared with := inside a block, while an outer one of the
+        # same name is checked after the block, is how a handled error becomes
+        # an unhandled one. A variable whose scope is wider than it needs to be
+        # is not wrong, only loose. See docs/ROADMAP.md, the style budget.
+        - sloppyReassign
 
     revive:
       rules:

@@ -148,7 +148,7 @@ func (s *Server) handleCreateSubject(w http.ResponseWriter, r *http.Request) err
 	}
 
 	var req createSubjectRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err = decodeJSON(r, &req); err != nil {
 		return err
 	}
 
@@ -265,7 +265,7 @@ func (s *Server) handleRegisterBegin(w http.ResponseWriter, r *http.Request) err
 
 	var req registerBeginRequest
 	if r.ContentLength > 0 {
-		if err := decodeJSON(r, &req); err != nil {
+		if err = decodeJSON(r, &req); err != nil {
 			return err
 		}
 	}
@@ -279,7 +279,7 @@ func (s *Server) handleRegisterBegin(w http.ResponseWriter, r *http.Request) err
 	}
 
 	dims := s.clientThrottleDims(r, caller, sub.ID)
-	if err := s.checkThrottle(r, tenantID, dims); err != nil {
+	if err = s.checkThrottle(r, tenantID, dims); err != nil {
 		return err
 	}
 
@@ -347,10 +347,10 @@ func (s *Server) handleRegisterComplete(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req ceremonyCompleteRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err = decodeJSON(r, &req); err != nil {
 		return err
 	}
-	if err := req.validate(); err != nil {
+	if err = req.validate(); err != nil {
 		return err
 	}
 
@@ -360,7 +360,7 @@ func (s *Server) handleRegisterComplete(w http.ResponseWriter, r *http.Request) 
 	}
 
 	dims := s.clientThrottleDims(r, caller, sub.ID)
-	if err := s.checkThrottle(r, tenantID, dims); err != nil {
+	if err = s.checkThrottle(r, tenantID, dims); err != nil {
 		return err
 	}
 
@@ -427,7 +427,7 @@ func (s *Server) handleAssertBegin(w http.ResponseWriter, r *http.Request) error
 	}
 
 	dims := s.clientThrottleDims(r, caller, sub.ID)
-	if err := s.checkThrottle(r, tenantID, dims); err != nil {
+	if err = s.checkThrottle(r, tenantID, dims); err != nil {
 		return err
 	}
 
@@ -514,10 +514,10 @@ func (s *Server) handleAssertComplete(w http.ResponseWriter, r *http.Request) er
 	}
 
 	var req ceremonyCompleteRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err = decodeJSON(r, &req); err != nil {
 		return err
 	}
-	if err := req.validate(); err != nil {
+	if err = req.validate(); err != nil {
 		return err
 	}
 
@@ -527,7 +527,7 @@ func (s *Server) handleAssertComplete(w http.ResponseWriter, r *http.Request) er
 	}
 
 	dims := s.clientThrottleDims(r, caller, sub.ID)
-	if err := s.checkThrottle(r, tenantID, dims); err != nil {
+	if err = s.checkThrottle(r, tenantID, dims); err != nil {
 		return err
 	}
 
@@ -642,7 +642,7 @@ func (s *Server) handleDiscoverableAssertBegin(w http.ResponseWriter, r *http.Re
 	}
 
 	dims := s.clientThrottleDims(r, caller, "")
-	if err := s.checkThrottle(r, tenantID, dims); err != nil {
+	if err = s.checkThrottle(r, tenantID, dims); err != nil {
 		return err
 	}
 
@@ -690,15 +690,15 @@ func (s *Server) handleDiscoverableAssertComplete(w http.ResponseWriter, r *http
 	}
 
 	var req ceremonyCompleteRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err = decodeJSON(r, &req); err != nil {
 		return err
 	}
-	if err := req.validate(); err != nil {
+	if err = req.validate(); err != nil {
 		return err
 	}
 
 	networkDims := s.clientThrottleDims(r, caller, "")
-	if err := s.checkThrottle(r, tenantID, networkDims); err != nil {
+	if err = s.checkThrottle(r, tenantID, networkDims); err != nil {
 		return err
 	}
 
@@ -888,7 +888,7 @@ func (s *Server) handleTOTPEnrol(w http.ResponseWriter, r *http.Request) error {
 		PeriodSeconds: int(cfg.Period.Duration.Seconds()),
 		CreatedAt:     now,
 	}
-	if err := s.deps.Store.CreateTOTPSecret(r.Context(), rec); err != nil {
+	if err = s.deps.Store.CreateTOTPSecret(r.Context(), rec); err != nil {
 		return Internal(err)
 	}
 
@@ -945,7 +945,7 @@ func (s *Server) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) error
 	}
 
 	var req totpCodeRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err = decodeJSON(r, &req); err != nil {
 		return err
 	}
 
@@ -955,7 +955,7 @@ func (s *Server) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) error
 	}
 
 	dims := s.clientThrottleDims(r, caller, sub.ID)
-	if err := s.checkThrottle(r, tenantID, dims); err != nil {
+	if err = s.checkThrottle(r, tenantID, dims); err != nil {
 		return err
 	}
 
@@ -971,7 +971,7 @@ func (s *Server) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) error
 	// accepted late, so a secret shown to a user long ago cannot be activated
 	// by someone who later obtained it.
 	if s.now().UTC().Sub(pending.CreatedAt) > s.deps.Config.TOTP.EnrolmentTTL.Duration {
-		if err := s.deps.Store.RevokeTOTPSecret(r.Context(), tenantID, pending.ID, s.now().UTC()); err != nil {
+		if err = s.deps.Store.RevokeTOTPSecret(r.Context(), tenantID, pending.ID, s.now().UTC()); err != nil {
 			s.deps.Logger.WarnContext(r.Context(), "expired totp enrolment not revoked")
 		}
 		return Conflict("the enrolment has expired, start again", nil)
@@ -1035,7 +1035,7 @@ func (s *Server) handleTOTPVerify(w http.ResponseWriter, r *http.Request) error 
 	}
 
 	var req totpCodeRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err = decodeJSON(r, &req); err != nil {
 		return err
 	}
 
@@ -1045,7 +1045,7 @@ func (s *Server) handleTOTPVerify(w http.ResponseWriter, r *http.Request) error 
 	}
 
 	dims := s.clientThrottleDims(r, caller, sub.ID)
-	if err := s.checkThrottle(r, tenantID, dims); err != nil {
+	if err = s.checkThrottle(r, tenantID, dims); err != nil {
 		return err
 	}
 
@@ -1263,7 +1263,7 @@ func (s *Server) handleRecoveryConsume(w http.ResponseWriter, r *http.Request) e
 	}
 
 	var req recoveryConsumeRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err = decodeJSON(r, &req); err != nil {
 		return err
 	}
 
@@ -1273,7 +1273,7 @@ func (s *Server) handleRecoveryConsume(w http.ResponseWriter, r *http.Request) e
 	}
 
 	dims := s.clientThrottleDims(r, caller, sub.ID)
-	if err := s.checkThrottle(r, tenantID, dims); err != nil {
+	if err = s.checkThrottle(r, tenantID, dims); err != nil {
 		return err
 	}
 
@@ -1321,7 +1321,7 @@ func (s *Server) handleRecoveryConsume(w http.ResponseWriter, r *http.Request) e
 		return rejected("verifier did not match")
 	}
 
-	if err := s.deps.Store.ConsumeRecoveryCode(r.Context(), tenantID, rec.ID, s.now().UTC()); err != nil {
+	if err = s.deps.Store.ConsumeRecoveryCode(r.Context(), tenantID, rec.ID, s.now().UTC()); err != nil {
 		if errors.Is(err, store.ErrStaleWrite) {
 			// Another request consumed it first. Single use is enforced by the
 			// store's conditional update, not by the check above.

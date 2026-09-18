@@ -503,7 +503,7 @@ func (s *Store) PruneAuditLog(ctx context.Context, tenantID string, before time.
 		}
 
 		var count int64
-		if err := tx.QueryRow(ctx,
+		if err = tx.QueryRow(ctx,
 			`SELECT COUNT(*) FROM audit_log WHERE seq <= $1`, lastSeq).Scan(&count); err != nil {
 			return fmt.Errorf("postgres: count prunable entries: %w", err)
 		}
@@ -521,14 +521,14 @@ func (s *Store) PruneAuditLog(ctx context.Context, tenantID string, before time.
 				`{"action":"retention_prune","pruned_through_seq":%d,"entries":%d}`,
 				lastSeq, count)),
 		}
-		if err := prepareAppend(ctx, tx, marker); err != nil {
+		if err = prepareAppend(ctx, tx, marker); err != nil {
 			return err
 		}
-		if err := insertAuditEntry(ctx, tx, marker); err != nil {
+		if err = insertAuditEntry(ctx, tx, marker); err != nil {
 			return err
 		}
 
-		if _, err := tx.Exec(ctx, `
+		if _, err = tx.Exec(ctx, `
 			INSERT INTO audit_checkpoints (
 				id, tenant_id, pruned_through_seq, pruned_through_hash,
 				entries_removed, audit_seq, created_at

@@ -433,16 +433,16 @@ func (s *Service) CompleteAdminAssertion(ctx context.Context, tenantID, challeng
 	)
 
 	lookup := func(rawID, handle []byte) (lib.User, error) {
-		found, err := s.store.GetAdminCredentialByID(ctx, tenantID, s.cfg.RPID, rawID)
-		if errors.Is(err, store.ErrNotFound) {
+		found, lookupErr := s.store.GetAdminCredentialByID(ctx, tenantID, s.cfg.RPID, rawID)
+		if errors.Is(lookupErr, store.ErrNotFound) {
 			// This is where a subject's passkey lands, and where a passkey from
 			// another deployment lands. The credential is not in this table, so
 			// there is nothing to verify against and nothing to resolve.
 			refused = "the credential is not enrolled for the administration interface"
 			return nil, ErrCeremonyFailed
 		}
-		if err != nil {
-			return nil, fmt.Errorf("webauthn: administrative credential lookup: %w", err)
+		if lookupErr != nil {
+			return nil, fmt.Errorf("webauthn: administrative credential lookup: %w", lookupErr)
 		}
 		// GetAdminCredentialByID deliberately does not filter withdrawn rows:
 		// the enrolment path uses it to refuse an authenticator that is already
@@ -456,22 +456,22 @@ func (s *Service) CompleteAdminAssertion(ctx context.Context, tenantID, challeng
 			return nil, ErrCeremonyFailed
 		}
 
-		t, err := s.store.GetAdminTokenByID(ctx, tenantID, found.AdminTokenID)
-		if errors.Is(err, store.ErrNotFound) {
+		t, lookupErr := s.store.GetAdminTokenByID(ctx, tenantID, found.AdminTokenID)
+		if errors.Is(lookupErr, store.ErrNotFound) {
 			refused = "the administrative token the credential belongs to no longer exists"
 			return nil, ErrCeremonyFailed
 		}
-		if err != nil {
-			return nil, fmt.Errorf("webauthn: administrative token lookup: %w", err)
+		if lookupErr != nil {
+			return nil, fmt.Errorf("webauthn: administrative token lookup: %w", lookupErr)
 		}
 		if !t.Usable(s.now().UTC()) {
 			refused = "the administrative token is expired, withdrawn or carries an unknown role"
 			return nil, ErrCeremonyFailed
 		}
 
-		expected, err := adminUserHandle(t.ID)
-		if err != nil {
-			return nil, err
+		expected, lookupErr := adminUserHandle(t.ID)
+		if lookupErr != nil {
+			return nil, lookupErr
 		}
 		if !hmac.Equal(expected, handle) {
 			refused = "the user handle does not match the credential"

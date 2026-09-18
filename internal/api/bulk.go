@@ -47,7 +47,7 @@ func (s *Server) handleAdminRevokeAllCredentials(w http.ResponseWriter, r *http.
 
 	var req bulkRevokeRequest
 	if r.ContentLength > 0 {
-		if err := decodeJSON(r, &req); err != nil {
+		if err = decodeJSON(r, &req); err != nil {
 			return err
 		}
 	}
@@ -61,7 +61,7 @@ func (s *Server) handleAdminRevokeAllCredentials(w http.ResponseWriter, r *http.
 	// bucket. A separate bucket would let a script that had exhausted one
 	// route carry on through the other.
 	dims := map[throttle.Dimension]string{throttle.DimAdminRevoke: caller.ActorID()}
-	if err := s.checkThrottle(r, tenantID, dims); err != nil {
+	if err = s.checkThrottle(r, tenantID, dims); err != nil {
 		return err
 	}
 
@@ -83,8 +83,9 @@ func (s *Server) handleAdminRevokeAllCredentials(w http.ResponseWriter, r *http.
 
 	// Held for a second administrator because it removes every factor a
 	// subject holds in one call and cannot be undone.
-	if held, err := s.approvalGate(r, caller, tenantID, "credential.revoke_bulk",
-		map[string]any{"subject_id": sub.ID, "reason": req.Reason}, req.Reason); held {
+	held, err := s.approvalGate(r, caller, tenantID, "credential.revoke_bulk",
+		map[string]any{"subject_id": sub.ID, "reason": req.Reason}, req.Reason)
+	if held {
 		return err
 	}
 

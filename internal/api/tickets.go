@@ -140,7 +140,7 @@ func (s *Server) handleIssueEnrolmentTicket(w http.ResponseWriter, r *http.Reque
 
 	var req ticketIssueRequest
 	if r.ContentLength > 0 {
-		if err := decodeJSON(r, &req); err != nil {
+		if err = decodeJSON(r, &req); err != nil {
 			return err
 		}
 	}
@@ -177,7 +177,7 @@ func (s *Server) handleAdminIssueEnrolmentTicket(w http.ResponseWriter, r *http.
 
 	var req ticketIssueRequest
 	if r.ContentLength > 0 {
-		if err := decodeJSON(r, &req); err != nil {
+		if err = decodeJSON(r, &req); err != nil {
 			return err
 		}
 	}
@@ -454,7 +454,7 @@ func (s *Server) handleTicketRegisterBegin(w http.ResponseWriter, r *http.Reques
 	}
 
 	var req ticketRegisterBeginRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err = decodeJSON(r, &req); err != nil {
 		return err
 	}
 
@@ -508,13 +508,13 @@ func (s *Server) handleTicketRegisterComplete(w http.ResponseWriter, r *http.Req
 	}
 
 	var req ticketRegisterCompleteRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err = decodeJSON(r, &req); err != nil {
 		return err
 	}
 	if strings.TrimSpace(req.ChallengeID) == "" {
 		return BadRequest("challenge_id is required", nil)
 	}
-	if _, err := uuid.Parse(req.ChallengeID); err != nil {
+	if _, err = uuid.Parse(req.ChallengeID); err != nil {
 		return BadRequest("challenge_id is not a valid identifier", err)
 	}
 	if len(req.Credential) == 0 {

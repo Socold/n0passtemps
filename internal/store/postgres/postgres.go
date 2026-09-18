@@ -175,7 +175,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 
-	if err := s.ensureMigrationTable(ctx); err != nil {
+	if err = s.ensureMigrationTable(ctx); err != nil {
 		return err
 	}
 

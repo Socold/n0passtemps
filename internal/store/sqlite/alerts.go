@@ -65,13 +65,13 @@ func (s *Store) RaiseAlert(ctx context.Context, a *store.Alert) (*store.Alert, e
 		a.Occurrences = 1
 	}
 
-	detail, err := encodeJSONObject(a.Detail)
-	if err != nil {
-		return nil, err
+	detail, encodeErr := encodeJSONObject(a.Detail)
+	if encodeErr != nil {
+		return nil, encodeErr
 	}
 
 	var out *store.Alert
-	err = s.inTx(ctx, func(tx *sql.Tx) error {
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
 		row := tx.QueryRowContext(ctx, `
 			INSERT INTO alerts (`+alertColumns+`)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)

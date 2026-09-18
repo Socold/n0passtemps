@@ -378,7 +378,7 @@ func TestVerifyRefusesATruncatedDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read database: %v", err)
 	}
-	if err := os.WriteFile(tr.dbPath, raw[:len(raw)/3], 0o600); err != nil {
+	if err = os.WriteFile(tr.dbPath, raw[:len(raw)/3], 0o600); err != nil {
 		t.Fatalf("truncate database: %v", err)
 	}
 
@@ -484,12 +484,12 @@ func TestVerifyCannotRunOnANewerSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen database: %v", err)
 	}
-	if _, err := db.Exec(
+	if _, err = db.Exec(
 		`INSERT INTO schema_migrations (version, name, checksum, applied_at)
 		 VALUES (9999, 'from_the_future', 'deadbeef', '2026-09-18T00:00:00.000000000Z')`); err != nil {
 		t.Fatalf("insert migration row: %v", err)
 	}
-	if err := db.Close(); err != nil {
+	if err = db.Close(); err != nil {
 		t.Fatalf("close database: %v", err)
 	}
 
@@ -559,10 +559,10 @@ func TestVerifyDamagedEnvelopeHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen database: %v", err)
 	}
-	if _, err := db.Exec(`UPDATE totp_secrets SET secret_sealed = X'00'`); err != nil {
+	if _, err = db.Exec(`UPDATE totp_secrets SET secret_sealed = X'00'`); err != nil {
 		t.Fatalf("damage the column: %v", err)
 	}
-	if err := db.Close(); err != nil {
+	if err = db.Close(); err != nil {
 		t.Fatalf("close database: %v", err)
 	}
 

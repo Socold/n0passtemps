@@ -684,12 +684,12 @@ func (s *Service) CompleteDiscoverableAssertion(ctx context.Context, tenantID, c
 	// validate against. Everything the service knows about who is signing in
 	// is decided here.
 	lookup := func(rawID, handle []byte) (lib.User, error) {
-		found, err := s.store.GetCredentialByID(ctx, tenantID, s.cfg.RPID, rawID)
-		if errors.Is(err, store.ErrNotFound) {
+		found, lookupErr := s.store.GetCredentialByID(ctx, tenantID, s.cfg.RPID, rawID)
+		if errors.Is(lookupErr, store.ErrNotFound) {
 			return nil, ErrCeremonyFailed
 		}
-		if err != nil {
-			return nil, fmt.Errorf("webauthn: credential lookup: %w", err)
+		if lookupErr != nil {
+			return nil, fmt.Errorf("webauthn: credential lookup: %w", lookupErr)
 		}
 		// GetCredentialByID deliberately does not filter revoked rows: the
 		// registration path uses it to refuse an authenticator that is already
@@ -707,20 +707,20 @@ func (s *Service) CompleteDiscoverableAssertion(ctx context.Context, tenantID, c
 			return nil, ErrCeremonyFailed
 		}
 
-		sub, err := s.store.GetSubject(ctx, tenantID, found.SubjectID)
-		if errors.Is(err, store.ErrNotFound) {
+		sub, lookupErr := s.store.GetSubject(ctx, tenantID, found.SubjectID)
+		if errors.Is(lookupErr, store.ErrNotFound) {
 			return nil, ErrCeremonyFailed
 		}
-		if err != nil {
-			return nil, fmt.Errorf("webauthn: subject lookup: %w", err)
+		if lookupErr != nil {
+			return nil, fmt.Errorf("webauthn: subject lookup: %w", lookupErr)
 		}
 		if !sub.Active() {
 			return nil, ErrCeremonyFailed
 		}
 
-		expected, err := userHandle(sub.ID)
-		if err != nil {
-			return nil, err
+		expected, lookupErr := userHandle(sub.ID)
+		if lookupErr != nil {
+			return nil, lookupErr
 		}
 		if !hmac.Equal(expected, handle) {
 			return nil, ErrCeremonyFailed

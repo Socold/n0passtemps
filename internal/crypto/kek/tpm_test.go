@@ -98,7 +98,7 @@ func TestSealedKeyringRoundTrip(t *testing.T) {
 		t.Fatal("the sealed file contains a key from the plaintext keyring")
 	}
 	var doc sealedFile
-	if err := json.Unmarshal(sealed, &doc); err != nil {
+	if err = json.Unmarshal(sealed, &doc); err != nil {
 		t.Fatalf("the sealed file is not JSON: %v", err)
 	}
 	if doc.Format != TPMFormat {
@@ -164,7 +164,7 @@ func TestAnAlteredSealedFileIsRefused(t *testing.T) {
 	}
 
 	var doc sealedFile
-	if err := json.Unmarshal(sealed, &doc); err != nil {
+	if err = json.Unmarshal(sealed, &doc); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	// One character of the base64 ciphertext, which is one or two bits of it.

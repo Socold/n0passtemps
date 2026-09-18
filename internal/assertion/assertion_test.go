@@ -602,7 +602,7 @@ func TestJWKS(t *testing.T) {
 	var set struct {
 		Keys []map[string]any `json:"keys"`
 	}
-	if err := json.Unmarshal(raw, &set); err != nil {
+	if err = json.Unmarshal(raw, &set); err != nil {
 		t.Fatalf("unmarshal jwks: %v", err)
 	}
 	if len(set.Keys) != 1 {
@@ -687,11 +687,11 @@ func TestGenerateAndLoadKeyPEM(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "assertion-key.pem")
-	if err := os.WriteFile(path, privPEM, 0o600); err != nil {
+	if err = os.WriteFile(path, privPEM, 0o600); err != nil {
 		t.Fatalf("write key: %v", err)
 	}
 	// os.WriteFile is subject to the process umask, so the mode is pinned.
-	if err := os.Chmod(path, 0o600); err != nil {
+	if err = os.Chmod(path, 0o600); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
 
@@ -767,10 +767,10 @@ func TestLoadPrivateKeyPEMRejectsNonEd25519(t *testing.T) {
 	ecPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
 
 	path := filepath.Join(t.TempDir(), "ec-key.pem")
-	if err := os.WriteFile(path, ecPEM, 0o600); err != nil {
+	if err = os.WriteFile(path, ecPEM, 0o600); err != nil {
 		t.Fatalf("write key: %v", err)
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
+	if err = os.Chmod(path, 0o600); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
 
@@ -1088,14 +1088,14 @@ func TestJWKSPublishesRetiredKeys(t *testing.T) {
 	v := NewVerifier(verifierFromJWKS(t, raw), testIssuer, testSkew)
 	v.now = func() time.Time { return fixedNow.Add(time.Second) }
 
-	if _, err := v.Verify(inFlight, testAudience); err != nil {
+	if _, err = v.Verify(inFlight, testAudience); err != nil {
 		t.Fatalf("a token minted under the retired key was refused after rotation: %v", err)
 	}
 	fresh, _, err := after.Issue(testSubject, "", testAudience, []Factor{FactorWebAuthn}, nil)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	if _, err := v.Verify(fresh, testAudience); err != nil {
+	if _, err = v.Verify(fresh, testAudience); err != nil {
 		t.Fatalf("a token minted under the new key was refused: %v", err)
 	}
 
@@ -1123,7 +1123,8 @@ func TestJWKSRetiredKeyOrderIsStable(t *testing.T) {
 	}
 	var retired []ed25519.PublicKey
 	for range 4 {
-		pub, _, err := ed25519.GenerateKey(rand.Reader)
+		var pub ed25519.PublicKey
+		pub, _, err = ed25519.GenerateKey(rand.Reader)
 		if err != nil {
 			t.Fatalf("GenerateKey: %v", err)
 		}
@@ -1211,7 +1212,7 @@ func TestLoadPublicKeyPEM(t *testing.T) {
 		t.Fatalf("GenerateKeyPEM: %v", err)
 	}
 	pubPath := filepath.Join(dir, "public.pem")
-	if err := os.WriteFile(pubPath, pubPEM, 0o644); err != nil {
+	if err = os.WriteFile(pubPath, pubPEM, 0o644); err != nil {
 		t.Fatalf("write public key: %v", err)
 	}
 
@@ -1228,10 +1229,10 @@ func TestLoadPublicKeyPEM(t *testing.T) {
 	}
 
 	// A world-readable public key is fine: it is served to every caller.
-	if err := os.Chmod(pubPath, 0o644); err != nil {
+	if err = os.Chmod(pubPath, 0o644); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
-	if _, err := LoadPublicKeyPEM(pubPath); err != nil {
+	if _, err = LoadPublicKeyPEM(pubPath); err != nil {
 		t.Errorf("a mode 0644 public key was refused: %v", err)
 	}
 

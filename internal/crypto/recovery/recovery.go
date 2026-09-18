@@ -208,7 +208,7 @@ func decodeHash(s string) (salt, sum []byte, err error) {
 	}
 
 	var version int
-	if _, err := fmt.Sscanf(parts[2], "v=%d", &version); err != nil {
+	if _, err = fmt.Sscanf(parts[2], "v=%d", &version); err != nil {
 		return nil, nil, fmt.Errorf("%w: version: %v", ErrBadHash, err)
 	}
 	if version != argon2.Version {
@@ -217,7 +217,7 @@ func decodeHash(s string) (salt, sum []byte, err error) {
 
 	var m, t uint32
 	var p uint8
-	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &m, &t, &p); err != nil {
+	if _, err = fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &m, &t, &p); err != nil {
 		return nil, nil, fmt.Errorf("%w: parameters: %v", ErrBadHash, err)
 	}
 

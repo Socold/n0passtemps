@@ -15,7 +15,7 @@ idea.
 | 2, this document | Complete. All three specified themes answered, and all five candidates of 2.4 landed |
 | 3, a key the process cannot read | Signing key rotation and the TPM-sealed keyring landed; a second signing key rejected; the signing key itself still open on a decision, not on tooling. See below, [ADR 0018](adr/0018-reducing-the-blast-radius-of-a-central-key.md) and [ADR 0019](adr/0019-seal-the-keyring-to-a-tpm.md) |
 | 6, hosted offering | Not started, and not planned before the on-premise product has users |
-| Maintenance | The style budget below. Two of its six categories are cleared and enforced in CI; four remain |
+| Maintenance | The style budget below. Three of its six categories are cleared and enforced in CI; three remain |
 
 Two phase 1 exit criteria deserve an honest note.
 
@@ -345,52 +345,66 @@ The pinned linter could not run at all until 1.1.0: `v2.6.0` cannot read the
 export data of the toolchain this project builds with, so every `make lint`
 ended with one `typecheck` error and no analysis. With the pin moved and the
 misconfigurations corrected, the correctness linters report nothing, and
-`errcheck` and `lll` are both at nought. What remains is 303 findings from the
-budget linters, which accumulated in code written while nothing was checking
-it:
+`errcheck`, `lll` and `govet` are all at nought. What remains is 129 findings
+from the budget linters, which accumulated in code written while nothing was
+checking it:
 
 | Linter | Count | What it is |
 |---|---|---|
-| `govet` (`shadow`) | 175 | A nested `err` shadowing an outer one. Idiomatic in most cases, and the check is famously noisy, but it is also how a handled error becomes an unhandled one |
-| `gocritic` | 81 | Diagnostic, style and performance suggestions |
+| `gocritic` | 82 | Diagnostic, style and performance suggestions. `hugeParam` and `unnamedResult` are most of it |
 | `revive` | 33 | Mostly missing doc comments on methods with unexported receivers |
 | `gocyclo` | 14 | Functions past 15 branches |
 
-None is a defect today. Two categories have been cleared so far, and both
-returned something for the effort. `errcheck` turned up two real faults and one
-class of false positive. `lll` turned up none, as expected of a line-length
-rule, but it did turn up how the backlog had been measured: 127 lines were over
-the limit rather than the 119 a full `golangci-lint run` reported, because eight
-were not in that report at all. They appeared as soon as the other linters were
-switched off. A count taken from a run that enables everything is therefore a
-lower bound, and the numbers above are to be read as such.
+Three categories have been cleared so far, and each returned something for the
+effort.
 
-Almost all of the 127 were function declarations, wrapped at a parameter with
-no change to what they do. The few that were not are of three kinds: a long
-message split across two string literals, which changes no bytes; three
-`if err := f(); err != nil && !errors.Is(...)` lines where the call is hoisted
-out so the condition fits; and three alert summaries hoisted into a local so
-that wrapping them inside a struct literal did not force gofmt to re-align
-every neighbouring field.
+`errcheck` turned up two real faults and one class of false positive.
 
-The `shadow` count grew by ten with the signing key rotation, every one of them
-`if err := f(); err != nil` in a test, which is the form the surrounding files
-use throughout. Contorting the new code to avoid a finding the rest of the tree
-carries 165 of would buy a smaller number and a file that reads unlike its
-neighbours. The count is recorded here rather than worked around, because the
-point of a budget is to be visible: it goes to zero when the category is cleared
-across the tree, in one deliberate pass, and not by writing unidiomatic Go at
-the edges in the meantime.
+`lll` turned up no defect, as expected of a line-length rule, but it did turn up
+how the backlog was being measured: 127 lines were over the limit rather than
+the 119 a full `golangci-lint run` reported, because eight were not in that
+report at all and appeared as soon as the other linters were switched off. A
+count taken from a run that enables everything is a lower bound, and the numbers
+above are to be read as such. `govet` measured 179 in isolation against the 175
+recorded here, for the same reason.
+
+`govet` (`shadow`) was the large one and it turned up the thing worth writing
+down. The 179 sites divide by what a rewrite would actually mean, which is not
+visible from the message:
+
+| Shape | Count | What it became |
+|---|---|---|
+| The assignment is an `if` statement's init, in the same function as the variable it shadows, and nothing reads that variable before it is written again | 152 | `:=` became `=`. Behaviour-preserving by construction |
+| The site is in a closure and the shadowed variable belongs to the enclosing function | 8 | Renamed. Writing to the captured variable is a different program when the closure is deferred or concurrent, and two of these are |
+| The statement declares another variable as well, so `=` will not compile | 18 | Restructured, usually by assigning straight into the field the temporary was copied to |
+| One `var err error` inside a closure | 1 | The prelude that made the outer name live across the closure was renamed instead |
+
+Deciding those by hand would have been guesswork, so it was decided by a
+throwaway program over the syntax tree: for each site, is the shadowed
+declaration inside the same innermost function, and is the first mention of the
+name after the statement a write or a read? The first pass of that program was
+wrong in a way worth recording, because it counted the `err != nil` of the very
+`if` being rewritten as a read, and so reported forty-five sites as dangerous
+that were not.
+
+**`shadow` and `gocritic`'s `sloppyReassign` cannot both be at nought.** They
+contradict each other on exactly these lines: one asks for `if err := f()`
+wherever the value is used only inside the `if`, the other refuses that form
+whenever an `err` already exists in the function. Clearing `shadow` moved 51
+findings into `gocritic`. `sloppyReassign` is disabled in `.golangci.yml` with
+that reasoning attached, because `shadow` catches a bug and it catches a
+looseness: a variable declared inside a block while an outer one of the same
+name is checked after the block is how a handled error becomes an unhandled
+one, whereas a scope wider than it needs to be is untidy and not wrong.
 
 **A cleared category is enforced from then on.** `make lint` as a whole still
 cannot run in CI while the table above is not empty, but a category cleared with
-nothing watching it fills straight back up, and the next reader has no way to
-tell a deliberate exception from a regression. `make lint-cleared` runs
-everything except the categories still listed above, and CI runs it on every
-push. A category leaves `UNCLEARED_LINTERS` in the Makefile as it reaches
-nought, so the gate tightens one category at a time and the exit criterion is
-reached when that variable is empty and `lint-cleared` and `lint` are the same
-command.
+nothing watching it fills back up, and the next reader has no way to tell a
+deliberate exception from a regression. `make lint-cleared` runs everything
+except the categories still listed above, and CI runs it on every push. A
+category leaves `UNCLEARED_LINTERS` in the Makefile as it reaches nought, so the
+gate tightens one category at a time and the exit criterion is reached when that
+variable is empty and `lint-cleared` and `lint` are the same command.
 
 It is written as what to disable rather than what to enable because
 golangci-lint's `--enable` adds to the set in `.golangci.yml` instead of

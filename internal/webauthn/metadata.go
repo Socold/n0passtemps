@@ -50,7 +50,7 @@ func loadMetadata(cfg config.WebAuthn) (metadata.Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("webauthn: read metadata blob: %w", err)
 	}
-	if err := requireSignedBlob(raw); err != nil {
+	if err = requireSignedBlob(raw); err != nil {
 		return nil, fmt.Errorf("webauthn: metadata blob %q: %w", cfg.MetadataPath, err)
 	}
 

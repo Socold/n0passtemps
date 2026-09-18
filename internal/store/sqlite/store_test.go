@@ -217,7 +217,7 @@ func TestAdvanceSignCount(t *testing.T) {
 		t.Errorf("backwards counter = %v, want ErrStaleWrite", err)
 	}
 
-	if err := s.AdvanceSignCount(ctx, "tenant-a", "missing", 0, 1, now); !errors.Is(err, store.ErrNotFound) {
+	if err = s.AdvanceSignCount(ctx, "tenant-a", "missing", 0, 1, now); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("unknown credential = %v, want ErrNotFound", err)
 	}
 
@@ -475,7 +475,7 @@ func TestReplaceRecoveryCodesRetiresPreviousBatch(t *testing.T) {
 	}
 
 	// A selector from the retired batch must no longer authenticate anything.
-	if _, err := s.GetRecoveryCodeBySelector(ctx, "tenant-a", "sel-a2"); !errors.Is(err, store.ErrNotFound) {
+	if _, err = s.GetRecoveryCodeBySelector(ctx, "tenant-a", "sel-a2"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("retired selector still resolves: %v", err)
 	}
 	got, err := s.GetRecoveryCodeBySelector(ctx, "tenant-a", "sel-b1")
@@ -527,7 +527,7 @@ func TestThrottleHit(t *testing.T) {
 	}
 
 	until := base.Add(time.Hour)
-	if err := s.Block(ctx, "tenant-a", key, until); err != nil {
+	if err = s.Block(ctx, "tenant-a", key, until); err != nil {
 		t.Fatal(err)
 	}
 
@@ -646,7 +646,7 @@ func TestRaiseAlertDeduplicates(t *testing.T) {
 
 	// Acknowledging takes the row out of the partial unique index, so the next
 	// occurrence has to open a fresh alert rather than reviving a closed one.
-	if err := s.AcknowledgeAlert(ctx, "tenant-a", first.ID, "operator-1", base.Add(2*time.Minute)); err != nil {
+	if err = s.AcknowledgeAlert(ctx, "tenant-a", first.ID, "operator-1", base.Add(2*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	third := raise("alert-3", base.Add(3*time.Minute))
@@ -742,21 +742,21 @@ func TestDecideApprovalRefusesSelfApproval(t *testing.T) {
 
 	// A request already decided is no longer decidable, which is also how the
 	// losing side of two simultaneous decisions is told.
-	if _, err := s.DecideApproval(ctx, "tenant-a", "req-1", "admin-three", false, "", base.Add(3*time.Minute)); !errors.Is(err, store.ErrStaleWrite) {
+	if _, err = s.DecideApproval(ctx, "tenant-a", "req-1", "admin-three", false, "", base.Add(3*time.Minute)); !errors.Is(err, store.ErrStaleWrite) {
 		t.Errorf("deciding twice = %v, want ErrStaleWrite", err)
 	}
 
 	// An expired request is refused even though it is still marked pending.
 	create("req-2", base.Add(time.Minute))
-	if _, err := s.DecideApproval(ctx, "tenant-a", "req-2", "admin-two", true, "", base.Add(time.Hour)); !errors.Is(err, store.ErrStaleWrite) {
+	if _, err = s.DecideApproval(ctx, "tenant-a", "req-2", "admin-two", true, "", base.Add(time.Hour)); !errors.Is(err, store.ErrStaleWrite) {
 		t.Errorf("deciding an expired request = %v, want ErrStaleWrite", err)
 	}
 
 	// Only an approved request may be marked executed.
-	if err := s.MarkApprovalExecuted(ctx, "tenant-a", "req-2", nil, base.Add(time.Hour)); !errors.Is(err, store.ErrStaleWrite) {
+	if err = s.MarkApprovalExecuted(ctx, "tenant-a", "req-2", nil, base.Add(time.Hour)); !errors.Is(err, store.ErrStaleWrite) {
 		t.Errorf("executing a request that was never approved = %v, want ErrStaleWrite", err)
 	}
-	if err := s.MarkApprovalExecuted(ctx, "tenant-a", "req-1", fmt.Errorf("upstream refused"), base.Add(4*time.Minute)); err != nil {
+	if err = s.MarkApprovalExecuted(ctx, "tenant-a", "req-1", fmt.Errorf("upstream refused"), base.Add(4*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	executed, err := s.GetApproval(ctx, "tenant-a", "req-1")
@@ -865,7 +865,7 @@ func TestTenantIsolation(t *testing.T) {
 		if counts[store.SeverityCritical] != 0 {
 			t.Errorf("critical count under tenant-b = %d, want 0", counts[store.SeverityCritical])
 		}
-		if err := s.AcknowledgeAlert(ctx, "tenant-b", alert.ID, "operator-b", time.Now()); !errors.Is(err, store.ErrNotFound) {
+		if err = s.AcknowledgeAlert(ctx, "tenant-b", alert.ID, "operator-b", time.Now()); !errors.Is(err, store.ErrNotFound) {
 			t.Errorf("AcknowledgeAlert across tenants = %v, want ErrNotFound", err)
 		}
 
@@ -1073,7 +1073,7 @@ func TestAuthnRoundTrip(t *testing.T) {
 
 	// A key stored with no scopes must read back as an empty slice, not nil, so
 	// a caller can range over it without a guard.
-	if err := s.CreateAPIKey(ctx, &store.APIKey{
+	if err = s.CreateAPIKey(ctx, &store.APIKey{
 		ID: "key-2", TenantID: "tenant-a", Name: "scopeless",
 		Selector: "sel-key-2", VerifierHash: "argon2id$...",
 	}); err != nil {
@@ -1091,22 +1091,22 @@ func TestAuthnRoundTrip(t *testing.T) {
 	}
 
 	at := time.Date(2026, 7, 1, 7, 0, 0, 0, time.UTC)
-	if err := s.TouchAPIKey(ctx, "key-1", at); err != nil {
+	if err = s.TouchAPIKey(ctx, "key-1", at); err != nil {
 		t.Fatal(err)
 	}
 	// Touching a key that is not there is not an error: nothing on the request
 	// path should fail because a last-use timestamp could not be written.
-	if err := s.TouchAPIKey(ctx, "missing", at); err != nil {
+	if err = s.TouchAPIKey(ctx, "missing", at); err != nil {
 		t.Errorf("touching an unknown key = %v, want nil", err)
 	}
 
-	if err := s.RevokeAPIKey(ctx, "tenant-a", "key-1", at); err != nil {
+	if err = s.RevokeAPIKey(ctx, "tenant-a", "key-1", at); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RevokeAPIKey(ctx, "tenant-a", "key-1", at); !errors.Is(err, store.ErrNotFound) {
+	if err = s.RevokeAPIKey(ctx, "tenant-a", "key-1", at); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("revoking twice = %v, want ErrNotFound", err)
 	}
-	if err := s.RevokeAPIKey(ctx, "tenant-b", "key-2", at); !errors.Is(err, store.ErrNotFound) {
+	if err = s.RevokeAPIKey(ctx, "tenant-b", "key-2", at); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("revoking across tenants = %v, want ErrNotFound", err)
 	}
 
@@ -1120,7 +1120,7 @@ func TestAuthnRoundTrip(t *testing.T) {
 		{"token-3", store.RoleAuditor, nil},
 	}
 	for _, spec := range tokens {
-		if err := s.CreateAdminToken(ctx, &store.AdminToken{
+		if err = s.CreateAdminToken(ctx, &store.AdminToken{
 			ID: spec.id, TenantID: "tenant-a", Name: spec.id,
 			Selector: "sel-" + spec.id, VerifierHash: "argon2id$...",
 			Role: spec.role, ExpiresAt: spec.expires,
@@ -1144,7 +1144,7 @@ func TestAuthnRoundTrip(t *testing.T) {
 		t.Errorf("admin_full tokens under tenant-b = %d, want 0", n)
 	}
 
-	if err := s.CreateAdminToken(ctx, &store.AdminToken{
+	if err = s.CreateAdminToken(ctx, &store.AdminToken{
 		ID: "token-4", TenantID: "tenant-a", Name: "bad",
 		Selector: "sel-token-4", VerifierHash: "argon2id$...", Role: "root",
 	}); err == nil {
@@ -1196,7 +1196,7 @@ func TestErasureLifecycle(t *testing.T) {
 	if got.ID != "erasure-1" || got.Status != store.ErasurePending {
 		t.Errorf("got %+v, want the pending request", got)
 	}
-	if _, err := s.GetErasureBySubject(ctx, "tenant-b", "subject-1"); !errors.Is(err, store.ErrNotFound) {
+	if _, err = s.GetErasureBySubject(ctx, "tenant-b", "subject-1"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("GetErasureBySubject across tenants = %v, want ErrNotFound", err)
 	}
 

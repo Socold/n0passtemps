@@ -44,11 +44,11 @@ func TestJanitorLeaseUnderContention(t *testing.T) {
 	}
 
 	// The second process asks a moment later, inside the lease.
-	if _, err := second.TryAcquireJanitorLock(ctx, "replica-b", leaseNow.Add(time.Second), leaseLease); !errors.Is(err, store.ErrLockHeld) {
+	if _, err = second.TryAcquireJanitorLock(ctx, "replica-b", leaseNow.Add(time.Second), leaseLease); !errors.Is(err, store.ErrLockHeld) {
 		t.Fatalf("the second holder got %v, want store.ErrLockHeld: two processes would sweep the same interval", err)
 	}
 
-	if err := held.Release(ctx); err != nil {
+	if err = held.Release(ctx); err != nil {
 		t.Fatalf("release: %v", err)
 	}
 

@@ -358,7 +358,8 @@ func TestRewrapMovesRecordToCurrentKEK(t *testing.T) {
 	if !bytes.Equal(original, originalCopy) {
 		t.Fatal("Rewrap modified its input; a failed database write would then leave no intact record")
 	}
-	if v, err := KEKVersion(rewrapped); err != nil || v != 2 {
+	v, err := KEKVersion(rewrapped)
+	if err != nil || v != 2 {
 		t.Fatalf("rewrapped record reports KEK version (%d, %v), want (2, nil)", v, err)
 	}
 	if len(rewrapped) != len(original) {

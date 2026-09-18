@@ -231,7 +231,12 @@ func (j *Janitor) Sweep(ctx context.Context) Result {
 
 	var res Result
 
-	if n, err := j.store.DeleteExpiredChallenges(ctx, now); err != nil {
+	// One count for the four sweeps below, which are four instances of the same
+	// shape: delete what has expired, record how many or record why not.
+	var n int64
+
+	n, err = j.store.DeleteExpiredChallenges(ctx, now)
+	if err != nil {
 		res.Errors = append(res.Errors, err)
 	} else {
 		res.Challenges = n
@@ -243,7 +248,8 @@ func (j *Janitor) Sweep(ctx context.Context) Result {
 	// spent ticket and one that never existed are indistinguishable; past the
 	// expiry there is nothing left to be indistinguishable about, and the
 	// durable record of what happened is the audit log.
-	if n, err := j.store.DeleteExpiredEnrolmentTickets(ctx, now); err != nil {
+	n, err = j.store.DeleteExpiredEnrolmentTickets(ctx, now)
+	if err != nil {
 		res.Errors = append(res.Errors, err)
 	} else {
 		res.Tickets = n
@@ -254,14 +260,16 @@ func (j *Janitor) Sweep(ctx context.Context) Result {
 	// user was refused. Deleting them the instant they expire would remove the
 	// evidence at exactly the moment somebody asks about it.
 	throttleCutoff := now.Add(-4 * j.cfg.Throttle.Window.Duration)
-	if n, err := j.store.DeleteStaleThrottles(ctx, throttleCutoff); err != nil {
+	n, err = j.store.DeleteStaleThrottles(ctx, throttleCutoff)
+	if err != nil {
 		res.Errors = append(res.Errors, err)
 	} else {
 		res.Throttles = n
 	}
 
 	if j.cfg.Features.DualApproval {
-		if n, err := j.store.ExpireApprovals(ctx, now); err != nil {
+		n, err = j.store.ExpireApprovals(ctx, now)
+		if err != nil {
 			res.Errors = append(res.Errors, err)
 		} else {
 			res.Approvals = n
@@ -271,13 +279,14 @@ func (j *Janitor) Sweep(ctx context.Context) Result {
 	// The count is kept even when an error comes back with it. One failing
 	// erasure does not undo the ones that completed in the same pass, and the
 	// pass with a failure in it is exactly the one an operator will read.
-	n, err := j.purgeDueErasures(ctx, now)
+	n, err = j.purgeDueErasures(ctx, now)
 	res.Erasures = n
 	if err != nil {
 		res.Errors = append(res.Errors, err)
 	}
 
-	if n, err := j.pruneAudit(ctx, now); err != nil {
+	n, err = j.pruneAudit(ctx, now)
+	if err != nil {
 		res.Errors = append(res.Errors, err)
 	} else {
 		res.AuditPruned = n

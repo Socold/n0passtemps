@@ -248,7 +248,7 @@ func TestConsoleAndSubjectChallengesCannotBeSwapped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := f.svc.CompleteDiscoverableAssertion(f.ctx, testTenant, console.ChallengeID, []byte("{}")); !errors.Is(err, webauthn.ErrChallengeNotFound) {
+	if _, _, err = f.svc.CompleteDiscoverableAssertion(f.ctx, testTenant, console.ChallengeID, []byte("{}")); !errors.Is(err, webauthn.ErrChallengeNotFound) {
 		t.Errorf("a console challenge completed through the subject route returned %v, want ErrChallengeNotFound", err)
 	}
 
@@ -279,7 +279,7 @@ func TestAdminEnrolmentChallengeCannotBeRedirectedToAnotherToken(t *testing.T) {
 		t.Fatalf("authenticator create: %v", err)
 	}
 
-	if _, err := f.svc.CompleteAdminRegistration(f.ctx, theirs, begin.ChallengeID, resp, ""); !errors.Is(err, webauthn.ErrCeremonyFailed) {
+	if _, err = f.svc.CompleteAdminRegistration(f.ctx, theirs, begin.ChallengeID, resp, ""); !errors.Is(err, webauthn.ErrCeremonyFailed) {
 		t.Fatalf("completion for another token returned %v, want ErrCeremonyFailed", err)
 	}
 

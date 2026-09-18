@@ -245,10 +245,11 @@ func TestRevokeAllCredentials(t *testing.T) {
 		t.Errorf("revoked %d credentials and %d secrets, want 2 and 1", creds, totp)
 	}
 
-	if n, err := s.CountActiveCredentials(ctx, "tenant-a", "victim"); err != nil || n != 0 {
+	n, err := s.CountActiveCredentials(ctx, "tenant-a", "victim")
+	if err != nil || n != 0 {
 		t.Errorf("victim has %d active credentials (%v), want 0", n, err)
 	}
-	if _, err := s.GetActiveTOTPSecret(ctx, "tenant-a", "victim"); !errors.Is(err, store.ErrNotFound) {
+	if _, err = s.GetActiveTOTPSecret(ctx, "tenant-a", "victim"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("victim's totp secret after revocation = %v, want ErrNotFound", err)
 	}
 
@@ -268,21 +269,24 @@ func TestRevokeAllCredentials(t *testing.T) {
 	}
 
 	// Everyone else is untouched.
-	if n, _ := s.CountActiveCredentials(ctx, "tenant-a", "bystander"); n != 1 {
+	n, _ = s.CountActiveCredentials(ctx, "tenant-a", "bystander")
+	if n != 1 {
 		t.Errorf("bystander has %d active credentials, want 1", n)
 	}
-	if _, err := s.GetActiveTOTPSecret(ctx, "tenant-a", "bystander"); err != nil {
+	if _, err = s.GetActiveTOTPSecret(ctx, "tenant-a", "bystander"); err != nil {
 		t.Errorf("bystander's totp secret: %v", err)
 	}
-	if n, _ := s.CountActiveCredentials(ctx, "tenant-b", "foreign"); n != 1 {
+	n, _ = s.CountActiveCredentials(ctx, "tenant-b", "foreign")
+	if n != 1 {
 		t.Errorf("foreign subject has %d active credentials, want 1", n)
 	}
-	if _, err := s.GetActiveTOTPSecret(ctx, "tenant-b", "foreign"); err != nil {
+	if _, err = s.GetActiveTOTPSecret(ctx, "tenant-b", "foreign"); err != nil {
 		t.Errorf("foreign subject's totp secret: %v", err)
 	}
 
 	// Recovery codes are the way back in and are left alone.
-	if n, err := s.CountUnusedRecoveryCodes(ctx, "tenant-a", "victim"); err != nil || n != 2 {
+	n, err = s.CountUnusedRecoveryCodes(ctx, "tenant-a", "victim")
+	if err != nil || n != 2 {
 		t.Errorf("victim has %d unused recovery codes (%v), want 2", n, err)
 	}
 

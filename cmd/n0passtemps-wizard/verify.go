@@ -157,10 +157,10 @@ func runVerify(args []string) error {
 		fmt.Printf("  both in    %s\n\n", placed)
 	}
 
-	if err := checkIntegrity(db, *dbPath); err != nil {
+	if err = checkIntegrity(db, *dbPath); err != nil {
 		return err
 	}
-	if err := reportSchema(db, *dbPath); err != nil {
+	if err = reportSchema(db, *dbPath); err != nil {
 		return err
 	}
 
@@ -170,7 +170,7 @@ func runVerify(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := reportCensus(censuses, versions); err != nil {
+	if err = reportCensus(censuses, versions); err != nil {
 		return err
 	}
 	unsealed, err := unsealSample(sealer, censuses)

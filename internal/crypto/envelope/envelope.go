@@ -86,7 +86,7 @@ func (s *Sealer) Seal(plaintext []byte) ([]byte, error) {
 	defer zeroize.Bytes(kekKey)
 
 	dek := make([]byte, keySize)
-	if _, err := rand.Read(dek); err != nil {
+	if _, err = rand.Read(dek); err != nil {
 		return nil, fmt.Errorf("envelope: generate dek: %w", err)
 	}
 	defer zeroize.Bytes(dek)
@@ -96,7 +96,7 @@ func (s *Sealer) Seal(plaintext []byte) ([]byte, error) {
 	binary.BigEndian.PutUint32(out[1:5], kekVersion)
 
 	wrapNonce := out[5 : 5+nonceSize]
-	if _, err := rand.Read(wrapNonce); err != nil {
+	if _, err = rand.Read(wrapNonce); err != nil {
 		return nil, fmt.Errorf("envelope: generate wrap nonce: %w", err)
 	}
 
@@ -108,7 +108,7 @@ func (s *Sealer) Seal(plaintext []byte) ([]byte, error) {
 	kekGCM.Seal(out[5+nonceSize:5+nonceSize], wrapNonce, dek, out[:5])
 
 	payloadNonce := make([]byte, nonceSize)
-	if _, err := rand.Read(payloadNonce); err != nil {
+	if _, err = rand.Read(payloadNonce); err != nil {
 		return nil, fmt.Errorf("envelope: generate payload nonce: %w", err)
 	}
 	out = append(out, payloadNonce...)
@@ -250,7 +250,7 @@ func (s *Sealer) Rewrap(sealed []byte) ([]byte, error) {
 	binary.BigEndian.PutUint32(out[1:5], newVersion)
 
 	wrapNonce := out[5 : 5+nonceSize]
-	if _, err := rand.Read(wrapNonce); err != nil {
+	if _, err = rand.Read(wrapNonce); err != nil {
 		return nil, fmt.Errorf("envelope: generate wrap nonce: %w", err)
 	}
 	newGCM, err := newGCM(newKey)

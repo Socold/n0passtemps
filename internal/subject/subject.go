@@ -182,11 +182,10 @@ func (s *Service) Resolve(ctx context.Context, tenantID, ref, displayName string
 	}
 
 	if s.cfg.SealReference {
-		sealed, err := s.sealer.Seal([]byte(ref))
+		sub.RefSealed, err = s.sealer.Seal([]byte(ref))
 		if err != nil {
 			return nil, fmt.Errorf("subject: seal reference: %w", err)
 		}
-		sub.RefSealed = sealed
 	}
 
 	created, err := s.store.UpsertSubject(ctx, sub)

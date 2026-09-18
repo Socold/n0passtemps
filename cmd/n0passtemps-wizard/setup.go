@@ -85,7 +85,8 @@ func runSetup(args []string) error {
 	a.Lite = lite
 	a.Deployment = "sqlite"
 	if !lite {
-		pg, err := promptYesNo(in, "Use PostgreSQL rather than SQLite?", false)
+		var pg bool
+		pg, err = promptYesNo(in, "Use PostgreSQL rather than SQLite?", false)
 		if err != nil {
 			return err
 		}
@@ -100,12 +101,13 @@ func runSetup(args []string) error {
 	fmt.Print("\nThe relying party identifier is a bare domain, not a URL and not a host\n" +
 		"with a port. Use \"localhost\" for local development.\n")
 	for {
-		v, err := prompt(in, "Relying party identifier", "localhost")
+		var v string
+		v, err = prompt(in, "Relying party identifier", "localhost")
 		if err != nil {
 			return err
 		}
 		a.RPID = v
-		if err := probeRPID(v); err != nil {
+		if err = probeRPID(v); err != nil {
 			fmt.Printf("  %v\n", err)
 			continue
 		}
@@ -119,12 +121,13 @@ func runSetup(args []string) error {
 	fmt.Print("\nThe origin is where your front end is served from, scheme and port included.\n" +
 		"WebAuthn refuses a ceremony from anywhere else.\n")
 	for {
-		v, err := prompt(in, "Allowed origin", defaultOrigin)
+		var v string
+		v, err = prompt(in, "Allowed origin", defaultOrigin)
 		if err != nil {
 			return err
 		}
 		a.Origin = v
-		if err := probeOrigin(v, a.RPID); err != nil {
+		if err = probeOrigin(v, a.RPID); err != nil {
 			fmt.Printf("  %v\n", err)
 			continue
 		}

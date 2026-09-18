@@ -76,7 +76,7 @@ func newFixture(t *testing.T, tune ...func(*config.WebAuthn)) *fixture {
 	t.Cleanup(func() { _ = st.Close() })
 
 	ctx := context.Background()
-	if err := st.Migrate(ctx); err != nil {
+	if err = st.Migrate(ctx); err != nil {
 		t.Fatalf("migrate store: %v", err)
 	}
 
@@ -325,7 +325,7 @@ func TestRegistrationChallengeIsSingleUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.svc.CompleteRegistration(f.ctx, sub, begin.ChallengeID, resp, ""); err != nil {
+	if _, err = f.svc.CompleteRegistration(f.ctx, sub, begin.ChallengeID, resp, ""); err != nil {
 		t.Fatalf("first completion refused: %v", err)
 	}
 
@@ -349,7 +349,7 @@ func TestAssertionChallengeIsSingleUseSoAReplayedAssertionIsRefused(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.svc.CompleteAssertion(f.ctx, sub, begin.ChallengeID, resp); err != nil {
+	if _, err = f.svc.CompleteAssertion(f.ctx, sub, begin.ChallengeID, resp); err != nil {
 		t.Fatalf("first completion refused: %v", err)
 	}
 	before := f.storedCredential(cred.ID)
@@ -949,7 +949,7 @@ func TestCredentialLimitExcludeListAndCrossSubjectUniqueness(t *testing.T) {
 		t.Errorf("excludeCredentials %v does not name the credential already enrolled: "+
 			"the same authenticator could be enrolled twice", excluded)
 	}
-	if _, err := first.create(begin.Options); !errors.Is(err, errCredentialExcluded) {
+	if _, err = first.create(begin.Options); !errors.Is(err, errCredentialExcluded) {
 		t.Errorf("the enrolled authenticator answered a creation request that excludes it (err=%v)", err)
 	}
 
@@ -958,7 +958,7 @@ func TestCredentialLimitExcludeListAndCrossSubjectUniqueness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.svc.CompleteRegistration(f.ctx, alice, begin.ChallengeID, resp, ""); err != nil {
+	if _, err = f.svc.CompleteRegistration(f.ctx, alice, begin.ChallengeID, resp, ""); err != nil {
 		t.Fatalf("second credential, within the limit of 2, was refused: %v", err)
 	}
 
@@ -1021,7 +1021,7 @@ func TestRevokedCredentialCannotAssert(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := f.store.RevokeCredential(f.ctx, testTenant, cred.ID, "lost", f.clock.now()); err != nil {
+		if err = f.store.RevokeCredential(f.ctx, testTenant, cred.ID, "lost", f.clock.now()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1051,7 +1051,7 @@ func TestRevokedCredentialCannotAssert(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := lost.get(begin.Options); !errors.Is(err, errNoMatchingCredential) {
+		if _, err = lost.get(begin.Options); !errors.Is(err, errNoMatchingCredential) {
 			t.Errorf("the allow list still offers the revoked credential (err=%v)", err)
 		}
 
@@ -1104,7 +1104,7 @@ func TestLockedSubjectCannotBeginOrCompleteEitherCeremony(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := f.store.SetSubjectStatus(f.ctx, testTenant, sub.ID, store.SubjectLocked); err != nil {
+	if err = f.store.SetSubjectStatus(f.ctx, testTenant, sub.ID, store.SubjectLocked); err != nil {
 		t.Fatal(err)
 	}
 	locked := f.reload(sub)
@@ -1112,17 +1112,17 @@ func TestLockedSubjectCannotBeginOrCompleteEitherCeremony(t *testing.T) {
 		t.Fatal("the subject is still active after being locked")
 	}
 
-	if _, err := f.svc.BeginRegistration(f.ctx, locked, ""); !errors.Is(err, webauthn.ErrSubjectInactive) {
+	if _, err = f.svc.BeginRegistration(f.ctx, locked, ""); !errors.Is(err, webauthn.ErrSubjectInactive) {
 		t.Errorf("BeginRegistration for a locked subject returned %v, want ErrSubjectInactive", err)
 	}
-	if _, err := f.svc.BeginAssertion(f.ctx, locked); !errors.Is(err, webauthn.ErrSubjectInactive) {
+	if _, err = f.svc.BeginAssertion(f.ctx, locked); !errors.Is(err, webauthn.ErrSubjectInactive) {
 		t.Errorf("BeginAssertion for a locked subject returned %v, want ErrSubjectInactive", err)
 	}
-	if _, err := f.svc.CompleteRegistration(f.ctx, locked, reg.ChallengeID, regResp, ""); !errors.Is(err, webauthn.ErrSubjectInactive) {
+	if _, err = f.svc.CompleteRegistration(f.ctx, locked, reg.ChallengeID, regResp, ""); !errors.Is(err, webauthn.ErrSubjectInactive) {
 		t.Errorf("CompleteRegistration for a locked subject returned %v, want ErrSubjectInactive: "+
 			"a lock must stop an attacker enrolling a key through a ceremony opened beforehand", err)
 	}
-	if _, err := f.svc.CompleteAssertion(f.ctx, locked, login.ChallengeID, loginResp); !errors.Is(err, webauthn.ErrSubjectInactive) {
+	if _, err = f.svc.CompleteAssertion(f.ctx, locked, login.ChallengeID, loginResp); !errors.Is(err, webauthn.ErrSubjectInactive) {
 		t.Errorf("CompleteAssertion for a locked subject returned %v, want ErrSubjectInactive: "+
 			"a lock must stop a login through a ceremony opened beforehand", err)
 	}
@@ -1270,7 +1270,7 @@ func TestDiscoverableAssertionRefusesAMismatchedUserHandle(t *testing.T) {
 	// passes with the service's own comparison removed; the comparison stays
 	// because the property should not rest on one dependency.
 	var body map[string]any
-	if err := json.Unmarshal(resp, &body); err != nil {
+	if err = json.Unmarshal(resp, &body); err != nil {
 		t.Fatal(err)
 	}
 	bobHandle := userHandleOf(t, bob.ID)
@@ -1307,7 +1307,7 @@ func TestNamedAndDiscoverableChallengesAreNotInterchangeable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := f.svc.CompleteDiscoverableAssertion(f.ctx, testTenant, named.ChallengeID, resp); !errors.Is(err, webauthn.ErrCeremonyFailed) {
+	if _, _, err = f.svc.CompleteDiscoverableAssertion(f.ctx, testTenant, named.ChallengeID, resp); !errors.Is(err, webauthn.ErrCeremonyFailed) {
 		t.Errorf("named challenge through the usernameless route returned %v, want ErrCeremonyFailed", err)
 	}
 

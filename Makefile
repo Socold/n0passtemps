@@ -147,7 +147,7 @@ lint: ## Run golangci-lint with the repository configuration
 # to the set in .golangci.yml instead of replacing it: a target written the
 # other way round silently ran every linter and passed while three categories
 # were failing.
-UNCLEARED_LINTERS ?= govet,revive,gocritic,gocyclo
+UNCLEARED_LINTERS ?= revive,gocritic,gocyclo
 
 lint-cleared: ## Run every linter except the budget categories that still have findings
 	@$(call require_tool,golangci-lint,github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION))

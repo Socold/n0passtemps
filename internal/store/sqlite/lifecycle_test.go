@@ -49,13 +49,13 @@ func TestRestoreSubjectOnlyUndoesAnErasure(t *testing.T) {
 
 	// Restoring twice, or restoring a subject that was never deleted, is not
 	// a restore.
-	if err := s.RestoreSubject(ctx, "tenant-a", "subject-1", now); !errors.Is(err, store.ErrNotFound) {
+	if err = s.RestoreSubject(ctx, "tenant-a", "subject-1", now); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("second restore = %v, want ErrNotFound", err)
 	}
-	if err := s.SetSubjectStatus(ctx, "tenant-a", "subject-2", store.SubjectLocked); err != nil {
+	if err = s.SetSubjectStatus(ctx, "tenant-a", "subject-2", store.SubjectLocked); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RestoreSubject(ctx, "tenant-a", "subject-2", now); !errors.Is(err, store.ErrNotFound) {
+	if err = s.RestoreSubject(ctx, "tenant-a", "subject-2", now); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("restore reactivated a LOCKED subject: %v", err)
 	}
 	locked, err := s.GetSubject(ctx, "tenant-a", "subject-2")

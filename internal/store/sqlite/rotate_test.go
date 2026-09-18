@@ -267,7 +267,7 @@ func TestRotateAdminToken(t *testing.T) {
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("rotating a revoked token = %v, want ErrNotFound", err)
 	}
-	if err := s.RotateAdminToken(ctx, "tenant-a", "old",
+	if err = s.RotateAdminToken(ctx, "tenant-a", "old",
 		adminTokenSuccessor("tenant-a", "new-4", store.Role("admin_root")), cutoff); err == nil {
 		t.Error("a successor with an unknown role was accepted")
 	}

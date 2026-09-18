@@ -36,12 +36,12 @@ func (s *Store) RotateAPIKey(ctx context.Context, tenantID, predecessorID string
 		successor.CreatedAt = time.Now().UTC()
 	}
 
-	scopes, err := encodeJSONArray(successor.Scopes)
-	if err != nil {
-		return err
+	scopes, scopesErr := encodeJSONArray(successor.Scopes)
+	if scopesErr != nil {
+		return scopesErr
 	}
 
-	err = s.rotateAuthnRow(ctx, "api_keys", tenantID, predecessorID, predecessorExpiresAt,
+	err := s.rotateAuthnRow(ctx, "api_keys", tenantID, predecessorID, predecessorExpiresAt,
 		func(tx *sql.Tx) error {
 			_, err := tx.ExecContext(ctx, `
 				INSERT INTO api_keys (`+apiKeyColumns+`)

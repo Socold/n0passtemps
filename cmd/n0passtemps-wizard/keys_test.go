@@ -17,7 +17,7 @@ func newSigningKey(t *testing.T, path string) ed25519.PrivateKey {
 	if err != nil {
 		t.Fatalf("GenerateKeyPEM: %v", err)
 	}
-	if err := os.WriteFile(path, privPEM, 0o600); err != nil {
+	if err = os.WriteFile(path, privPEM, 0o600); err != nil {
 		t.Fatalf("write signing key: %v", err)
 	}
 	priv, err := assertion.LoadPrivateKeyPEM(path)

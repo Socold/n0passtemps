@@ -116,10 +116,10 @@ func LoadFileProvider(path string, dataDirs ...string) (*FileProvider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("kek: stat %q: %w", abs, err)
 	}
-	if err := checkPermissions(abs, info.Mode()); err != nil {
+	if err = checkPermissions(abs, info.Mode()); err != nil {
 		return nil, err
 	}
-	if err := checkNotInDataDir(abs, dataDirs); err != nil {
+	if err = checkNotInDataDir(abs, dataDirs); err != nil {
 		return nil, err
 	}
 
