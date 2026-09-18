@@ -45,6 +45,7 @@ func (s *Server) Routes() http.Handler {
 		// than a bearer token, so it is mounted with the network allow list
 		// but outside the token middleware.
 		mux.Handle("/admin/", Chain(s.deps.AdminUI,
+			RouteLabel(),
 			IPAllowList(cfg.Admin.IPAllowList),
 			NoStore(),
 		))
@@ -52,9 +53,9 @@ func (s *Server) Routes() http.Handler {
 
 	// A request that matches no route still passes through the outer chain, so
 	// it gets a request identifier, a log line and the security headers.
-	mux.Handle("/", wrap(func(w http.ResponseWriter, r *http.Request) error {
+	mux.Handle("/", Chain(wrap(func(w http.ResponseWriter, r *http.Request) error {
 		return NotFound(nil)
-	}))
+	}), RouteLabel()))
 
 	hsts := 0
 	if cfg.Server.TLSCertFile != "" || cfg.Server.TrustProxy {
@@ -81,13 +82,13 @@ func (s *Server) Routes() http.Handler {
 // public keys, and an integrating application has to fetch it in order to
 // verify an assertion offline.
 func (s *Server) mountUnauthenticated(mux *http.ServeMux) {
-	mux.Handle("GET /v1/health", wrap(s.handleLiveness))
-	mux.Handle("GET /v1/.well-known/jwks.json", wrap(s.handleJWKS))
+	mux.Handle("GET /v1/health", Chain(wrap(s.handleLiveness), RouteLabel()))
+	mux.Handle("GET /v1/.well-known/jwks.json", Chain(wrap(s.handleJWKS), RouteLabel()))
 
 	// Served at both paths because the well-known prefix is what the JWKS
 	// convention specifies, while integrations frequently look for the shorter
 	// form. Two routes are cheaper than a support question nobody can ask.
-	mux.Handle("GET /v1/jwks.json", wrap(s.handleJWKS))
+	mux.Handle("GET /v1/jwks.json", Chain(wrap(s.handleJWKS), RouteLabel()))
 }
 
 // mountPublic registers the routes an integrating application calls.
@@ -102,6 +103,7 @@ func (s *Server) mountPublic(mux *http.ServeMux) {
 	// route that forgot would not compile into anything callable.
 	authed := func(scope Scope, h handler) http.Handler {
 		return Chain(wrap(h),
+			RouteLabel(),
 			CORS(s.deps.Config.Server.CORSAllowedOrigins),
 			s.auth.RequireAPIKey(),
 			s.RequireScope(scope),
@@ -181,6 +183,7 @@ func (s *Server) mountAdmin(mux *http.ServeMux) {
 
 	guarded := func(p rbac.Permission, h handler) http.Handler {
 		return Chain(wrap(h),
+			RouteLabel(),
 			IPAllowList(cfg.Admin.IPAllowList),
 			s.auth.RequireAdmin(),
 			s.auth.RequirePermission(p, cfg.Features.AdminRBAC),

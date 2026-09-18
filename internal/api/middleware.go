@@ -151,6 +151,14 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
 // RequestLog logs one line per request and attaches a request-scoped logger.
+//
+// The route is deliberately not among the attributes set here. This middleware
+// wraps the multiplexer from outside, and the multiplexer is what fills in
+// Request.Pattern, as it dispatches. At this point there is only the concrete
+// path, and the concrete path is what carries a subject reference on the
+// ceremony routes. RouteLabel adds the field once routing has happened; the
+// summary line below reads the pattern after the handler has returned, by which
+// time it is set on the request the multiplexer was given.
 func RequestLog(root *slog.Logger) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -159,7 +167,6 @@ func RequestLog(root *slog.Logger) Middleware {
 			log := root.With(
 				slog.String(logging.KeyRequestID, RequestIDFrom(r.Context())),
 				slog.String(logging.KeyMethod, r.Method),
-				slog.String(logging.KeyRoute, routePattern(r)),
 			)
 			if ip := SourceIPFrom(r.Context()); ip != "" {
 				log = log.With(slog.String(logging.KeySourceIP, ip))
@@ -168,16 +175,41 @@ func RequestLog(root *slog.Logger) Middleware {
 			ctx := logging.WithLogger(r.Context(), log)
 			rec := &statusRecorder{ResponseWriter: w}
 
-			next.ServeHTTP(rec, r.WithContext(ctx))
+			routed := r.WithContext(ctx)
+			next.ServeHTTP(rec, routed)
 
 			if rec.status == 0 {
 				rec.status = http.StatusOK
 			}
 			log.InfoContext(ctx, "request",
+				slog.String(logging.KeyRoute, routePattern(routed)),
 				slog.Int(logging.KeyStatus, rec.status),
 				slog.Int64(logging.KeyDurationMS, time.Since(start).Milliseconds()),
 				slog.Int64("bytes", rec.written),
 			)
+		})
+	}
+}
+
+// RouteLabel adds the matched route to the request-scoped logger.
+//
+// It is mounted inside the multiplexer, on every route, because that is the
+// first moment the route is known. Putting it in the outer chain is what
+// produced the defect it exists to fix: the field held the path a caller asked
+// for, which on the ceremony routes is the subject reference, so redaction
+// covered subject_ref and an address travelled in the field next to it.
+//
+// It is a middleware rather than something wrap does, so that the lines written
+// by authentication and authorisation carry the route as well. Those are the
+// lines an operator reads when a request was refused, and "refused which
+// route" is the first question.
+func RouteLabel() Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			log := logging.FromContext(r.Context()).With(
+				slog.String(logging.KeyRoute, routePattern(r)),
+			)
+			next.ServeHTTP(w, r.WithContext(logging.WithLogger(r.Context(), log)))
 		})
 	}
 }
