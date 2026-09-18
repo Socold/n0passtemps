@@ -5,6 +5,81 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Rotating the assertion signing key without an outage.**
+  `assertion.retired_public_key_paths` lists Ed25519 public keys the service
+  publishes at `/v1/.well-known/jwks.json` and never signs with, and
+  `n0passtemps-wizard assertion-key rotate` performs the swap.
+
+  The threat model has named one key as a single point of forgery since 1.0.0,
+  and named rotation as the mitigation. The service could not perform one. It
+  published exactly one key, so the outgoing key stopped verifying at the instant
+  it stopped signing: every assertion issued in the last minute was refused, and
+  so was every assertion reaching an application whose cached copy of the key set
+  predated the restart. An operator who suspected a theft had to choose between
+  leaving the forgery window open and causing an outage, and a mitigation that
+  costs an outage is one that gets postponed. The comment on `KeyID` has claimed
+  since 1.0.0 that two keys could be published side by side during a rotation;
+  nothing could publish them.
+
+  The `kid` header selects between the keys, so no verifier changes and none of
+  the three SDKs does either. The window has to close, because a retired key goes
+  on verifying whatever its private half signs, which is the thing the rotation
+  exists to stop. Closing it is the operator's act rather than a timer: a service
+  that withdrew a key on a schedule would refuse assertions during a clock
+  problem. What pushes against forgetting is a warning at every start naming the
+  retired key identifiers, since the configuration is the only record that a
+  window is open. The validator refuses an empty entry, a repeated path and the
+  signing key's own path, and the loader refuses a private key given where a
+  public one was expected, because the file is published to every caller.
+
+  `assertion-key rotate` loads the outgoing key before it writes anything, keeps
+  both halves beside the new key, replaces the live key last and prints the
+  configuration line with the arithmetic for the window. Everything that can fail
+  happens before the live key is touched, so a refused rotation leaves the
+  deployment as it was. The published half is derived from the key that was
+  loaded rather than copied from disk, so what is published is provably the key
+  that was signing.
+
+  See [ADR 0018](docs/adr/0018-reducing-the-blast-radius-of-a-central-key.md),
+  which also records what this deliberately does not do: a second signing key in
+  the same trust domain is one key, dual approval constrains the API and not the
+  filesystem, and the version worth building is a signer the process calls rather
+  than a file it opens.
+
+- **[docs/SIEM.md](docs/SIEM.md)**, the integration document: the two streams and
+  what each is for, the field mapping to ECS 8 and OCSF 1, the closed audit event
+  vocabulary, the receiver contract for `audit.sink`, and a starting set of
+  rules.
+
+  It also says why there is no syslog client here and gives the journald and
+  rsyslog configuration that does the job instead, including the message size
+  limit that silently truncates a long line into JSON that parses as nothing.
+
+  The vocabulary is published as a closed set, so it is checked against
+  `internal/audit/events.go` by a test rather than by hand, in both directions.
+
+### Fixed
+
+- **Two audit event types were not part of the vocabulary.**
+  `admin.subjects_listed` and `admin.subject_ref_revealed` existed only as string
+  literals at four call sites, one of them already quoted in
+  [docs/MONITORING.md](docs/MONITORING.md) as a query worth saving. The package
+  comment says the names are constants because they are written into a persisted,
+  hash-covered record and renaming one silently changes the meaning of history; a
+  typo at one of four literals would have created a second event family that no
+  saved query selects. They are constants now.
+
+- **The release workflow was a file GitHub refuses.** The rewrite that turned the
+  release into draft, fill, verify, publish left the previous action's `uses` and
+  `with` block attached to the step that replaced it. A step cannot both run a
+  script and use an action, so every push produced a run that failed in zero
+  seconds with no log. It was never seen because the file had not been pushed. No
+  release was ever cut from it.
+
 ## [1.1.0] - 2026-09-18
 
 ### Added

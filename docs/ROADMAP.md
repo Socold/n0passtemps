@@ -11,8 +11,9 @@ idea.
 |---|---|
 | 0, foundations | Done |
 | 1, authentication core | Done, see the two notes below |
-| Launch | Tagged `v1.0.0`, then `v1.1.0`. Registry publication below is the maintainer's |
+| Launch | Tagged `v1.0.0`, then `v1.1.0`, both published from the release workflow. Registry publication below is the maintainer's |
 | 2, this document | Complete. All three specified themes answered, and all five candidates of 2.4 landed |
+| 3, a key the process cannot read | Part one landed, part two rejected, part three waits on hardware to test it against. See below and [ADR 0018](adr/0018-reducing-the-blast-radius-of-a-central-key.md) |
 | 6, hosted offering | Not started, and not planned before the on-premise product has users |
 | Maintenance | The style budget below is the only work this document still owes |
 
@@ -281,6 +282,38 @@ its single-writer property serialises the statement that takes the lease and
 never the sweep it guards, so it coordinates nothing by itself; one process to
 one file remains the only supported arrangement and the lease is what stands
 between two processes that share a file anyway.
+
+## Phase 3, a key the process cannot read
+
+[ADR 0018](adr/0018-reducing-the-blast-radius-of-a-central-key.md) answers what
+to do about the two keys whose loss nothing else here recovers from. Part one of
+that record has landed: rotating the assertion signing key is now an operation
+rather than a choice between a forgery window and an outage. Part two is
+rejected by name, because a second signing key held by the same process on the
+same host is one key with an extra file to steal.
+
+Part three is the one left, and it is the only one that changes what a host
+compromise costs. `assertion.Issuer` needs a signer rather than a private key,
+and `envelope.Sealer` already reaches its KEK through an interface with
+`Current` and `ByVersion`. Behind those two seams a deployment could put a
+PKCS#11 token, a cloud KMS or a TPM, and the key would stop being readable at
+all: a compromise becomes the ability to *use* the key while it lasts, bounded
+by eviction, counted by the device and logged where the operator of this host
+cannot rewrite it.
+
+**Why it is not in the next release.** A PKCS#11 backend nobody has run against
+real hardware is a configuration option that fails in production, and this
+project has no hardware to test it on. A KMS backend puts a network call on the
+assertion path and needs its own design for what happens when that call is slow,
+and it contradicts the product's argument unless it stays optional. Either one
+deserves a record with a working implementation behind it rather than a
+paragraph here, and the seam has to be introduced by the first backend that
+proves it fits, not before.
+
+**What is cheap and worth doing first**, whichever backend comes: give the
+signer seam a single in-process implementation and move `Issuer` onto it, so
+that the interface is exercised by the tests that already exist before anything
+depends on it being right.
 
 ## Maintenance backlog
 
