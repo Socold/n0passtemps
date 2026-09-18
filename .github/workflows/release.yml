@@ -170,11 +170,19 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # A tag matching v*-rc*, v*-beta* and similar is published as a
+          # prerelease so it is not offered as the current version.
+          case "${GITHUB_REF_NAME}" in
+            *-*) prerelease=true ;;
+            *) prerelease=false ;;
+          esac
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release edit "${GITHUB_REF_NAME}" --draft --notes-file RELEASE_NOTES.md
+            gh release edit "${GITHUB_REF_NAME}" \
+              --draft --prerelease="${prerelease}" --notes-file RELEASE_NOTES.md
           else
             gh release create "${GITHUB_REF_NAME}" \
-              --draft --title "${GITHUB_REF_NAME}" --notes-file RELEASE_NOTES.md
+              --draft --prerelease="${prerelease}" \
+              --title "${GITHUB_REF_NAME}" --notes-file RELEASE_NOTES.md
           fi
 
       - name: Upload the archives
@@ -223,15 +231,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release edit "${GITHUB_REF_NAME}" --draft=false
-
-        uses: softprops/action-gh-release@c062e08bd532815e2082a85e87e3ef29c3e6d191 # v2.0.8
-        with:
-          body_path: RELEASE_NOTES.md
-          files: assets/*
-          # A tag matching v*-rc*, v*-beta* and similar is published as a
-          # prerelease so it is not offered as the current version.
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          fail_on_unmatched_files: true
 
   image:
     name: build and push the container image
