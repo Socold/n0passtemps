@@ -1032,3 +1032,289 @@ func jwkString(t *testing.T, jwk map[string]any, member string) string {
 	}
 	return v
 }
+
+// TestJWKSPublishesRetiredKeys is the test the whole feature exists for: a
+// token minted under the outgoing key still verifies against the document the
+// service publishes after the signing key has been replaced.
+func TestJWKSPublishesRetiredKeys(t *testing.T) {
+	oldPub, oldPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	_, newPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	// The issuer as it was before the rotation, used only to mint a token that
+	// is still inside its lifetime when the rotation happens.
+	before, err := NewIssuer(oldPriv, testIssuer, testTTL, testSkew)
+	if err != nil {
+		t.Fatalf("NewIssuer: %v", err)
+	}
+	before.now = func() time.Time { return fixedNow }
+	inFlight, _, err := before.Issue(testSubject, "", testAudience, []Factor{FactorWebAuthn}, nil)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	after, err := NewIssuer(newPriv, testIssuer, testTTL, testSkew, WithRetiredKeys(oldPub))
+	if err != nil {
+		t.Fatalf("NewIssuer with retired key: %v", err)
+	}
+	after.now = func() time.Time { return fixedNow }
+
+	raw, err := after.JWKS()
+	if err != nil {
+		t.Fatalf("JWKS: %v", err)
+	}
+	keys := jwksKeys(t, raw)
+	if len(keys) != 2 {
+		t.Fatalf("jwks has %d keys, want 2", len(keys))
+	}
+	// The signing key leads, so a reader can tell which one is live.
+	if got := jwkString(t, keys[0], "kid"); got != after.KeyID() {
+		t.Errorf("first jwk kid = %q, want the signing key %q", got, after.KeyID())
+	}
+	if got := jwkString(t, keys[1], "kid"); got != Thumbprint(oldPub) {
+		t.Errorf("second jwk kid = %q, want the retired key %q", got, Thumbprint(oldPub))
+	}
+	if strings.Contains(string(raw), `"d"`) {
+		t.Errorf("jwks contains a private key parameter: %s", raw)
+	}
+
+	// Both the in-flight token and a fresh one verify against the published set.
+	v := NewVerifier(verifierFromJWKS(t, raw), testIssuer, testSkew)
+	v.now = func() time.Time { return fixedNow.Add(time.Second) }
+
+	if _, err := v.Verify(inFlight, testAudience); err != nil {
+		t.Fatalf("a token minted under the retired key was refused after rotation: %v", err)
+	}
+	fresh, _, err := after.Issue(testSubject, "", testAudience, []Factor{FactorWebAuthn}, nil)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if _, err := v.Verify(fresh, testAudience); err != nil {
+		t.Fatalf("a token minted under the new key was refused: %v", err)
+	}
+
+	// Dropping the retired entry is what ends the window, and it has to end:
+	// after it, the outgoing key verifies nothing.
+	closed, err := NewIssuer(newPriv, testIssuer, testTTL, testSkew)
+	if err != nil {
+		t.Fatalf("NewIssuer: %v", err)
+	}
+	closedRaw, err := closed.JWKS()
+	if err != nil {
+		t.Fatalf("JWKS: %v", err)
+	}
+	vClosed := NewVerifier(verifierFromJWKS(t, closedRaw), testIssuer, testSkew)
+	vClosed.now = func() time.Time { return fixedNow.Add(time.Second) }
+	if _, err := vClosed.Verify(inFlight, testAudience); err == nil {
+		t.Fatal("a token minted under the retired key still verified once the key was withdrawn")
+	}
+}
+
+func TestJWKSRetiredKeyOrderIsStable(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	var retired []ed25519.PublicKey
+	for range 4 {
+		pub, _, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatalf("GenerateKey: %v", err)
+		}
+		retired = append(retired, pub)
+	}
+
+	// The same keys in a different order must produce the same document, so a
+	// cached copy and a freshly fetched one compare equal.
+	first, err := NewIssuer(priv, testIssuer, testTTL, testSkew, WithRetiredKeys(retired...))
+	if err != nil {
+		t.Fatalf("NewIssuer: %v", err)
+	}
+	reversed := make([]ed25519.PublicKey, len(retired))
+	for n, k := range retired {
+		reversed[len(retired)-1-n] = k
+	}
+	second, err := NewIssuer(priv, testIssuer, testTTL, testSkew, WithRetiredKeys(reversed...))
+	if err != nil {
+		t.Fatalf("NewIssuer: %v", err)
+	}
+
+	a, err := first.JWKS()
+	if err != nil {
+		t.Fatalf("JWKS: %v", err)
+	}
+	b, err := second.JWKS()
+	if err != nil {
+		t.Fatalf("JWKS: %v", err)
+	}
+	if string(a) != string(b) {
+		t.Errorf("jwks depends on the order the retired keys were listed:\n%s\n%s", a, b)
+	}
+
+	kids := first.RetiredKeyIDs()
+	if len(kids) != len(retired) {
+		t.Fatalf("RetiredKeyIDs returned %d, want %d", len(kids), len(retired))
+	}
+	for n := 1; n < len(kids); n++ {
+		if kids[n-1] >= kids[n] {
+			t.Errorf("RetiredKeyIDs is not sorted: %q then %q", kids[n-1], kids[n])
+		}
+	}
+}
+
+func TestWithRetiredKeysRejectsBadArguments(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	other, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	cases := []struct {
+		name    string
+		retired []ed25519.PublicKey
+		want    string
+	}{
+		{"the signing key itself", []ed25519.PublicKey{pub}, "is the signing key"},
+		{"the same key twice", []ed25519.PublicKey{other, other}, "listed twice"},
+		{"a key of the wrong length", []ed25519.PublicKey{other[:16]}, "want 32"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewIssuer(priv, testIssuer, testTTL, testSkew, WithRetiredKeys(tc.retired...))
+			if err == nil {
+				t.Fatal("NewIssuer accepted it")
+			}
+			if !errors.Is(err, ErrInvalidKey) {
+				t.Errorf("error is %v, want ErrInvalidKey", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadPublicKeyPEM(t *testing.T) {
+	dir := t.TempDir()
+
+	privPEM, pubPEM, err := GenerateKeyPEM()
+	if err != nil {
+		t.Fatalf("GenerateKeyPEM: %v", err)
+	}
+	pubPath := filepath.Join(dir, "public.pem")
+	if err := os.WriteFile(pubPath, pubPEM, 0o644); err != nil {
+		t.Fatalf("write public key: %v", err)
+	}
+
+	pub, err := LoadPublicKeyPEM(pubPath)
+	if err != nil {
+		t.Fatalf("LoadPublicKeyPEM: %v", err)
+	}
+	priv, err := parseTestPrivate(t, privPEM)
+	if err != nil {
+		t.Fatalf("parse private: %v", err)
+	}
+	if !pub.Equal(priv.Public()) {
+		t.Error("the loaded public key does not match the private key it was written with")
+	}
+
+	// A world-readable public key is fine: it is served to every caller.
+	if err := os.Chmod(pubPath, 0o644); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	if _, err := LoadPublicKeyPEM(pubPath); err != nil {
+		t.Errorf("a mode 0644 public key was refused: %v", err)
+	}
+
+	ecPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("ecdsa.GenerateKey: %v", err)
+	}
+	ecDER, err := x509.MarshalPKIXPublicKey(&ecPriv.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal ec public: %v", err)
+	}
+
+	bad := []struct {
+		name    string
+		content []byte
+		want    string
+	}{
+		{"a private key", privPEM, "holds a private key"},
+		{"no pem block", []byte("not a key"), "contains no PEM block"},
+		{"trailing data", append(append([]byte(nil), pubPEM...), []byte("second block\n")...), "trailing data"},
+		{"an unexpected label", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte{1, 2, 3}}), `expected "PUBLIC KEY"`},
+		{"a p-256 key", pem.EncodeToMemory(&pem.Block{Type: pemTypePublic, Bytes: ecDER}), "only Ed25519"},
+	}
+	for _, tc := range bad {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "key.pem")
+			if err := os.WriteFile(p, tc.content, 0o644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			_, err := LoadPublicKeyPEM(p)
+			if err == nil {
+				t.Fatal("LoadPublicKeyPEM accepted it")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not mention %q", err, tc.want)
+			}
+		})
+	}
+
+	if _, err := LoadPublicKeyPEM(filepath.Join(dir, "absent.pem")); err == nil {
+		t.Error("a missing file was accepted")
+	}
+}
+
+// jwksKeys decodes a published JWK Set into its members, in document order.
+func jwksKeys(t *testing.T, raw []byte) []map[string]any {
+	t.Helper()
+	var set struct {
+		Keys []map[string]any `json:"keys"`
+	}
+	if err := json.Unmarshal(raw, &set); err != nil {
+		t.Fatalf("unmarshal jwks: %v", err)
+	}
+	return set.Keys
+}
+
+// verifierFromJWKS builds the key map a Verifier takes from a published
+// document, the way an integrating application would.
+func verifierFromJWKS(t *testing.T, raw []byte) map[string]ed25519.PublicKey {
+	t.Helper()
+	out := make(map[string]ed25519.PublicKey)
+	for _, k := range jwksKeys(t, raw) {
+		x, err := base64.RawURLEncoding.DecodeString(jwkString(t, k, "x"))
+		if err != nil {
+			t.Fatalf("decode x: %v", err)
+		}
+		out[jwkString(t, k, "kid")] = ed25519.PublicKey(x)
+	}
+	return out
+}
+
+func parseTestPrivate(t *testing.T, privPEM []byte) (ed25519.PrivateKey, error) {
+	t.Helper()
+	block, _ := pem.Decode(privPEM)
+	if block == nil {
+		t.Fatal("no pem block in the generated private key")
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	priv, ok := parsed.(ed25519.PrivateKey)
+	if !ok {
+		t.Fatalf("generated key is a %T", parsed)
+	}
+	return priv, nil
+}

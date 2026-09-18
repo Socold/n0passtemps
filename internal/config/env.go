@@ -140,6 +140,7 @@ func applyEnv(cfg *Config) error {
 
 	str("ASSERTION_ISSUER", &cfg.Assertion.Issuer)
 	str("ASSERTION_SIGNING_KEY_PATH", &cfg.Assertion.SigningKeyPath)
+	list("ASSERTION_RETIRED_PUBLIC_KEY_PATHS", &cfg.Assertion.RetiredPublicKeyPaths)
 	dur("ASSERTION_TTL", &cfg.Assertion.TTL)
 	dur("ASSERTION_ALLOWED_CLOCK_SKEW", &cfg.Assertion.AllowedClockSkew)
 

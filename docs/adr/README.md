@@ -28,6 +28,7 @@ superseded by a new record rather than edited in place. See
 | [0015](0015-enrolment-tickets-instead-of-magic-links.md) | Enrolment tickets instead of magic links | accepted |
 | [0016](0016-ship-the-audit-chain-to-an-external-witness.md) | Ship the audit chain to an external witness, and only the chain fields | accepted |
 | [0017](0017-administrative-sign-in-with-webauthn.md) | Administrative sign-in with WebAuthn, over a separate credential space | accepted |
+| [0018](0018-reducing-the-blast-radius-of-a-central-key.md) | Reducing the blast radius of a central key: rotate now, split later, and never pretend two files are two keys | accepted |
 
 Records 0013 and 0014 are of a different kind. The specification is silent on
 both questions, how an approved operation comes to run and where the first
@@ -48,3 +49,9 @@ not ask the administration interface to authenticate with WebAuthn; it is a
 roadmap item, and what the record fixes is the thing that makes it safe, namely
 that an administrative credential and a subject credential are separate spaces in
 both directions.
+
+Record 0018 is of the same kind again, and answers a question neither the
+specification nor the roadmap raises: what an operator does about the one key
+whose loss no other control here recovers from. It is the first record to say no
+to two designs by name, a second signing key and an enterprise-only edition, and
+the reasons are the point of writing it down.

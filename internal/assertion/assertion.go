@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -173,7 +174,8 @@ type joseHeader struct {
 	Crit []string `json:"crit"`
 }
 
-// Issuer signs assertions with one Ed25519 key.
+// Issuer signs assertions with one Ed25519 key, and publishes that key
+// alongside any number of retired ones.
 type Issuer struct {
 	priv ed25519.PrivateKey
 
@@ -193,8 +195,64 @@ type Issuer struct {
 	// Issuer produces, so it is built once.
 	header string
 
+	// retired holds public keys this Issuer publishes and never signs with,
+	// ordered by key identifier so that the JWK Set is byte-stable across
+	// restarts. See WithRetiredKeys.
+	retired []ed25519.PublicKey
+
 	// now is overridden in tests.
 	now func() time.Time
+}
+
+// IssuerOption adjusts an Issuer at construction.
+type IssuerOption func(*Issuer) error
+
+// WithRetiredKeys publishes verification keys that this Issuer will never sign
+// with.
+//
+// It is what makes rotating the signing key an operation rather than an
+// outage. A verifier caches the JWK Set, and an assertion names its key in the
+// "kid" header, so a rotation that replaces the document wholesale breaks every
+// token minted under the outgoing key that is still inside its lifetime, plus
+// every token reaching a verifier whose cached copy has not expired. Serving
+// both keys for one changeover window costs nothing and removes the outage.
+//
+// The window has to end. A retired public key cannot forge anything by itself,
+// but leaving it in the document for ever means a private key stolen a year ago
+// still mints tokens that verify, which is exactly the property rotation exists
+// to remove. The key is dropped from the configuration once the window has
+// passed; docs/CONFIGURATION.md says how long that window has to be and why.
+//
+// A key equal to the signing key is refused rather than ignored. It would
+// publish one key identifier twice, and an operator who listed it has almost
+// certainly rotated the file and not the configuration, which is the mistake
+// that leaves a compromised key published indefinitely.
+func WithRetiredKeys(keys ...ed25519.PublicKey) IssuerOption {
+	return func(i *Issuer) error {
+		seen := make(map[string]struct{}, len(keys)+1)
+		seen[i.kid] = struct{}{}
+		for n, k := range keys {
+			if len(k) != ed25519.PublicKeySize {
+				return fmt.Errorf("%w: retired key %d has %d bytes, want %d",
+					ErrInvalidKey, n+1, len(k), ed25519.PublicKeySize)
+			}
+			kid := Thumbprint(k)
+			if _, dup := seen[kid]; dup {
+				if kid == i.kid {
+					return fmt.Errorf("%w: retired key %d is the signing key; "+
+						"a rotation replaces the signing key and lists the previous one here",
+						ErrInvalidKey, n+1)
+				}
+				return fmt.Errorf("%w: retired key %d is listed twice", ErrInvalidKey, n+1)
+			}
+			seen[kid] = struct{}{}
+			i.retired = append(i.retired, append(ed25519.PublicKey(nil), k...))
+		}
+		sort.Slice(i.retired, func(a, b int) bool {
+			return Thumbprint(i.retired[a]) < Thumbprint(i.retired[b])
+		})
+		return nil
+	}
 }
 
 // NewIssuer returns an Issuer signing with priv.
@@ -203,7 +261,7 @@ type Issuer struct {
 // that a verifier whose clock lags slightly accepts a token immediately; it
 // does not extend "exp", because moving expiry later is the direction that
 // costs security.
-func NewIssuer(priv ed25519.PrivateKey, issuer string, ttl, skew time.Duration) (*Issuer, error) {
+func NewIssuer(priv ed25519.PrivateKey, issuer string, ttl, skew time.Duration, opts ...IssuerOption) (*Issuer, error) {
 	if len(priv) != ed25519.PrivateKeySize {
 		return nil, fmt.Errorf("%w: private key has %d bytes, want %d", ErrInvalidKey, len(priv), ed25519.PrivateKeySize)
 	}
@@ -227,7 +285,7 @@ func NewIssuer(priv ed25519.PrivateKey, issuer string, ttl, skew time.Duration) 
 	// gets signed must be fixed, and map iteration order is not.
 	header := encodeSegment([]byte(`{"alg":"` + algEdDSA + `","kid":"` + kid + `","typ":"` + typJWT + `"}`))
 
-	return &Issuer{
+	i := &Issuer{
 		priv:   priv,
 		pub:    pub,
 		issuer: issuer,
@@ -236,7 +294,15 @@ func NewIssuer(priv ed25519.PrivateKey, issuer string, ttl, skew time.Duration) 
 		kid:    kid,
 		header: header,
 		now:    time.Now,
-	}, nil
+	}
+	// Applied after kid is set, because an option that rejects a retired key
+	// for being the signing key has to know which key that is.
+	for _, opt := range opts {
+		if err := opt(i); err != nil {
+			return nil, err
+		}
+	}
+	return i, nil
 }
 
 // KeyID returns the JWK thumbprint of the signing key, per RFC 7638. It is the
@@ -346,24 +412,51 @@ type jwkSet struct {
 
 // JWKS returns the JWK Set document to publish, per RFC 7517 section 5.
 //
-// It contains the public key only. During a rotation an operator serves the
-// union of the sets of the outgoing and incoming issuers, and the "kid" of
-// each token selects between them.
+// It contains public keys only: the signing key first, then every key passed to
+// WithRetiredKeys. The "kid" of a token selects between them, so a verifier
+// needs no rule about ordering; the signing key leads because a reader looking
+// at the document wants to know which key is live, and the rest are sorted by
+// key identifier so that two fetches of an unchanged configuration return the
+// same bytes.
 func (i *Issuer) JWKS() ([]byte, error) {
-	pub := i.PublicKey()
-	set := jwkSet{Keys: []jwk{{
-		Kty: "OKP",
-		Crv: "Ed25519",
-		X:   encodeSegment(pub),
-		Use: "sig",
-		Alg: algEdDSA,
-		Kid: i.kid,
-	}}}
+	set := jwkSet{Keys: make([]jwk, 0, 1+len(i.retired))}
+	set.Keys = append(set.Keys, publicJWK(i.PublicKey(), i.kid))
+	for _, k := range i.retired {
+		set.Keys = append(set.Keys, publicJWK(k, Thumbprint(k)))
+	}
 	out, err := json.Marshal(set)
 	if err != nil {
 		return nil, fmt.Errorf("assertion: marshal jwks: %w", err)
 	}
 	return out, nil
+}
+
+// publicJWK renders one Ed25519 public key as the OKP members of RFC 8037
+// section 2.
+func publicJWK(pub ed25519.PublicKey, kid string) jwk {
+	return jwk{
+		Kty: "OKP",
+		Crv: "Ed25519",
+		X:   encodeSegment(pub),
+		Use: "sig",
+		Alg: algEdDSA,
+		Kid: kid,
+	}
+}
+
+// RetiredKeyIDs returns the key identifiers this Issuer publishes and does not
+// sign with, in the order JWKS emits them.
+//
+// It exists so a start can say out loud how many keys a verifier will accept.
+// A retired key nobody remembers listing is the failure this reports: the
+// configuration is the only record that a window is still open, and a window
+// that stays open indefinitely is the rotation not having finished.
+func (i *Issuer) RetiredKeyIDs() []string {
+	out := make([]string, 0, len(i.retired))
+	for _, k := range i.retired {
+		out = append(out, Thumbprint(k))
+	}
+	return out
 }
 
 // Thumbprint returns the RFC 7638 JWK thumbprint of an Ed25519 public key.
@@ -591,15 +684,89 @@ func LoadPrivateKeyPEM(path string) (ed25519.PrivateKey, error) {
 	return priv, nil
 }
 
+// LoadPublicKeyPEM reads an Ed25519 public key from a SubjectPublicKeyInfo PEM
+// file, which is the second file GenerateKeyPEM writes.
+//
+// Unlike its private counterpart it checks no file mode. A verification key is
+// public by definition: it is served to anyone who asks at the JWKS route, so
+// refusing to read one because it is world readable would be theatre. What it
+// does refuse is the mistake that matters, a private key given where a public
+// one was asked for, because that would put signing material into a document
+// this service publishes.
+func LoadPublicKeyPEM(path string) (ed25519.PublicKey, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("assertion: resolve %q: %w", path, err)
+	}
+
+	// #nosec G304 -- the path comes from assertion.retired_public_key_paths in the operator's configuration,
+	// and the contents are parsed as a public key and refused if they are anything else
+	raw, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, fmt.Errorf("assertion: read %q: %w", abs, err)
+	}
+
+	block, rest := pem.Decode(raw)
+	if block == nil {
+		return nil, fmt.Errorf("%w: %q contains no PEM block", ErrBadPEM, abs)
+	}
+	if block.Type == pemTypePrivate {
+		return nil, fmt.Errorf("%w: %q holds a private key, and a retired key is published to every caller; "+
+			"give the %q file written beside it", ErrBadPEM, abs, pemTypePublic)
+	}
+	if block.Type != pemTypePublic {
+		return nil, fmt.Errorf("%w: %q holds a %q block, expected %q",
+			ErrBadPEM, abs, block.Type, pemTypePublic)
+	}
+	// Refused for the same reason as in LoadPrivateKeyPEM: a second key sitting
+	// behind the first would be silently ignored, and an operator rotating the
+	// file would not see it.
+	if len(bytes.TrimSpace(rest)) != 0 {
+		return nil, fmt.Errorf("%w: %q has trailing data after the PEM block", ErrBadPEM, abs)
+	}
+
+	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %q: %v", ErrBadPEM, abs, err)
+	}
+	pub, ok := parsed.(ed25519.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("%w: %q holds a %T, and this package verifies only Ed25519", ErrNotEd25519, abs, parsed)
+	}
+	if len(pub) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("%w: %q holds %d bytes", ErrInvalidKey, abs, len(pub))
+	}
+	return pub, nil
+}
+
 // GenerateKeyPEM returns a fresh Ed25519 signing key as PKCS#8 PEM and its
 // public key as SubjectPublicKeyInfo PEM, for the setup wizard.
 //
 // The private PEM must be written with mode 0600, or LoadPrivateKeyPEM will
 // refuse it.
 func GenerateKeyPEM() (privPEM, pubPEM []byte, err error) {
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, nil, fmt.Errorf("assertion: generate key: %w", err)
+	}
+	return EncodeKeyPEM(priv)
+}
+
+// EncodeKeyPEM renders an existing key as the same pair of files
+// GenerateKeyPEM writes.
+//
+// It exists for a rotation, which has to put the outgoing key's public half
+// somewhere the service can go on publishing it. Deriving that half here rather
+// than copying a file the operator points at means the published key is
+// provably the one that was signing, and not whatever else that path held.
+func EncodeKeyPEM(priv ed25519.PrivateKey) (privPEM, pubPEM []byte, err error) {
+	if len(priv) != ed25519.PrivateKeySize {
+		return nil, nil, fmt.Errorf("%w: private key has %d bytes, want %d",
+			ErrInvalidKey, len(priv), ed25519.PrivateKeySize)
+	}
+	pub, ok := priv.Public().(ed25519.PublicKey)
+	if !ok {
+		return nil, nil, ErrNotEd25519
 	}
 
 	privDER, err := x509.MarshalPKCS8PrivateKey(priv)

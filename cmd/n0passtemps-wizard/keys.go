@@ -7,8 +7,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/Socold/n0passtemps/internal/assertion"
 	"github.com/Socold/n0passtemps/internal/crypto/kek"
@@ -199,15 +202,17 @@ func kekInspect(args []string) error {
 // runAssertionKey manages the Ed25519 key that signs assertions.
 func runAssertionKey(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("expected a subcommand: init or inspect")
+		return fmt.Errorf("expected a subcommand: init, rotate or inspect")
 	}
 	switch args[0] {
 	case "init":
 		return assertionKeyInit(args[1:])
+	case "rotate":
+		return assertionKeyRotate(args[1:])
 	case "inspect":
 		return assertionKeyInspect(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q, expected init or inspect", args[0])
+		return fmt.Errorf("unknown subcommand %q, expected init, rotate or inspect", args[0])
 	}
 }
 
@@ -247,10 +252,111 @@ func assertionKeyInit(args []string) error {
 	fmt.Print("\nThe service publishes the matching public key at\n" +
 		"/v1/.well-known/jwks.json, so an integrating application normally fetches it\n" +
 		"from there rather than holding a copy.\n\n" +
-		"Replacing this key invalidates every assertion already issued. Since an\n" +
-		"assertion lives for sixty seconds, that is a brief disruption rather than a\n" +
-		"migration, but it is not nothing: a rotation during a login burst refuses\n" +
-		"those logins and the users retry.\n")
+		"To replace this key later, use 'assertion-key rotate' rather than running\n" +
+		"init again with -force. Overwriting the file refuses every assertion already\n" +
+		"issued and every assertion a verifier checks against its cached copy of the\n" +
+		"key set; rotate keeps the outgoing key published for a stated window so that\n" +
+		"neither happens.\n")
+	return nil
+}
+
+// assertionKeyRotate replaces the signing key and leaves the outgoing public
+// key where the service can go on publishing it.
+//
+// Running init with -force is the alternative, and it is the one that causes an
+// outage: the outgoing key disappears from the key set at the same instant it
+// stops signing, so every token still inside its lifetime is refused, as is
+// every token reaching a verifier whose cached copy of the document is older
+// than the restart. Neither failure is visible here. Both are visible to the
+// application, as logins that refuse for no stated reason.
+//
+// So this writes three files rather than one, and prints the configuration line
+// that closes the gap. The old private key is kept too: a rotation performed in
+// a panic is a rotation that may have to be undone, and a key that has been
+// deleted cannot be put back.
+func assertionKeyRotate(args []string) error {
+	fs := flag.NewFlagSet("assertion-key rotate", flag.ExitOnError)
+	path := fs.String("file", "/etc/n0passtemps/kek/assertion-key.pem", "signing key to replace")
+	keep := fs.String("keep-prefix", "",
+		"where to move the outgoing key, without an extension (default: the key path plus a timestamp)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	// Loaded rather than merely read, so a file that is not a usable signing
+	// key is refused before anything is written. Rotating away from a key the
+	// service could not have been running with means the operator is about to
+	// discover two faults at once.
+	outgoing, err := assertion.LoadPrivateKeyPEM(*path)
+	if err != nil {
+		return fmt.Errorf("outgoing key: %w", err)
+	}
+	outgoingIssuer, err := assertion.NewIssuer(outgoing, "rotate", time.Minute, 0)
+	if err != nil {
+		return fmt.Errorf("outgoing key: %w", err)
+	}
+	outgoingKid := outgoingIssuer.KeyID()
+
+	prefix := *keep
+	if prefix == "" {
+		prefix = strings.TrimSuffix(*path, filepath.Ext(*path)) +
+			"." + time.Now().UTC().Format("20060102T150405Z")
+	}
+	prevPub := prefix + ".pub.pem"
+	prevPriv := prefix + ".pem"
+
+	// The outgoing pair is written from the key that was just loaded rather
+	// than copied from disk, so the retired public key is provably the half of
+	// the key that was signing a moment ago and not whatever else the path
+	// happened to hold.
+	outgoingPrivPEM, outgoingPubPEM, err := assertion.EncodeKeyPEM(outgoing)
+	if err != nil {
+		return fmt.Errorf("encode the outgoing key: %w", err)
+	}
+	defer zeroize.Bytes(outgoingPrivPEM)
+
+	if err := writeFile(prevPub, outgoingPubPEM, 0o644, false); err != nil {
+		return err
+	}
+	if err := writeFile(prevPriv, outgoingPrivPEM, 0o600, false); err != nil {
+		return err
+	}
+
+	priv, _, err := assertion.GenerateKeyPEM()
+	if err != nil {
+		return fmt.Errorf("generate key: %w", err)
+	}
+	defer zeroize.Bytes(priv)
+
+	// Only now is the live key replaced. Everything above can fail without the
+	// deployment having changed.
+	if err := writeFile(*path, priv, 0o600, true); err != nil {
+		return err
+	}
+
+	incoming, err := assertion.LoadPrivateKeyPEM(*path)
+	if err != nil {
+		return fmt.Errorf("re-read the new key: %w", err)
+	}
+	incomingIssuer, err := assertion.NewIssuer(incoming, "rotate", time.Minute, 0)
+	if err != nil {
+		return fmt.Errorf("new key: %w", err)
+	}
+
+	fmt.Printf("New signing key written to %s (mode 0600).\n", *path)
+	fmt.Printf("  kid now:      %s\n", incomingIssuer.KeyID())
+	fmt.Printf("  kid outgoing: %s\n", outgoingKid)
+	fmt.Printf("\nOutgoing key kept at:\n  %s  (public, publish this)\n  %s  (private, mode 0600)\n",
+		prevPub, prevPriv)
+	fmt.Printf("\nAdd this to [assertion] before restarting, or the tokens issued in the\n"+
+		"last minute and every verifier holding a cached key set will be refused:\n\n"+
+		"  retired_public_key_paths = [%q]\n\n", prevPub)
+	fmt.Print("Remove that line, and delete the outgoing private key, once no token signed\n" +
+		"by it can still be accepted: assertion.ttl plus assertion.allowed_clock_skew\n" +
+		"plus the five minutes the JWKS response stays cacheable. An hour covers it.\n" +
+		"Until you do, the outgoing key still verifies whatever its private half signs,\n" +
+		"which is the thing a rotation exists to stop. Every start warns while the line\n" +
+		"is there.\n")
 	return nil
 }
 

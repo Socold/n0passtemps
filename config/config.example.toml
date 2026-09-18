@@ -334,6 +334,18 @@ issuer = "https://auth.example.com"
 #   n0passtemps-wizard assertion-key init
 signing_key_path = "/etc/n0passtemps/kek/assertion-key.pem"
 
+# Public keys published at the JWKS route and never signed with, which is how
+# the signing key above is replaced without an outage. Point signing_key_path at
+# the new key, list the previous PUBLIC key here, restart, and remove the entry
+# once no token signed by it can still be inside its lifetime in a verifier's
+# cache: ttl plus allowed_clock_skew plus the 5m the JWKS response is cacheable.
+# An hour covers it comfortably. Leaving an entry here for longer undoes the
+# rotation, because the retired key goes on verifying whatever its private half
+# signs, and a stolen private half is the reason to rotate in the first place.
+# Every start logs a warning naming what is still published.
+#
+# retired_public_key_paths = ["/etc/n0passtemps/kek/assertion-key.prev.pub.pem"]
+
 # Short by design. The assertion proves a ceremony completed moments ago and is
 # exchanged immediately for the application's own session. Capped at 5m.
 ttl = "60s"

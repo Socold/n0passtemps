@@ -346,6 +346,19 @@ type Assertion struct {
 	// signing easy to get wrong.
 	SigningKeyPath string `toml:"signing_key_path"`
 
+	// RetiredPublicKeyPaths are Ed25519 public keys in SubjectPublicKeyInfo
+	// PEM form that are published at the JWKS route and never signed with.
+	//
+	// It is how a signing key is replaced without an outage. Both keys are
+	// served for one changeover window, the "kid" of each token selects
+	// between them, and the outgoing entry is then removed. The window is not
+	// free: a key listed here verifies tokens minted by whoever holds the
+	// matching private key, so leaving an entry in place for ever undoes the
+	// rotation. docs/CONFIGURATION.md gives the window and the procedure.
+	//
+	// A private key here is refused, not read: these files are published.
+	RetiredPublicKeyPaths []string `toml:"retired_public_key_paths"`
+
 	// TTL is how long an assertion stays valid. It is short: the assertion
 	// proves a ceremony just completed, and the application exchanges it
 	// immediately for its own session.
@@ -1174,6 +1187,29 @@ func (c *Config) Validate() error {
 		add("config: assertion.ttl must be positive and at most 5m; the assertion "+
 			"proves a ceremony just completed and is exchanged immediately, got %s",
 			c.Assertion.TTL.Duration)
+	}
+	// Checked here rather than at load time so that an operator listing a path
+	// twice, or listing the key they are rotating away from and the one they
+	// are rotating to, is told at startup instead of finding out from a JWK Set
+	// that quietly held one key less than they wrote.
+	seenRetired := make(map[string]struct{}, len(c.Assertion.RetiredPublicKeyPaths))
+	for n, p := range c.Assertion.RetiredPublicKeyPaths {
+		clean := strings.TrimSpace(p)
+		if clean == "" {
+			add("config: assertion.retired_public_key_paths[%d] is empty", n)
+			continue
+		}
+		if clean == strings.TrimSpace(c.Assertion.SigningKeyPath) {
+			add("config: assertion.retired_public_key_paths[%d] is the signing key path; "+
+				"a rotation points signing_key_path at the new key and lists the previous "+
+				"public key here", n)
+			continue
+		}
+		if _, dup := seenRetired[clean]; dup {
+			add("config: assertion.retired_public_key_paths[%d] repeats %q", n, clean)
+			continue
+		}
+		seenRetired[clean] = struct{}{}
 	}
 
 	// Throttle.

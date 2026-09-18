@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"errors"
 	"flag"
@@ -141,10 +142,24 @@ func run() error {
 			"generate one with: n0passtemps-wizard assertion-key init --out %s",
 			err, cfg.Assertion.SigningKeyPath)
 	}
+	retiredKeys, err := loadRetiredKeys(cfg.Assertion.RetiredPublicKeyPaths)
+	if err != nil {
+		return err
+	}
 	issuer, err := assertion.NewIssuer(signingKey, cfg.Assertion.Issuer,
-		cfg.Assertion.TTL.Duration, cfg.Assertion.AllowedClockSkew.Duration)
+		cfg.Assertion.TTL.Duration, cfg.Assertion.AllowedClockSkew.Duration,
+		assertion.WithRetiredKeys(retiredKeys...))
 	if err != nil {
 		return fmt.Errorf("assertion issuer: %w", err)
+	}
+	// Said at every start, not once at rotation, because the configuration is
+	// the only record that a changeover window is still open. A deployment that
+	// has been serving a retired key for months is a rotation nobody finished,
+	// and the line an operator reads on every restart is what tells them.
+	if kids := issuer.RetiredKeyIDs(); len(kids) > 0 {
+		log.Warn("retired assertion keys are still published; remove them once the "+
+			"changeover window has passed",
+			"signing_kid", issuer.KeyID(), "retired_kids", kids)
 	}
 
 	recorder := audit.NewRecorder(st, log)
@@ -249,6 +264,32 @@ func openKeyring(cfg *config.Config) (keyring, error) {
 	default:
 		return nil, fmt.Errorf("keyring: provider %q is not supported", cfg.KEK.Provider)
 	}
+}
+
+// loadRetiredKeys reads the public keys that stay in the JWK Set for the
+// duration of a signing key changeover.
+//
+// A path that cannot be read stops the start rather than being skipped. The
+// keys are listed precisely because tokens signed with them are still in
+// circulation, so dropping one silently would refuse exactly the assertions the
+// entry exists to keep working, and it would do it at a verifier rather than
+// here where an operator is watching.
+func loadRetiredKeys(paths []string) ([]ed25519.PublicKey, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	keys := make([]ed25519.PublicKey, 0, len(paths))
+	for _, p := range paths {
+		pub, err := assertion.LoadPublicKeyPEM(p)
+		if err != nil {
+			return nil, fmt.Errorf("retired assertion key: %w\n"+
+				"this is the public half written beside a previous signing key; "+
+				"remove the entry from assertion.retired_public_key_paths once the "+
+				"changeover window has passed", err)
+		}
+		keys = append(keys, pub)
+	}
+	return keys, nil
 }
 
 // openAuditSink builds the external audit shipper, or reports that none is

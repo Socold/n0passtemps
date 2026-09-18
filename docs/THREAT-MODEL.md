@@ -754,6 +754,26 @@ token but not a forged one, and the `kid` header with a JWK Set lets an operator
 rotate to a new key and stop publishing the old one, which invalidates forgeries
 made with it from that moment on.
 
+That second mitigation was written down before it worked. Until 1.2.0 the
+service published exactly one key, so rotating meant the outgoing key stopped
+verifying at the instant it stopped signing: the assertions issued in the last
+minute were refused, and so was every assertion reaching an application whose
+cached copy of the key set predated the restart. An operator facing a suspected
+compromise therefore had to choose between a forgery window and an outage, which
+is not a choice anybody makes calmly. `assertion.retired_public_key_paths` now
+keeps the outgoing public key in the set for one changeover window, and
+`n0passtemps-wizard assertion-key rotate` performs the swap; see
+[CONFIGURATION.md](CONFIGURATION.md#rotating-the-signing-key).
+
+What that buys is a response, not a defence. Rotation still begins when somebody
+notices, nothing here detects a stolen key, and a forgery made before the
+rotation is indistinguishable from a real assertion for as long as it lives.
+Closing the theft itself needs the key to stop being readable at all, which
+means a signer the process calls rather than a file it opens.
+[ADR 0018](adr/0018-reducing-the-blast-radius-of-a-central-key.md) sets out what
+that would take, what a second key does and does not buy, and why neither is in
+this release.
+
 ### Detection depends on somebody reading
 
 The alert types, the hash chain and the audit log are all detection. Every one

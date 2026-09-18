@@ -161,7 +161,7 @@ configuration file and the environment:
 |---|---|
 | `setup` | Asks a few questions and writes `config.toml`, `docker-compose.yml` and `.env` |
 | `kek init`, `kek rotate`, `kek inspect` | Manage the key encryption keyring |
-| `assertion-key init`, `assertion-key inspect` | Manage the Ed25519 signing key |
+| `assertion-key init`, `assertion-key rotate`, `assertion-key inspect` | Manage the Ed25519 signing key. `rotate` replaces it without refusing the assertions already in flight; see [CONFIGURATION.md](CONFIGURATION.md#rotating-the-signing-key) |
 | `pepper` | Print a subject pepper as `N0PASSTEMPS_SUBJECT_PEPPER=...` |
 | `check` | Validate a configuration file and summarise it |
 

@@ -445,6 +445,7 @@ verifies offline. See [ADR 0004, Return a signed assertion rather than a bare
 |---|---|---|---|---|
 | `assertion.issuer` | string | `n0passtemps` | `N0PASSTEMPS_ASSERTION_ISSUER` | The `iss` claim. Identifies this deployment, and a verifier pins it. |
 | `assertion.signing_key_path` | string | `/etc/n0passtemps/kek/assertion-key.pem` | `N0PASSTEMPS_ASSERTION_SIGNING_KEY_PATH` | An Ed25519 private key in PKCS#8 PEM form. |
+| `assertion.retired_public_key_paths` | list of strings | empty | `N0PASSTEMPS_ASSERTION_RETIRED_PUBLIC_KEY_PATHS` | Ed25519 public keys in SubjectPublicKeyInfo PEM form, published at the JWKS route and never signed with. Empty in normal running; see [Rotating the signing key](#rotating-the-signing-key). |
 | `assertion.ttl` | duration | `60s` | `N0PASSTEMPS_ASSERTION_TTL` | How long an assertion stays valid. |
 | `assertion.allowed_clock_skew` | duration | `30s` | `N0PASSTEMPS_ASSERTION_ALLOWED_CLOCK_SKEW` | Subtracted from `nbf` so a verifier whose clock lags slightly accepts a token immediately. It does not extend `exp`. |
 
@@ -453,6 +454,9 @@ Refused by the validator:
 - `config: assertion.issuer is required`
 - `config: assertion.signing_key_path is required`
 - `config: assertion.ttl must be positive and at most 5m; the assertion proves a ceremony just completed and is exchanged immediately, got %s`
+- `config: assertion.retired_public_key_paths[0] is empty`
+- `config: assertion.retired_public_key_paths[0] is the signing key path; a rotation points signing_key_path at the new key and lists the previous public key here`
+- `config: assertion.retired_public_key_paths[1] repeats %q`
 
 The key loader refuses a file that is not exactly one PKCS#8 PEM block holding
 an Ed25519 key, and refuses a permissive file mode:
@@ -461,6 +465,56 @@ an Ed25519 key, and refuses a permissive file mode:
 - `assertion: malformed PKCS#8 PEM file: %q holds a "RSA PRIVATE KEY" block, expected "PRIVATE KEY" (convert with: openssl pkcs8 -topk8 -nocrypt)`
 - `assertion: malformed PKCS#8 PEM file: %q has trailing data after the PEM block`
 - `assertion: key is not an Ed25519 key: %q holds a *rsa.PrivateKey, and this package signs only with Ed25519`
+
+A retired key is loaded by the same package with one difference: no file mode is
+checked, because the file is a public key that the service serves to every
+caller anyway. A private key given where a public one was expected is refused
+rather than read, since the consequence would be signing material in a published
+document:
+
+- `assertion: malformed PKCS#8 PEM file: %q holds a private key, and a retired key is published to every caller; give the "PUBLIC KEY" file written beside it`
+
+### Rotating the signing key
+
+One Ed25519 key signs every assertion, and whoever reads it can mint a token for
+any subject that every verifier accepts. Rotating is therefore the response to a
+suspected compromise, and the reason it has to be an operation rather than an
+emergency is that the naive version causes an outage twice over: a token issued
+a few seconds before the restart is refused, and so is every token reaching an
+application whose cached copy of the key set predates it.
+
+`retired_public_key_paths` is what removes both. The outgoing public key stays in
+the JWK Set for one changeover window while only the new key signs, and the `kid`
+header of each token selects between them, so no verifier needs to be told
+anything.
+
+```
+n0passtemps-wizard assertion-key rotate -file /etc/n0passtemps/kek/assertion-key.pem
+```
+
+It writes the new signing key in place, keeps the outgoing key beside it as a
+`.pub.pem` and a `.pem`, and prints the line to add:
+
+```toml
+[assertion]
+signing_key_path = "/etc/n0passtemps/kek/assertion-key.pem"
+retired_public_key_paths = ["/etc/n0passtemps/kek/assertion-key.20260918T134531Z.pub.pem"]
+```
+
+Restart, then **close the window**. It has to close: a retired key goes on
+verifying whatever its private half signs, so an entry left in place indefinitely
+is the rotation not having happened. The window has to cover `assertion.ttl`
+plus `assertion.allowed_clock_skew` plus the five minutes the JWKS response is
+cacheable, which at the defaults is six and a half minutes; an hour covers it
+with room to spare. Then remove the line, delete the outgoing private key and
+restart again.
+
+Every start logs a warning while the list is not empty, naming the key
+identifiers still published, because the configuration is the only record that a
+window is open and the warning is what stops it being open in a year.
+
+Two entries are normal if a second rotation happens inside one window. The same
+path twice, or the signing key's own path, is refused at startup.
 
 ## throttle
 
