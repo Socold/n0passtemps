@@ -264,6 +264,14 @@ func openKeyring(cfg *config.Config) (keyring, error) {
 			return nil, fmt.Errorf("keyring: %w", err)
 		}
 		return p, nil
+	case "tpm":
+		p, err := kek.LoadTPMProvider(cfg.KEK.Path, cfg.KEK.TPMDevice, cfg.DataDirs()...)
+		if err != nil {
+			return nil, fmt.Errorf("keyring: %w\n"+
+				"seal a plaintext keyring for this machine with: n0passtemps-wizard kek seal --in <plaintext> --out %s",
+				err, cfg.KEK.Path)
+		}
+		return p, nil
 	default:
 		return nil, fmt.Errorf("keyring: provider %q is not supported", cfg.KEK.Provider)
 	}

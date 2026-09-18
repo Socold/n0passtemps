@@ -9,6 +9,55 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **A keyring sealed to the machine's TPM**, `kek.provider = "tpm"`, with
+  `n0passtemps-wizard kek seal` to convert an existing one.
+
+  Attacker 5 of [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) holds a copy of the
+  database and a copy of the keyring, and the model said of that position, in as
+  many words, that nothing was mitigated. The likeliest route there is not a
+  clever attack: it is one backup archive or one volume snapshot containing both.
+  [ADR 0009](docs/adr/0009-refuse-a-kek-inside-the-data-directory.md) keeps them
+  on separate volumes and cannot keep them out of the same tar file. Sealing
+  does: the keyring on disk becomes AES-256-GCM ciphertext under a key that
+  exists only inside one TPM, so a copied volume, a stolen backup, a cloned
+  virtual disk or a decommissioned drive carries nothing usable.
+
+  **It closes nothing against a live compromise of the host**, which asks the
+  same TPM to unseal exactly as the service does. Protection at rest, not
+  protection in use. The package comment says this before it says anything about
+  what sealing achieves, because a control believed to do more than it does is
+  worse than none.
+
+  **It is opt-in, and the reason is the recovery hazard.** A TPM cannot be backed
+  up. A dead board, a replaced motherboard or a cleared owner hierarchy makes the
+  sealed file unreadable for ever, and with it every TOTP secret and every sealed
+  subject reference. Sealing adds a layer in front of the offline plaintext copy;
+  it does not replace it. The wizard says so at every seal, after the success
+  message rather than before it. It also unseals what it has just produced and
+  compares it against the input before writing anything, so a TPM that seals but
+  will not unseal is found by the operator rather than at the next start.
+
+  No PCR binding, deliberately: every firmware and kernel update moves those
+  registers, so the service would stop starting for a reason nobody connects to
+  the update, and it does nothing about an attacker who holds the disk and no
+  TPM. The sealed object is bound to the owner hierarchy, which the suite proves
+  by clearing it and asserting the keyring no longer opens.
+
+  `github.com/google/go-tpm` becomes a direct dependency, having been an indirect
+  one through the WebAuthn library. It is pure Go, so CGO stays off, the binary
+  stays static and the six cross-compilation targets are unaffected. That is most
+  of why the TPM was the right first backend and PKCS#11 was not.
+
+  See [ADR 0019](docs/adr/0019-seal-the-keyring-to-a-tpm.md), which also records
+  what this does not do for the assertion signing key, and why: Ed25519 and
+  TPM 2.0 do not meet in the field.
+
+- **`make lint-cleared` and `make test-tpm`.** The first runs every linter except
+  the style budget categories that still have findings, so a cleared category
+  stays cleared; CI runs it on every push. The second starts a software TPM and
+  runs the sealing suite against it, because those tests skip when there is no
+  TPM and a skipping test that reports success is worse than one that is absent.
+
 - **Rotating the assertion signing key without an outage.**
   `assertion.retired_public_key_paths` lists Ed25519 public keys the service
   publishes at `/v1/.well-known/jwks.json` and never signs with, and
@@ -72,6 +121,16 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   hash-covered record and renaming one silently changes the meaning of history; a
   typo at one of four literals would have created a second event family that no
   saved query selects. They are constants now.
+
+- **The `lll` style budget is at zero, and it was never 119.** 127 lines were
+  past 120 columns; the missing eight appeared as soon as the other linters were
+  switched off. A count taken from a run that enables everything is a lower
+  bound, and [docs/ROADMAP.md](docs/ROADMAP.md) now says so. Almost all of them
+  are function declarations wrapped at a parameter; nothing changes behaviour.
+
+- **`make ci` could not pass.** It ran the full `make lint`, which cannot pass
+  while the style budget is not empty, so the gate `CONTRIBUTING.md` asks
+  contributors to pass locally was unpassable. It runs `make lint-cleared` now.
 
 - **The release workflow was a file GitHub refuses.** The rewrite that turned the
   release into draft, fill, verify, publish left the previous action's `uses` and

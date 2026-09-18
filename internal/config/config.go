@@ -173,16 +173,28 @@ type Database struct {
 
 // KEK selects the key encryption key provider.
 type KEK struct {
-	// Provider is "file" or "env".
+	// Provider is "file", "env" or "tpm".
 	Provider string `toml:"provider"`
 
-	// Path is the keyring file, used when Provider is "file". It must be mode
-	// 0600 and must not resolve inside Database.DataDir.
+	// Path is the keyring file, used when Provider is "file" or "tpm". It must
+	// not resolve inside Database.DataDir. Under "file" it must also be mode
+	// 0600; under "tpm" it holds ciphertext, so the mode is not a load-time
+	// condition, and the wizard still writes 0600.
 	Path string `toml:"path"`
 
 	// EnvVar names the variable holding the keyring, used when Provider is
 	// "env".
 	EnvVar string `toml:"env_var"`
+
+	// TPMDevice is the TPM 2.0 device node, used when Provider is "tpm".
+	// Empty means /dev/tpmrm0, the resource-managed node, which is what lets
+	// more than one process share the device's few transient object slots.
+	//
+	// Sealing binds the keyring to one machine. That is the point, and it is
+	// also the hazard: a board that dies takes the sealed copy with it, so the
+	// plaintext keyring still has to exist in an offline backup. See
+	// internal/crypto/kek/tpm.go and docs/CONFIGURATION.md.
+	TPMDevice string `toml:"tpm_device"`
 
 	// RotationInterval is how long a key version may remain current before
 	// the health check reports rotation as overdue. Zero disables the
@@ -1046,10 +1058,20 @@ func (c *Config) Validate() error {
 		if c.KEK.EnvVar == "" {
 			add("config: kek.env_var is required when kek.provider is \"env\"")
 		}
+	case "tpm":
+		// The same path check as "file". A sealed keyring in the data volume is
+		// less dangerous than a plaintext one, because the pair is still
+		// useless without the TPM, but it is the same mistake made in the same
+		// place and a deployment that seals today may stop sealing tomorrow.
+		if c.KEK.Path == "" {
+			add("config: kek.path is required when kek.provider is \"tpm\"; it is the sealed keyring")
+		} else if err := c.checkKEKOutsideDataDir(); err != nil {
+			add("%v", err)
+		}
 	case "":
 		add("config: kek.provider is required")
 	default:
-		add("config: kek.provider %q is not supported, use \"file\" or \"env\"", c.KEK.Provider)
+		add("config: kek.provider %q is not supported, use \"file\", \"env\" or \"tpm\"", c.KEK.Provider)
 	}
 
 	// Subject.

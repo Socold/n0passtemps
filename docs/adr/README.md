@@ -29,6 +29,7 @@ superseded by a new record rather than edited in place. See
 | [0016](0016-ship-the-audit-chain-to-an-external-witness.md) | Ship the audit chain to an external witness, and only the chain fields | accepted |
 | [0017](0017-administrative-sign-in-with-webauthn.md) | Administrative sign-in with WebAuthn, over a separate credential space | accepted |
 | [0018](0018-reducing-the-blast-radius-of-a-central-key.md) | Reducing the blast radius of a central key: rotate now, split later, and never pretend two files are two keys | accepted |
+| [0019](0019-seal-the-keyring-to-a-tpm.md) | Seal the keyring to a TPM, and say plainly that it protects the disk and not the host | accepted |
 
 Records 0013 and 0014 are of a different kind. The specification is silent on
 both questions, how an approved operation comes to run and where the first
@@ -55,3 +56,10 @@ specification nor the roadmap raises: what an operator does about the one key
 whose loss no other control here recovers from. It is the first record to say no
 to two designs by name, a second signing key and an enterprise-only edition, and
 the reasons are the point of writing it down.
+
+Record 0019 implements part of 0018 and corrects it. 0018 deferred a key the
+process cannot read on the grounds that there was no hardware to test against;
+there is a TPM 2.0 in most machines and a software one for the rest, and the
+real obstacle turned out to be narrower and only applies to the signing key.
+0019 does the keyring, which has no such obstacle, and is explicit about
+protecting the disk and not the host.

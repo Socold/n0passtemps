@@ -65,8 +65,8 @@ define require_tool
 command -v $(1) >/dev/null 2>&1 || { echo "$(1) is not on PATH; install the pinned version with:"; echo "  go install $(2)"; exit 1; }
 endef
 
-.PHONY: help build build-all test test-race test-integration cover lint \
-	lint-cleared sec secrets fmt fmt-check vet tidy migrate-check docker \
+.PHONY: help build build-all test test-race test-integration test-tpm cover \
+	lint lint-cleared sec secrets fmt fmt-check vet tidy migrate-check docker \
 	setup-wizard clean ci
 
 help: ## List the available targets
@@ -103,6 +103,29 @@ test-race: ## Run the unit tests under the race detector
 test-integration: ## Run the PostgreSQL integration tests (build tag 'integration')
 	N0PASSTEMPS_TEST_POSTGRES_DSN='$(TEST_POSTGRES_URL)' \
 		go test $(GOFLAGS_BUILD) -tags=$(INTEGRATION_TAG) -count=1 ./...
+
+# The keyring sealing tests need a TPM 2.0 and skip without one, so a plain
+# 'make test' reports them as skipped rather than failing. This starts a
+# software TPM, runs them against it and stops it again.
+#
+# swtpm is a TPM in a process and not hardware. Before trusting a deployment to
+# a real device, run the same tests against it once with
+# N0PASSTEMPS_TEST_TPM_DEVICE=/dev/tpmrm0, which needs the running user to be in
+# the 'tss' group: a simulator agrees with the specification, and a given part
+# only mostly does.
+SWTPM_PORT ?= 2321
+SWTPM_CTRL_PORT ?= 2322
+
+test-tpm: ## Run the keyring sealing tests against a software TPM
+	@command -v swtpm >/dev/null || { echo "swtpm is not installed"; exit 1; }
+	@state=$$(mktemp -d); \
+	swtpm socket --tpm2 --tpmstate dir=$$state \
+		--server type=tcp,port=$(SWTPM_PORT),bindaddr=127.0.0.1 \
+		--ctrl type=tcp,port=$(SWTPM_CTRL_PORT),bindaddr=127.0.0.1 \
+		--flags not-need-init,startup-clear --pid file=$$state/pid --daemon; \
+	trap 'kill $$(cat $$state/pid) 2>/dev/null; rm -rf $$state' EXIT; \
+	N0PASSTEMPS_TEST_TPM_TCP=127.0.0.1:$(SWTPM_PORT),127.0.0.1:$(SWTPM_CTRL_PORT) \
+		go test $(GOFLAGS_BUILD) -count=1 ./internal/crypto/kek/
 
 cover: ## Write coverage.out and print the total statement coverage
 	go test $(GOFLAGS_BUILD) -covermode=atomic -coverprofile=$(COVER_FILE) ./...

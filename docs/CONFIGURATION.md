@@ -193,17 +193,19 @@ that appears by itself is a key nobody has backed up.
 
 | Key | Type | Default | Environment variable | Purpose |
 |---|---|---|---|---|
-| `kek.provider` | string | `file` | `N0PASSTEMPS_KEK_PROVIDER` | `file` or `env`. |
-| `kek.path` | string | `/etc/n0passtemps/kek/keyring.json` | `N0PASSTEMPS_KEK_PATH` | Keyring file, used when the provider is `file`. Must be mode 0600 and must not resolve inside `database.data_dir`. |
+| `kek.provider` | string | `file` | `N0PASSTEMPS_KEK_PROVIDER` | `file`, `env` or `tpm`. |
+| `kek.path` | string | `/etc/n0passtemps/kek/keyring.json` | `N0PASSTEMPS_KEK_PATH` | Keyring file, used when the provider is `file` or `tpm`. Must not resolve inside `database.data_dir`. Under `file` it must also be mode 0600; under `tpm` it holds ciphertext, so the mode is not a load-time condition. |
 | `kek.env_var` | string | `N0PASSTEMPS_KEK` | `N0PASSTEMPS_KEK_ENV_VAR` | Name of the variable holding the keyring, used when the provider is `env`. |
+| `kek.tpm_device` | string | `/dev/tpmrm0` | `N0PASSTEMPS_KEK_TPM_DEVICE` | TPM 2.0 device node, used when the provider is `tpm`. The resource-managed node is the default, because it lets more than one process share the device's few transient object slots. |
 | `kek.rotation_interval` | duration | `8760h` (365 days) | `N0PASSTEMPS_KEK_ROTATION_INTERVAL` | How long a key version may remain current before the detailed health report calls rotation overdue. Zero disables the reminder. Rotation itself is always an explicit operator action. |
 
 Refused by the validator:
 
 - `config: kek.provider is required`
-- `config: kek.provider %q is not supported, use "file" or "env"`
+- `config: kek.provider %q is not supported, use "file", "env" or "tpm"`
 - `config: kek.path is required when kek.provider is "file"`
 - `config: kek.env_var is required when kek.provider is "env"`
+- `config: kek.path is required when kek.provider is "tpm"; it is the sealed keyring`
 - `config: kek.path %q is inside the data directory %q; a key stored beside the ciphertext it protects gives no confidentiality if the volume is copied, so mount it separately or use kek.provider "env"`
 
 The placement check resolves symbolic links on both sides before comparing, so
@@ -217,6 +219,73 @@ kek: %q is mode 0644, must not be readable by group or other (chmod 600)
 
 See [ADR 0009, Refuse to load a key encryption key stored inside the data
 directory](adr/0009-refuse-a-kek-inside-the-data-directory.md).
+
+### Sealing the keyring to a TPM
+
+`provider = "tpm"` reads a keyring that has been encrypted to this machine's
+TPM 2.0. It is off by default and this section says why before it says how.
+
+**What it closes.** Attacker 5 of [THREAT-MODEL.md](THREAT-MODEL.md) holds a
+copy of the database and a copy of the keyring, and against that position the
+model says, in as many words, that nothing is mitigated. The likeliest way to
+get there is not a clever attack: it is one backup archive or one volume
+snapshot containing both. ADR 0009 keeps the two on separate volumes and cannot
+keep them out of the same tar file. Sealing does: the keyring on disk becomes
+ciphertext that opens on one machine, so a copied volume, a stolen backup, a
+cloned virtual disk or a decommissioned drive carries nothing usable.
+
+**What it does not close.** Anything at all against a live compromise of this
+host. An attacker running as the service account asks the same TPM to unseal,
+exactly as the service does, and the keyring is then in process memory as it
+always was. This is protection at rest. It is not protection in use, and a
+deployment that reads it as the latter has overestimated what it has.
+
+**The cost, which is not small.** A TPM cannot be backed up. A dead board, a
+replaced motherboard or a cleared owner hierarchy makes the sealed file
+unreadable for ever, and with it every TOTP secret and every sealed subject
+reference in the database. **Sealing adds a layer in front of the offline copy
+of the plaintext keyring. It does not replace it.** Deleting the plaintext
+because a sealed copy exists is building a way to lose your own data.
+
+Sealing therefore moves a risk rather than removing one: less exposure to a
+stolen disk, more to a dead one. Which of those a deployment would rather carry
+is not a question this project answers for it, which is why the provider is
+opt-in.
+
+```bash
+n0passtemps-wizard kek seal \
+  -in  /etc/n0passtemps/kek/keyring.json \
+  -out /etc/n0passtemps/kek/keyring.sealed.json
+```
+
+The command unseals what it has just produced and compares it against the input
+before writing anything, so a TPM that seals but will not unseal is found here
+rather than at the next start. Then:
+
+```toml
+[kek]
+provider = "tpm"
+path = "/etc/n0passtemps/kek/keyring.sealed.json"
+# tpm_device = "/dev/tpmrm0"
+```
+
+The service account needs read and write on the device node, which on most
+distributions means membership of the `tss` group.
+
+**No PCR binding.** The sealed object is bound to the TPM's owner hierarchy and
+to nothing else. Binding it to platform configuration registers as well, so that
+it unseals only under the boot state it was sealed under, sounds strictly better
+and is not: every firmware, kernel and bootloader update moves those registers,
+the service then stops starting for a reason nobody connects to the update, and
+what operators do is recover from the plaintext and turn the binding off. It
+also does nothing about the attacker this is for, who has a copy of the disk and
+no TPM to present it to.
+
+**Rotation still works the same way.** `kek rotate` operates on the plaintext
+keyring; seal the result again afterwards. The sealed file is not edited in
+place, and the old one is worth keeping until the new one has been seen to load.
+
+See [ADR 0019](adr/0019-seal-the-keyring-to-a-tpm.md).
 
 Keyring format, whether in a file or in a variable:
 

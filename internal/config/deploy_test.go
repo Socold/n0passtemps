@@ -46,6 +46,11 @@ var clientVars = map[string]string{
 var testVars = map[string]string{
 	"N0PASSTEMPS_TEST_POSTGRES_DSN": "connection string for the PostgreSQL integration suite",
 	"N0PASSTEMPS_TEST_MDS_BLOB":     "path to a FIDO metadata BLOB for the attestation test",
+	// The keyring sealing suite, for the same reason as the PostgreSQL one:
+	// it skips without a TPM, so a misspelling here would make "make test-tpm"
+	// and the CI step report success having sealed nothing.
+	"N0PASSTEMPS_TEST_TPM_TCP":    "command,platform addresses of a software TPM for the keyring sealing suite",
+	"N0PASSTEMPS_TEST_TPM_DEVICE": "TPM device node for the keyring sealing suite, run against real hardware",
 }
 
 // externallyReadVars are read by a package other than this one, so they never

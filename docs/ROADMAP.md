@@ -13,7 +13,7 @@ idea.
 | 1, authentication core | Done, see the two notes below |
 | Launch | Tagged `v1.0.0`, then `v1.1.0`, both published from the release workflow. Registry publication below is the maintainer's |
 | 2, this document | Complete. All three specified themes answered, and all five candidates of 2.4 landed |
-| 3, a key the process cannot read | Part one landed, part two rejected, part three waits on hardware to test it against. See below and [ADR 0018](adr/0018-reducing-the-blast-radius-of-a-central-key.md) |
+| 3, a key the process cannot read | Signing key rotation and the TPM-sealed keyring landed; a second signing key rejected; the signing key itself still open on a decision, not on tooling. See below, [ADR 0018](adr/0018-reducing-the-blast-radius-of-a-central-key.md) and [ADR 0019](adr/0019-seal-the-keyring-to-a-tpm.md) |
 | 6, hosted offering | Not started, and not planned before the on-premise product has users |
 | Maintenance | The style budget below. Two of its six categories are cleared and enforced in CI; four remain |
 
@@ -286,35 +286,53 @@ between two processes that share a file anyway.
 ## Phase 3, a key the process cannot read
 
 [ADR 0018](adr/0018-reducing-the-blast-radius-of-a-central-key.md) answers what
-to do about the two keys whose loss nothing else here recovers from. Part one of
-that record has landed: rotating the assertion signing key is now an operation
-rather than a choice between a forgery window and an outage. Part two is
-rejected by name, because a second signing key held by the same process on the
-same host is one key with an extra file to steal.
+to do about the two keys whose loss nothing else here recovers from, and
+[ADR 0019](adr/0019-seal-the-keyring-to-a-tpm.md) does the first half of the
+answer.
 
-Part three is the one left, and it is the only one that changes what a host
-compromise costs. `assertion.Issuer` needs a signer rather than a private key,
-and `envelope.Sealer` already reaches its KEK through an interface with
-`Current` and `ByVersion`. Behind those two seams a deployment could put a
-PKCS#11 token, a cloud KMS or a TPM, and the key would stop being readable at
-all: a compromise becomes the ability to *use* the key while it lasts, bounded
-by eviction, counted by the device and logged where the operator of this host
-cannot rewrite it.
+**Landed.** Rotating the assertion signing key is an operation rather than a
+choice between a forgery window and an outage. And `kek.provider = "tpm"` seals
+the keyring to the machine's TPM 2.0, which closes the half of attacker 5 that
+comes from copying files: a backup archive, a volume snapshot or a
+decommissioned drive now carries ciphertext that opens on one machine. It is
+opt-in, because a TPM cannot be backed up and the failure it introduces is as
+total as the one it removes.
 
-**Why it is not in the next release.** A PKCS#11 backend nobody has run against
-real hardware is a configuration option that fails in production, and this
-project has no hardware to test it on. A KMS backend puts a network call on the
-assertion path and needs its own design for what happens when that call is slow,
-and it contradicts the product's argument unless it stays optional. Either one
-deserves a record with a working implementation behind it rather than a
-paragraph here, and the seam has to be introduced by the first backend that
-proves it fits, not before.
+**Rejected by name.** A second signing key held by the same process on the same
+host is one key with an extra file to steal.
+
+**What the sealing does not do**, stated here as well as in the record because
+it is the thing most likely to be over-read: nothing against a live compromise
+of the host, which asks the same TPM to unseal exactly as the service does. It
+is protection at rest.
+
+### What remains: the signing key
+
+The keyring was the easier of the two and is now done. The signing key is the
+larger exposure, because losing it is an authentication bypass rather than a
+disclosure, and it is the one still open.
+
+The obstacle is now named rather than guessed at. `internal/assertion` signs
+with Ed25519 and says in its package comment that Ed25519 is the only algorithm
+it will ever accept. TPM 2.0 parts do ECDSA and RSA; EdDSA is permitted by the
+specification and absent from the field. So the two options are:
+
+| Option | Cost |
+|---|---|
+| A PKCS#11 token that does Ed25519, such as a YubiHSM 2 or SoftHSM | `github.com/miekg/pkcs11` needs cgo, so it lives behind a build tag and the project ships two binaries where it promises one |
+| Teach the assertion format ES256 | Every verifier, all three SDKs and both shipped examples learn a second algorithm, and the format grows the negotiation surface that package exists to not have |
+
+Neither is obviously right, and picking one is a decision rather than a task.
+What is no longer an obstacle is testing: `swtpm` is a TPM in a process and
+SoftHSM is a PKCS#11 token in a process, both are packaged everywhere, and CI
+already starts the first.
 
 **No seam before a backend.** An interface with one in-process implementation
 and nothing else behind it is decoration, and decoration around a key is worse
-than none because it is believed. The first backend that proves the shape fits
-is what introduces it, which is the same rule ADR 0018 applies to the second
-signing key it rejects.
+than none because it is believed. The TPM provider was added to `kek` because
+that interface already had two implementations and a third fitted; a signer
+interface with nothing behind it would not earn its place, and would fix the
+shape before the first real backend could argue with it.
 
 ## Maintenance backlog
 

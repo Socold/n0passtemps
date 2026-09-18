@@ -123,8 +123,10 @@ auto_migrate = true
 # codes are unaffected: public keys are stored in clear and recovery codes are
 # hashed rather than encrypted.
 [kek]
-# "file" or "env". Use env where an orchestrator injects secrets without
-# mounting a file.
+# "file", "env" or "tpm". Use env where an orchestrator injects secrets without
+# mounting a file. Use tpm to encrypt the keyring to this machine's TPM 2.0, so
+# that a copied volume or a stolen backup carries ciphertext; read the warning
+# below the rotation_interval before you do.
 provider = "file"
 
 # Must be mode 0600, and must NOT resolve inside data_dir. A key stored beside
@@ -139,6 +141,32 @@ path = "/etc/n0passtemps/kek/keyring.json"
 # report calls rotation overdue. Advisory only; rotation is always an explicit
 # operator action. Zero disables the reminder.
 rotation_interval = "8760h"
+
+# Sealing the keyring to a TPM, with provider = "tpm".
+#
+#   n0passtemps-wizard kek seal \
+#     -in  /etc/n0passtemps/kek/keyring.json \
+#     -out /etc/n0passtemps/kek/keyring.sealed.json
+#
+# then point path at the sealed file. tpm_device defaults to /dev/tpmrm0, the
+# resource-managed node; the service account needs read and write on it, which
+# on most distributions means the 'tss' group.
+#
+# What it buys: the keyring on disk becomes ciphertext that opens on one
+# machine, so a backup archive, a volume snapshot, a cloned disk or a
+# decommissioned drive carries nothing usable. That is the half of attacker 5 in
+# docs/THREAT-MODEL.md that comes from copying files.
+#
+# What it does not buy: anything against an attacker running as the service
+# account on this host, who asks the same TPM to unseal exactly as the service
+# does. Protection at rest, not protection in use.
+#
+# KEEP THE PLAINTEXT KEYRING IN AN OFFLINE BACKUP. A TPM cannot be backed up. A
+# dead board or a cleared owner hierarchy makes the sealed file unreadable for
+# ever, and with it every TOTP secret in the database. Sealing adds a layer in
+# front of the offline copy; it does not replace it.
+#
+# tpm_device = "/dev/tpmrm0"
 
 
 # ---------------------------------------------------------------------------

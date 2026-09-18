@@ -104,6 +104,7 @@ func applyEnv(cfg *Config) error {
 	str("KEK_PROVIDER", &cfg.KEK.Provider)
 	str("KEK_PATH", &cfg.KEK.Path)
 	str("KEK_ENV_VAR", &cfg.KEK.EnvVar)
+	str("KEK_TPM_DEVICE", &cfg.KEK.TPMDevice)
 	dur("KEK_ROTATION_INTERVAL", &cfg.KEK.RotationInterval)
 
 	str("SUBJECT_PEPPER_ENV", &cfg.Subject.PepperEnv)

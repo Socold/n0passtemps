@@ -347,10 +347,30 @@ So even with both halves, an attacker cannot log in as a WebAuthn-only subject.
 They can log in as a TOTP-only subject, from the secret, which is one of the
 reasons a TOTP-only user is a weaker position than a WebAuthn user.
 
+**Mitigated, optionally, since 1.2.0**
+
+`kek.provider = "tpm"` makes the keyring on disk ciphertext that opens on one
+machine. The half of this attacker's starting position that comes from copying
+files, which is the likely half, stops being reachable: a backup archive, a
+volume snapshot, a cloned virtual disk or a decommissioned drive then carries
+nothing usable. It is opt-in and not a default, because a TPM cannot be backed
+up and the failure it introduces, a dead board taking the keyring with it, is as
+total as the one it removes. See
+[ADR 0019](adr/0019-seal-the-keyring-to-a-tpm.md) and
+[CONFIGURATION.md](CONFIGURATION.md#sealing-the-keyring-to-a-tpm).
+
+It changes nothing about attacker 3, the rogue administrator, or about any
+attacker with code running on this host: they ask the same TPM to unseal exactly
+as the service does. Protection at rest, not protection in use.
+
 **Not mitigated**
 
-- **Nothing in the above.** With both halves the confidentiality of the sealed
-  data is gone. That is what encryption at rest means and what its loss means.
+- **Everything above, on a deployment that has not sealed the keyring.** With
+  both halves the confidentiality of the sealed data is gone. That is what
+  encryption at rest means and what its loss means.
+- **A live host compromise, sealed or not.** Sealing moves the keyring out of
+  reach of somebody holding the disk. It does not move it out of reach of
+  somebody holding the machine.
 - **Detection.** Reading a stolen copy leaves no trace anywhere. The audit log
   records what the service did, not what somebody did to a file.
 - **Rotation does not help retroactively.** Rotating the KEK re-wraps the data

@@ -68,6 +68,31 @@ jobs:
       - name: Build every package
         run: go build ./...
 
+      # A runner has no TPM, and internal/crypto/kek skips its sealing tests
+      # when it cannot find one, which would make them pass here without ever
+      # having run. swtpm is a TPM 2.0 in a process, and go-tpm's tcp transport
+      # speaks the simulator protocol it serves, so the same code path is
+      # exercised. It is not hardware and does not pretend to be; the tests
+      # document how to point them at a real device before trusting a
+      # deployment to one.
+      - name: Start a software TPM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends swtpm
+          mkdir -p "${RUNNER_TEMP}/swtpm"
+          swtpm socket --tpm2 --tpmstate "dir=${RUNNER_TEMP}/swtpm" \
+            --server type=tcp,port=2321,bindaddr=127.0.0.1 \
+            --ctrl type=tcp,port=2322,bindaddr=127.0.0.1 \
+            --flags not-need-init,startup-clear --daemon
+          for _ in $(seq 1 50); do
+            if timeout 1 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/2321'; then
+              exit 0
+            fi
+            sleep 0.2
+          done
+          echo "::error::the software TPM did not start listening"
+          exit 1
+
       - name: Unit tests with the race detector and coverage
         run: |
           go test -trimpath -race -covermode=atomic \
@@ -75,6 +100,7 @@ jobs:
           go tool cover -func=coverage.out | tail -n 1
         env:
           CGO_ENABLED: "1" # the race detector needs cgo; production builds set 0
+          N0PASSTEMPS_TEST_TPM_TCP: 127.0.0.1:2321,127.0.0.1:2322
 
       - name: Upload the coverage profile as an artifact
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3

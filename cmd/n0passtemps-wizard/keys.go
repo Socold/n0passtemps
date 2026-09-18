@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -12,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/go-tpm/tpm2/transport/linuxtpm"
 
 	"github.com/Socold/n0passtemps/internal/assertion"
 	"github.com/Socold/n0passtemps/internal/crypto/kek"
@@ -27,18 +30,101 @@ type keyringFile struct {
 // runKEK manages the key encryption keyring.
 func runKEK(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("expected a subcommand: init, rotate or inspect")
+		return fmt.Errorf("expected a subcommand: init, rotate, seal or inspect")
 	}
 	switch args[0] {
 	case "init":
 		return kekInit(args[1:])
 	case "rotate":
 		return kekRotate(args[1:])
+	case "seal":
+		return kekSeal(args[1:])
 	case "inspect":
 		return kekInspect(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q, expected init, rotate or inspect", args[0])
+		return fmt.Errorf("unknown subcommand %q, expected init, rotate, seal or inspect", args[0])
 	}
+}
+
+// kekSeal encrypts a plaintext keyring to this machine's TPM.
+//
+// What it buys is the one line docs/THREAT-MODEL.md marks as not mitigated for
+// attacker 5, who holds a copy of the database and a copy of the keyring: after
+// sealing, that pair is useless without this TPM, and the likeliest way to hold
+// both, one backup archive, stops working. It buys nothing against a live
+// compromise of this host, which can ask the same TPM to unseal exactly as the
+// service does.
+//
+// The command is deliberately noisy about the other half. A TPM cannot be
+// backed up, so the sealed file dies with the board, and an operator who reads
+// "sealed" as "safe" and deletes the plaintext has built a way to lose every
+// TOTP secret in the database. It therefore unseals what it has just written
+// and compares, before it says anything reassuring.
+func kekSeal(args []string) error {
+	fs := flag.NewFlagSet("kek seal", flag.ExitOnError)
+	in := fs.String("in", "/etc/n0passtemps/kek/keyring.json", "plaintext keyring to seal")
+	out := fs.String("out", "/etc/n0passtemps/kek/keyring.sealed.json", "path to write the sealed keyring to")
+	device := fs.String("device", kek.DefaultTPMDevice, "TPM 2.0 device node")
+	force := fs.Bool("force", false, "overwrite an existing sealed keyring")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	// #nosec G304 -- the path is the one the operator asked the wizard to seal
+	plain, err := os.ReadFile(*in)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", *in, err)
+	}
+	defer zeroize.Bytes(plain)
+
+	t, err := linuxtpm.Open(*device)
+	if err != nil {
+		return fmt.Errorf("open %s: %w\n"+
+			"this account needs read and write on the TPM, which on most distributions\n"+
+			"means membership of the 'tss' group", *device, err)
+	}
+	defer func() { _ = t.Close() }()
+
+	sealed, err := kek.SealKeyring(t, plain)
+	if err != nil {
+		return err
+	}
+
+	// Read back before writing anything, so a TPM that seals but will not
+	// unseal is found here rather than at the next start of the service.
+	readBack, err := kek.UnsealKeyring(t, sealed)
+	if err != nil {
+		return fmt.Errorf("the sealed keyring did not unseal again, so it has not been written: %w", err)
+	}
+	defer zeroize.Bytes(readBack)
+	if !bytes.Equal(readBack, plain) {
+		return fmt.Errorf("the sealed keyring unsealed to different bytes, so it has not been written")
+	}
+
+	// Mode 0600 although the contents are ciphertext: an operator who sees a
+	// file called a keyring has no way to tell which kind it is from the name,
+	// and a file nobody can read is a file nobody can attack offline.
+	if err := writeFile(*out, sealed, 0o600, *force); err != nil {
+		return err
+	}
+
+	fmt.Printf("Sealed keyring written to %s (mode 0600).\n", *out)
+	fmt.Printf("Unsealed and compared against %s before writing.\n\n", *in)
+	fmt.Printf("Point the service at it:\n\n  [kek]\n  provider = \"tpm\"\n  path = %q\n", *out)
+	if *device != kek.DefaultTPMDevice {
+		fmt.Printf("  tpm_device = %q\n", *device)
+	}
+	fmt.Print("\nKEEP THE PLAINTEXT KEYRING. Back it up offline, now, if you have not.\n\n" +
+		"A TPM cannot be backed up. This file opens on this machine and on no other,\n" +
+		"so a dead board, a cleared owner hierarchy or a motherboard replacement makes\n" +
+		"it unreadable for ever, and with it every TOTP secret and every sealed subject\n" +
+		"reference in the database. Sealing adds a layer in front of the offline copy.\n" +
+		"It does not replace it.\n\n" +
+		"What this does buy: a copied volume, a stolen backup or a cloned disk now\n" +
+		"carries ciphertext. What it does not buy: anything against an attacker running\n" +
+		"as the service account on this host, who can ask the TPM to unseal exactly as\n" +
+		"the service does.\n")
+	return nil
 }
 
 // kekInit writes a new keyring with one key version.
