@@ -447,7 +447,8 @@ Security Top 10 2023, and GDPR Articles 15, 17 and 32.
 | [docs/GDPR.md](docs/GDPR.md) | Lawful basis, the personal data inventory, the Article 15 and 17 paths, how the chain survives erasure |
 | [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) | Assets, trust boundaries, nine attackers, and what is not mitigated |
 | [docs/MONITORING.md](docs/MONITORING.md) | What to scrape, the ten alert types and their responses, log fields, database tuning |
-| [docs/adr/README.md](docs/adr/README.md) | Fourteen architecture decision records: the deliberate deviations from the original specification, and the convention itself |
+| [docs/SIEM.md](docs/SIEM.md) | Getting the two log streams into a SIEM: why there is no syslog client, the field mapping to ECS and OCSF, the closed audit event vocabulary, and what a sink receiver has to do |
+| [docs/adr/README.md](docs/adr/README.md) | Eighteen architecture decision records: the deliberate deviations from the original specification, and the convention itself |
 | [examples/README.md](examples/README.md) | Working clients in shell, Python, Node and Go, against `api/openapi.yaml` |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Building, testing, the `make ci` gate, the code style, the ADR process, commit messages |
 | [CHANGELOG.md](CHANGELOG.md) | What each release contains |

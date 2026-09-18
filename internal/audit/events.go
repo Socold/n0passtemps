@@ -85,6 +85,19 @@ const (
 	EventAdminAuthorised   = "admin.authorised"
 	EventAdminDenied       = "admin.denied"
 
+	// Administrative reads that disclose something about a person.
+	//
+	// Most reads are not audited, because an audit log recording every GET is
+	// one nobody reads. These two are, because what they disclose is who has an
+	// account: the list, and the route that turns a pseudonymous subject
+	// identifier back into the reference the integrating application chose,
+	// which the documentation asks to be opaque and which is in practice an
+	// email address. "Who looked up whom" is the question an insider
+	// investigation starts from, and it cannot be answered later if it was not
+	// recorded at the time.
+	EventAdminSubjectsListed     = "admin.subjects_listed"
+	EventAdminSubjectRefRevealed = "admin.subject_ref_revealed"
+
 	// Console passkeys.
 	//
 	// Enrolling and withdrawing one has its own pair rather than reusing the

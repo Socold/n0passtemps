@@ -247,7 +247,9 @@ that ships logs but does not query the alert table still sees the critical ones:
 query written against one log line works against all of them. Structured JSON on
 standard output is the default: there is no log file and no rotation, because
 writing to standard output and letting the supervisor handle the rest is what
-both systemd and every container runtime expect.
+both systemd and every container runtime expect. [SIEM.md](SIEM.md) maps these
+fields to ECS and OCSF, and says how the lines reach a syslog collector without
+this service holding a syslog client.
 
 | Field | On | Index it for |
 |---|---|---|
@@ -486,6 +488,7 @@ For an operator who wants a starting point rather than a menu:
 | Document | What it covers |
 |---|---|
 | [ADMIN-GUIDE.md](ADMIN-GUIDE.md) | What to do when one of these fires |
+| [SIEM.md](SIEM.md) | Getting these two streams off the box: syslog, the field mapping, the closed event vocabulary, the sink receiver's contract |
 | [TROUBLESHOOT.md](TROUBLESHOOT.md) | Symptom-first diagnosis |
 | [CONFIGURATION.md](CONFIGURATION.md) | `audit.retention_days`, `features.janitor_interval`, the throttle thresholds |
 | [THREAT-MODEL.md](THREAT-MODEL.md) | Why detection needs an external witness |

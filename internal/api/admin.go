@@ -139,7 +139,7 @@ func (s *Server) handleAdminListSubjects(w http.ResponseWriter, r *http.Request)
 	}
 
 	s.audited(r, audit.Event{
-		TenantID: tenantID, EventType: "admin.subjects_listed",
+		TenantID: tenantID, EventType: audit.EventAdminSubjectsListed,
 		ActorType: store.ActorAdmin, ActorID: caller.ActorID(),
 		Outcome: store.OutcomeSuccess,
 		Detail:  map[string]any{"returned": len(views)},
@@ -222,7 +222,7 @@ func (s *Server) handleAdminGetSubject(w http.ResponseWriter, r *http.Request) e
 		} else {
 			view.SubjectRef = ref
 			s.audited(r, audit.Event{
-				TenantID: tenantID, EventType: "admin.subject_ref_revealed",
+				TenantID: tenantID, EventType: audit.EventAdminSubjectRefRevealed,
 				ActorType: store.ActorAdmin, ActorID: caller.ActorID(),
 				SubjectID: sub.ID, ResourceType: "subject", ResourceID: sub.ID,
 				Outcome: store.OutcomeSuccess,

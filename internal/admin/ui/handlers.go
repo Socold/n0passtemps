@@ -545,7 +545,7 @@ func (h *Handler) handleSubjectList(w http.ResponseWriter, r *http.Request) {
 	// implementation detail of the interface.
 	h.audited(w, r, audit.Event{
 		TenantID:  sess.TenantID,
-		EventType: "admin.subjects_listed",
+		EventType: audit.EventAdminSubjectsListed,
 		ActorType: store.ActorAdmin,
 		ActorID:   sess.TokenID,
 		Outcome:   store.OutcomeSuccess,
@@ -966,7 +966,7 @@ func (h *Handler) handleSubjectReference(w http.ResponseWriter, r *http.Request)
 	}
 
 	h.audited(w, r, audit.Event{
-		TenantID: sess.TenantID, EventType: "admin.subject_ref_revealed",
+		TenantID: sess.TenantID, EventType: audit.EventAdminSubjectRefRevealed,
 		ActorType: store.ActorAdmin, ActorID: sess.TokenID,
 		SubjectID: id, ResourceType: "subject", ResourceID: id,
 		Outcome: store.OutcomeSuccess,
