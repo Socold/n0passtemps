@@ -171,6 +171,26 @@ func ApprovalRequired(detail string) *APIError {
 	}
 }
 
+// NotConfigured reports that a route exists and this deployment has not
+// configured what it serves.
+//
+// It is separate from Unavailable, which means a dependency is down and a retry
+// may work. Nothing here will change on a retry, and the two deserve different
+// alerts: one is an incident, the other is a configuration somebody has to go
+// and change.
+//
+// It is 503 rather than 404 because 404 says the route is not there, and an
+// operator reading that would go looking for a version mismatch. It is not an
+// empty body either: an empty document scrapes clean and reads as "nothing has
+// happened", which a monitoring system will believe until somebody checks.
+func NotConfigured(detail string, cause error) *APIError {
+	return &APIError{
+		Status: http.StatusServiceUnavailable, Type: TypeUnavailable,
+		Title:  "the service is not configured to answer that request",
+		Detail: detail, Internal: cause,
+	}
+}
+
 // Internal reports a fault in the service.
 func Internal(cause error) *APIError {
 	return &APIError{

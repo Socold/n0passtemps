@@ -52,6 +52,37 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   what this does not do for the assertion signing key, and why: Ed25519 and
   TPM 2.0 do not meet in the field.
 
+- **A Prometheus endpoint**, `GET /v1/metrics`, behind a new `metrics` scope.
+  Three series: `n0passtemps_build_info`, `n0passtemps_http_requests_total` by
+  route, method and status, and a `n0passtemps_http_request_duration_seconds`
+  histogram by route and method.
+
+  It is authenticated for the reason
+  [ADR 0008](docs/adr/0008-split-the-health-endpoint.md) split the health
+  endpoint: request rates by route, the shape of the 401 and 429 curves and the
+  version of the running binary are reconnaissance before they are diagnostics.
+  Prometheus reads a bearer token from a file, so a scrape configuration costs
+  two lines; [docs/MONITORING.md](docs/MONITORING.md) has it.
+
+  The scope is its own rather than part of `health`, because a scrape credential
+  lives in a configuration file, is shared with whoever runs monitoring and is
+  rarely rotated, and should therefore do one job.
+
+  The exposition format is written here rather than taken from
+  `prometheus/client_golang`, which is the argument `internal/assertion` makes
+  about JWT libraries: a format this small is cheaper to write than to depend on,
+  and it avoids a default registry that collects Go runtime metrics whether or
+  not anyone asked. What is given up is listed in the package comment.
+
+  The `route` label is the matched pattern and never the path. A Prometheus
+  series lives as long as the process, so a label taken from a request is
+  unbounded memory with a caller holding the pen, and on the routes that name a
+  subject it would be a list of users.
+
+  A deployment with no registry answers 503 with a problem document rather than
+  an empty body, because an empty document scrapes clean and reads as "nothing
+  has happened".
+
 - **[docs/EXTENSIONS.md](docs/EXTENSIONS.md)**, the standing answer to "could it
   also do X": what is core and stays core, what is an adapter, what would be a
   different product, and a list of candidates in the order their value divided by
@@ -127,6 +158,24 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `internal/audit/events.go` by a test rather than by hand, in both directions.
 
 ### Fixed
+
+- **The `route` log field carried the path, not the matched route.** On the
+  ceremony routes the path is the subject reference, and the documentation asks
+  for an opaque identifier while applications supply email addresses. So
+  `logging.redact_subject_refs` was on, worked, replaced `subject_ref` with a
+  digest, and the address travelled in the field immediately after it.
+
+  `routePattern` was written to prevent exactly this and says so in its comment,
+  and [docs/MONITORING.md](docs/MONITORING.md) describes the field as the matched
+  pattern. Both were true of the function and neither of the caller: `RequestLog`
+  wraps the multiplexer from outside, the multiplexer fills in `Request.Pattern`
+  as it dispatches, and the read happened before the dispatch, so the fallback to
+  the path ran on every request.
+
+  The summary line now reads the pattern after the handler returns, and a
+  `RouteLabel` middleware mounted on every route adds the field to the
+  request-scoped logger so that handler, authentication and authorisation lines
+  carry it too.
 
 - **Two audit event types were not part of the vocabulary.**
   `admin.subjects_listed` and `admin.subject_ref_revealed` existed only as string

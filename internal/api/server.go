@@ -11,6 +11,7 @@ import (
 	"github.com/Socold/n0passtemps/internal/config"
 	"github.com/Socold/n0passtemps/internal/crypto/envelope"
 	"github.com/Socold/n0passtemps/internal/health"
+	"github.com/Socold/n0passtemps/internal/metrics"
 	"github.com/Socold/n0passtemps/internal/store"
 	"github.com/Socold/n0passtemps/internal/subject"
 	"github.com/Socold/n0passtemps/internal/throttle"
@@ -34,6 +35,11 @@ type Deps struct {
 	Limiter   *throttle.Limiter
 	Health    *health.Checker
 	Logger    *slog.Logger
+
+	// Metrics is the Prometheus registry. A nil registry is the normal case in
+	// a test and costs nothing at runtime: the middleware is not mounted and
+	// the route answers that metrics are not configured.
+	Metrics *metrics.Registry
 
 	// Clock is injected so that tests are deterministic. Nothing in the
 	// request path calls time.Now directly.

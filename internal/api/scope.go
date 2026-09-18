@@ -37,9 +37,27 @@ const (
 	// is the stronger capability, and an integration that only runs ceremonies
 	// should not acquire it by association.
 	ScopeTickets Scope = "tickets"
+
+	// ScopeMetrics covers the Prometheus exposition at GET /v1/metrics.
+	//
+	// It is not part of health, although both are operational, because they
+	// answer to different readers and disclose different amounts. The detailed
+	// health report is read by a person during an incident; the metrics
+	// endpoint is read every fifteen seconds by a scraper whose credential
+	// lives in a scrape configuration file, is shared with whoever runs
+	// monitoring, and is rarely rotated. A key for that job should be able to
+	// do that job and nothing else.
+	//
+	// It is authenticated at all, rather than open on a separate port, for the
+	// reason ADR 0008 split the health endpoint: request rates by route, the
+	// shape of the 401 and 429 curves and the version of the running binary are
+	// reconnaissance before they are diagnostics.
+	ScopeMetrics Scope = "metrics"
 )
 
-var allScopes = []Scope{ScopeSubjects, ScopeWebAuthn, ScopeTOTP, ScopeRecovery, ScopeHealth, ScopeTickets}
+var allScopes = []Scope{
+	ScopeSubjects, ScopeWebAuthn, ScopeTOTP, ScopeRecovery, ScopeHealth, ScopeTickets, ScopeMetrics,
+}
 
 // ValidateScopes checks a requested scope list and returns it normalised:
 // lowercased, deduplicated and sorted.

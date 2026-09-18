@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 
+	"github.com/Socold/n0passtemps/internal/metrics"
 	"github.com/Socold/n0passtemps/internal/rbac"
 )
 
@@ -16,6 +17,7 @@ import (
 //	Recover          so a panic is still logged with that identifier
 //	SourceIP         resolves the client address once, before anything keys on it
 //	RequestLog       attaches the request-scoped logger
+//	RequestMetrics   counts the response, inside Recover so a panic counts as 500
 //	SecurityHeaders  applied to every response, including error responses
 //	BodyLimit        caps the body before any handler reads it
 //
@@ -69,6 +71,9 @@ func (s *Server) Routes() http.Handler {
 		Recover(),
 		SourceIP(cfg.Server.TrustProxy, cfg.Server.TrustedProxyCIDRs),
 		RequestLog(s.deps.Logger),
+		// Inside Recover, so a panic is counted as the 500 it becomes rather
+		// than not counted at all.
+		RequestMetrics(observerOrNil(s.deps.Metrics)),
 		SecurityHeaders(hsts),
 		BodyLimit(cfg.Server.MaxBodyBytes),
 	)
@@ -114,6 +119,7 @@ func (s *Server) mountPublic(mux *http.ServeMux) {
 	}
 
 	mux.Handle("GET /v1/health/detail", authed(ScopeHealth, s.handleHealthDetail))
+	mux.Handle("GET /v1/metrics", authed(ScopeMetrics, s.handleMetrics))
 
 	mux.Handle("POST /v1/subjects", authed(ScopeSubjects, s.handleCreateSubject))
 	mux.Handle("GET /v1/subjects/{subject_ref}", authed(ScopeSubjects, s.handleGetSubject))
@@ -269,4 +275,14 @@ func (s *Server) mountAdmin(mux *http.ServeMux) {
 
 	// Health.
 	mux.Handle("GET /admin/v1/health", guarded(rbac.PermHealthReadFull, s.handleHealthDetail))
+}
+
+// observerOrNil keeps a nil *metrics.Registry from becoming a non-nil
+// RequestObserver holding a nil pointer, which is the interface trap the admin
+// interface is converted around a few lines above and the same one.
+func observerOrNil(r *metrics.Registry) RequestObserver {
+	if r == nil {
+		return nil
+	}
+	return r
 }

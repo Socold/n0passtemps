@@ -1,9 +1,14 @@
 # Monitoring
 
-There is no metrics endpoint. The service exposes its state through two things
-an operator already has: the authenticated health report, and the audit log and
-alert table in the database it already backs up. This document says what to
-scrape from them, what to alert on, and what to tune.
+The service exposes its state through three things: the authenticated health
+report, a Prometheus endpoint, and the audit log and alert table in the database
+an operator already backs up. This document says what to scrape from each, what
+to alert on, and what to tune.
+
+They do not overlap by accident. The health report is a snapshot for a person
+during an incident, the metrics are a rate for a graph, and the audit log is the
+record of what was done. Nothing is counted in two of them, so there is never a
+pair of numbers to reconcile while something is going wrong.
 
 ## What to scrape
 
@@ -101,6 +106,58 @@ curl -sS --max-time 5 "$BASE/admin/v1/health" \
 The report is built fresh on every call, including re-reading the certificate
 from disk, so a renewal is reflected without a restart. It is not on the hot
 path; a 60 second interval is ample.
+
+### Metrics
+
+```bash
+curl -sS "$BASE/v1/metrics" -H "Authorization: Bearer $KEY"
+```
+
+The Prometheus text exposition, version 0.0.4, behind the `metrics` scope. It
+is authenticated for the reason [ADR 0008](adr/0008-split-the-health-endpoint.md)
+split the health endpoint: request rates by route, the shape of the 401 and 429
+curves and the version of the running binary are reconnaissance before they are
+diagnostics. Prometheus reads a bearer token from a file, so this costs a scrape
+configuration two lines:
+
+```yaml
+scrape_configs:
+  - job_name: n0passtemps
+    metrics_path: /v1/metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/n0passtemps.key
+    static_configs:
+      - targets: ["auth.internal:8080"]
+```
+
+Mint the key with the `metrics` scope and nothing else. A scrape credential
+lives in a configuration file, is shared with whoever runs monitoring and is
+rarely rotated, so it should be able to do that job and no other.
+
+| Series | What it is |
+|---|---|
+| `n0passtemps_build_info{version,commit,go_version}` | Always 1. Which binary is running, without a second endpoint |
+| `n0passtemps_http_requests_total{route,method,status}` | Every served request, refusals included. The rate of `status="401"` and `status="429"` is the shape of an attack |
+| `n0passtemps_http_request_duration_seconds{route,method}` | A cumulative histogram, buckets from 1ms to 10s. No status label: a histogram per code multiplies the series for a question nobody asks of latency |
+
+`route` is the matched pattern and never the path. That is not a tidiness
+choice: a Prometheus series lives as long as the process, so a label taken from
+a request is unbounded memory with a caller holding the pen, and on the routes
+that name a subject it would be a list of users in a system that is scraped
+every fifteen seconds and retained for months.
+
+A deployment whose binary has no registry wired in answers 503 with a problem
+document rather than an empty body. An empty document scrapes clean and reads as
+"nothing has happened", which a monitoring system will believe until somebody
+checks.
+
+**What is not here.** No Go runtime or process collectors, no per-subject or
+per-tenant series, and no counter for anything the audit log already records.
+The audit log is the record and this is a gauge of throughput; duplicating one
+into the other would give two numbers that disagree during an incident. The
+conditions worth alerting on that are not derivable from these three series are
+in the log, and are listed below.
 
 ### The audit log
 

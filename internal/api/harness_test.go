@@ -25,6 +25,7 @@ import (
 	"github.com/Socold/n0passtemps/internal/crypto/kek"
 	"github.com/Socold/n0passtemps/internal/crypto/token"
 	"github.com/Socold/n0passtemps/internal/health"
+	"github.com/Socold/n0passtemps/internal/metrics"
 	"github.com/Socold/n0passtemps/internal/store"
 	"github.com/Socold/n0passtemps/internal/store/sqlite"
 	"github.com/Socold/n0passtemps/internal/subject"
@@ -50,6 +51,10 @@ type harness struct {
 	// sealer is exposed so a test can insert an envelope-encrypted record the
 	// way the service would, rather than reimplementing the sealing.
 	sealer *envelope.Sealer
+
+	// metrics is the registry the server writes into, so a test can assert on
+	// the exposition without scraping it over HTTP.
+	metrics *metrics.Registry
 
 	apiKey string
 	admin  map[store.Role]string
@@ -159,11 +164,12 @@ func newHarness(t *testing.T, tune ...func(*config.Config)) *harness {
 	seedTenant(t, st, cfg.TenantID(), clock.now())
 	checker := health.New(&cfg, st, keyring, clock.now(), clock.now)
 
+	reg := metrics.New()
 	server := NewServer(Deps{
 		Config: &cfg, Store: st, Subjects: subjects, WebAuthn: rp,
 		Sealer: sealer, Assertion: issuer, Recorder: recorder,
 		Alerts: engine, Limiter: limiter, Health: checker,
-		Logger: log, Clock: clock.now,
+		Logger: log, Metrics: reg, Clock: clock.now,
 	})
 
 	ts := httptest.NewServer(server.Routes())
@@ -171,7 +177,7 @@ func newHarness(t *testing.T, tune ...func(*config.Config)) *harness {
 
 	h := &harness{
 		t: t, srv: ts, store: st, cfg: &cfg, clock: clock, sealer: sealer,
-		admin: map[store.Role]string{},
+		metrics: reg, admin: map[store.Role]string{},
 	}
 	h.apiKey = h.mintAPIKey("integration")
 	for _, role := range []store.Role{store.RoleFull, store.RoleOperator, store.RoleAuditor} {

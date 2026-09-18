@@ -73,7 +73,8 @@ info:
     # API key scopes
 
     An API key may be restricted to named families of `/v1` routes. The scopes
-    are `subjects`, `webauthn`, `totp`, `recovery`, `health` and `tickets`, and
+    are `subjects`, `webauthn`, `totp`, `recovery`, `health`, `tickets` and
+    `metrics`, and
     each `/v1` route states the one it needs. A key minted with an empty scope list is
     unrestricted and reaches every family; the minting response says so in
     `unrestricted`, so that an unrestricted key is a visible choice. A key

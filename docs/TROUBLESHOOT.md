@@ -461,7 +461,7 @@ curl -sS -G "$BASE/admin/v1/audit" -H "Authorization: Bearer $ADMIN" \
 
 | What you see | Cause | Fix |
 |---|---|---|
-| 403, and the audit entry names a scope in `resource_id` that is not in `detail.held` | The key was minted with scopes that do not cover the route family. The families are `subjects`, `webauthn`, `totp`, `recovery` and `health` | Scopes cannot be edited. Mint a key with the scopes the integration needs, deploy it, revoke the old one. Most integrations need `subjects` as well as their factor |
+| 403, and the audit entry names a scope in `resource_id` that is not in `detail.held` | The key was minted with scopes that do not cover the route family. The families are `subjects`, `webauthn`, `totp`, `recovery`, `health`, `tickets` and `metrics` | Scopes cannot be edited. Mint a key with the scopes the integration needs, deploy it, revoke the old one. Most integrations need `subjects` as well as their factor |
 | 403 from a key nobody expected to be calling that route | Either a misconfiguration, or a stolen key being explored | Treat it as the second until shown otherwise: read the source addresses in the audit entries |
 | 400 when minting, `unknown scope ...; the scopes are subjects, webauthn, totp, recovery, health` | A misspelled scope | Correct it. The refusal exists so that the mistake does not surface later as this 403 |
 | 429 with `Retry-After` on every public route | The key reached `throttle.max_requests_per_key` inside `throttle.window`. Every request on a public route counts, not only ceremonies | Wait, or raise the limit if the volume is legitimate. A sudden ceiling on a quiet integration is what a leaked key looks like |

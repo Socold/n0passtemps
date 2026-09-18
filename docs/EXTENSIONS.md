@@ -50,7 +50,7 @@ at rest.
 | The assertion signing key, and whatever comes to hold it | Same, and more so: its compromise is an authentication bypass rather than a disclosure |
 | RBAC, dual approval, throttling, the alert engine | Controls |
 | The administration interface | It is how an operator reaches the controls |
-| `/v1/health`, and metrics when they exist | The engine's own operational surface |
+| `/v1/health` and `/v1/metrics` | The engine's own operational surface |
 
 ### Adapter
 
@@ -145,16 +145,16 @@ engine and the RBAC model stay in the free core permanently.
 
 ## Candidates, in the order their value divided by their cost puts them
 
-Nothing below is built. The ordering is the part most likely to be wrong,
-because it is a guess at what integrators find hard rather than a report of what
-they said, and the first thing that should change this document is somebody
-saying otherwise.
+The ordering is the part most likely to be wrong, because it is a guess at what
+integrators find hard rather than a report of what they said, and the first
+thing that should change this document is somebody saying otherwise. Items
+marked ✅ have been built since.
 
 | # | Candidate | Cost | What it removes | What would make it a bad idea |
 |---|---|---|---|---|
 | 1 | **Publish `sdk/node` and `sdk/python`** | No engineering. It needs registry accounts | Today the answer to "how do I use this" is "clone the repository". Already the first row of the maintainer table in [ROADMAP.md](ROADMAP.md) | Nothing. It is the cheapest thing on this list by a wide margin |
 | 2 | **A reference enrolment and login page**, deployable rather than illustrative | Small. The hard part, the encoding conversions, is already in `sdk/node/src/browser.js` | The wall an integrator hits first: both ceremonies, the TOTP fallback and recovery codes, in a page to adapt rather than write | If it grows into a user portal. It is a page, not an account management surface |
-| 3 | **`/metrics`** | Small, and it goes in the core beside `/v1/health` | [MONITORING.md](MONITORING.md) currently answers "scrape health and parse the logs". That is a weak answer in a procurement review, and there is no Prometheus endpoint at all | Emitting a per-subject label, which turns the metrics endpoint into a list of users |
+| 3 | **`/metrics`** — ✅ built | Small, and it went in the core beside `/v1/health` | `GET /v1/metrics`, the Prometheus text exposition behind the `metrics` scope. The exposition is written by hand rather than through client_golang, for the reason `internal/assertion` does not use a JWT library | It emits no per-subject label, which is what would turn the endpoint into a list of users. See the cardinality paragraph in `internal/metrics` |
 | 4 | **A Helm chart** | Small | The distance between "there are manifests" and "it is installable" | Carrying deployment opinions the raw manifests deliberately do not |
 | 5 | **An integration architecture document** | Documentation | [ARCHITECTURE.md](ARCHITECTURE.md) describes the service. Nothing describes where it sits next to an application that already has users, sessions and a login page | Nothing |
 | 6 | **A reverse-proxy authentication helper** | Medium | The deployments that want to put this in front of an application they cannot change | Becoming a session manager, which is the line in the table above |

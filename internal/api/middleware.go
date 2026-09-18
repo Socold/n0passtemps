@@ -191,6 +191,47 @@ func RequestLog(root *slog.Logger) Middleware {
 	}
 }
 
+// RequestObserver records one served request. internal/metrics implements it.
+//
+// It is an interface rather than the concrete registry so that this package
+// does not depend on the shape of the exposition format, and so that a
+// deployment with no registry passes nil and pays for nothing.
+type RequestObserver interface {
+	ObserveRequest(route, method string, status int, d time.Duration)
+}
+
+// RequestMetrics records every served request.
+//
+// It sits beside RequestLog rather than inside it. The two want the same three
+// values and have different reasons to exist, and a log line that stopped being
+// written because a metric changed shape would be the wrong kind of coupling on
+// the one path that has to keep working.
+//
+// The route it reports is the matched pattern, read after the handler has
+// returned for the reason RequestLog explains. Reporting the concrete path here
+// would be worse than in the log: a Prometheus series lives as long as the
+// process, so a label taken from a request is unbounded memory with a caller
+// holding the pen, and on the ceremony routes it would be a list of users.
+func RequestMetrics(obs RequestObserver) Middleware {
+	return func(next http.Handler) http.Handler {
+		if obs == nil {
+			return next
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			rec := &statusRecorder{ResponseWriter: w}
+
+			routed := r.WithContext(r.Context())
+			next.ServeHTTP(rec, routed)
+
+			if rec.status == 0 {
+				rec.status = http.StatusOK
+			}
+			obs.ObserveRequest(routePattern(routed), r.Method, rec.status, time.Since(start))
+		})
+	}
+}
+
 // RouteLabel adds the matched route to the request-scoped logger.
 //
 // It is mounted inside the multiplexer, on every route, because that is the

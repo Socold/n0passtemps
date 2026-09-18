@@ -31,6 +31,7 @@ import (
 	"github.com/Socold/n0passtemps/internal/health"
 	"github.com/Socold/n0passtemps/internal/janitor"
 	"github.com/Socold/n0passtemps/internal/logging"
+	"github.com/Socold/n0passtemps/internal/metrics"
 	"github.com/Socold/n0passtemps/internal/store"
 	"github.com/Socold/n0passtemps/internal/store/postgres"
 	"github.com/Socold/n0passtemps/internal/store/sqlite"
@@ -222,6 +223,13 @@ func run() error {
 		adminHandler = adminUI
 	}
 
+	// One registry for the process, built here so that main owns it like every
+	// other collaborator. It carries the build information so that a scrape
+	// answers which binary is running without a second endpoint.
+	reg := metrics.New()
+	info := version.Current()
+	reg.SetBuildInfo(info.Version, info.Commit, info.GoVersion)
+
 	srv := api.NewServer(api.Deps{
 		Config:    cfg,
 		Store:     st,
@@ -234,6 +242,7 @@ func run() error {
 		Limiter:   limiter,
 		Health:    checker,
 		Logger:    log,
+		Metrics:   reg,
 		Clock:     time.Now,
 		AdminUI:   adminHandler,
 	})

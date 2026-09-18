@@ -1461,3 +1461,31 @@ func (s *Server) handleJWKS(w http.ResponseWriter, r *http.Request) error {
 func base32Secret(secret []byte) string {
 	return strings.TrimRight(base32.StdEncoding.EncodeToString(secret), "=")
 }
+
+// handleMetrics serves the Prometheus exposition.
+//
+// It is authenticated, behind ScopeMetrics, for the reason
+// [ADR 0008](../../docs/adr/0008-split-the-health-endpoint.md) split the health
+// endpoint: request rates by route, the shape of the 401 and 429 curves and the
+// version of the running binary are reconnaissance before they are diagnostics.
+// Prometheus reads a bearer token from a file, so this costs a scrape
+// configuration two lines.
+//
+// A deployment with no registry gets 503 rather than an empty document. An
+// empty document scrapes clean and means "nothing has happened", which is the
+// answer a monitoring system will believe for as long as nobody checks.
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) error {
+	if s.deps.Metrics == nil {
+		return NotConfigured("metrics are not configured on this deployment", nil)
+	}
+
+	// The 0.0.4 text format. The version parameter is what a scraper content
+	// negotiates on, and omitting it makes some of them fall back to a parser
+	// that is stricter about trailing whitespace than this document is.
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if _, err := s.deps.Metrics.WriteTo(w); err != nil {
+		s.deps.Logger.WarnContext(r.Context(), "metrics response not written")
+	}
+	return nil
+}

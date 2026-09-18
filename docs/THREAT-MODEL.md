@@ -159,7 +159,7 @@ integrating application's configuration.
 | Control | Effect |
 |---|---|
 | `webauthn.max_credentials_per_subject`, default 10 | Bounds silent mass enrolment |
-| API key scopes | A key minted with `scopes` reaches only the named route families: `subjects`, `webauthn`, `totp`, `recovery`, `health`, `tickets`. A key that only verifies TOTP codes cannot issue recovery codes or enrol an authenticator, and cannot mint an enrolment ticket. A call outside the scopes is a 403 and an `api_key.rejected` audit entry, so a stolen key being explored leaves a trace |
+| API key scopes | A key minted with `scopes` reaches only the named route families: `subjects`, `webauthn`, `totp`, `recovery`, `health`, `tickets`, `metrics`. A key that only verifies TOTP codes cannot issue recovery codes or enrol an authenticator, and cannot mint an enrolment ticket. A call outside the scopes is a 403 and an `api_key.rejected` audit entry, so a stolen key being explored leaves a trace |
 | Per-key volume limit | `throttle.max_requests_per_key` is metered by a middleware on every public route, so it bounds starting ceremonies and resolving subjects as well as failed authentications |
 | Every action audited | `subject.created`, `webauthn.registration.completed`, `recovery.issued` and the rest carry `actor_type: api_key` and the key's identifier, so the blast radius of a specific key is reconstructable |
 | `recovery.exhausted` and `recovery.low` alerts | A user whose sheet was retired out from under them shows up |
