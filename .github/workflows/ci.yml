@@ -59,6 +59,21 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Install golangci-lint
+        # Installed from the module proxy at a pinned version rather than run as
+        # a third-party action, which keeps one less workflow with access to the
+        # job's token. The version is read out of the Makefile rather than
+        # repeated here, so a local run and this one cannot lint with different
+        # releases; .golangci.yml pins the linter set, not the linter.
+        run: |
+          version=$(sed -n 's/^GOLANGCI_LINT_VERSION *?= *//p' Makefile)
+          if [ -z "${version}" ]; then
+            echo "::error::GOLANGCI_LINT_VERSION is not set in the Makefile"
+            exit 1
+          fi
+          echo "installing golangci-lint ${version}"
+          go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${version}"
+
       # Not the whole of 'make lint': the style budget in docs/ROADMAP.md is not
       # empty yet, so running all of it here would fail every build. This runs
       # the categories that are at zero, so that a cleared one stays cleared.

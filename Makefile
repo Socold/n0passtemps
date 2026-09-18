@@ -29,6 +29,8 @@ TEST_POSTGRES_URL ?= postgres://n0passtemps:n0passtemps@127.0.0.1:5432/n0passtem
 
 # Tool versions are pinned so a lint or scan result is reproducible across
 # machines and across time. Override to try a newer release.
+# Read out of this file by .github/workflows/ci.yml rather than repeated there,
+# so a local run and a CI run cannot lint with different releases.
 GOLANGCI_LINT_VERSION ?= v2.13.2
 # Kept in step with .github/workflows/security.yml: the gosec configuration in
 # .gosec.json uses globals a release before v2.29.0 would ignore, which would
