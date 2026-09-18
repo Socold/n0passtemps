@@ -30,6 +30,7 @@ superseded by a new record rather than edited in place. See
 | [0017](0017-administrative-sign-in-with-webauthn.md) | Administrative sign-in with WebAuthn, over a separate credential space | accepted |
 | [0018](0018-reducing-the-blast-radius-of-a-central-key.md) | Reducing the blast radius of a central key: rotate now, split later, and never pretend two files are two keys | accepted |
 | [0019](0019-seal-the-keyring-to-a-tpm.md) | Seal the keyring to a TPM, and say plainly that it protects the disk and not the host | accepted |
+| [0020](0020-core-and-adapters.md) | Core and adapters: decide by the trust path, not by the category | **proposed** |
 
 Records 0013 and 0014 are of a different kind. The specification is silent on
 both questions, how an approved operation comes to run and where the first
@@ -56,6 +57,12 @@ specification nor the roadmap raises: what an operator does about the one key
 whose loss no other control here recovers from. It is the first record to say no
 to two designs by name, a second signing key and an enterprise-only edition, and
 the reasons are the point of writing it down.
+
+Record 0020 is the first that is not accepted. It answers what to add to make
+the project usable by more people without turning it into an identity platform,
+and it is proposed rather than accepted because the ordering it ends on is a
+guess at what integrators find hard rather than a report of what they said.
+Nothing in it is built.
 
 Record 0019 implements part of 0018 and corrects it. 0018 deferred a key the
 process cannot read on the grounds that there was no hardware to test against;
