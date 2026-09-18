@@ -450,6 +450,7 @@ Security Top 10 2023, and GDPR Articles 15, 17 and 32.
 | [docs/EXTENSIONS.md](docs/EXTENSIONS.md) | What sits around the core and what never goes in it: the trust-path test, the adapters that exist, the ones that are candidates, and the ones that would be a different product |
 | [docs/SIEM.md](docs/SIEM.md) | Getting the two log streams into a SIEM: why there is no syslog client, the field mapping to ECS and OCSF, the closed audit event vocabulary, and what a sink receiver has to do |
 | [docs/adr/README.md](docs/adr/README.md) | Eighteen architecture decision records: the deliberate deviations from the original specification, and the convention itself |
+| [kits/login/README.md](kits/login/README.md) | The reference sign-in and enrolment page, with the backend that holds the API key: a passkey first, TOTP and recovery codes behind it, and the boundary the key never crosses |
 | [examples/README.md](examples/README.md) | Working clients in shell, Python, Node and Go, against `api/openapi.yaml` |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Building, testing, the `make ci` gate, the code style, the ADR process, commit messages |
 | [CHANGELOG.md](CHANGELOG.md) | What each release contains |

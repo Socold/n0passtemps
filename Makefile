@@ -68,8 +68,8 @@ command -v $(1) >/dev/null 2>&1 || { echo "$(1) is not on PATH; install the pinn
 endef
 
 .PHONY: help build build-all test test-race test-integration test-tpm cover \
-	lint lint-cleared sec secrets fmt fmt-check vet tidy migrate-check docker \
-	setup-wizard clean ci
+	test-kits lint lint-cleared sec secrets fmt fmt-check vet tidy migrate-check \
+	docker setup-wizard clean ci
 
 help: ## List the available targets
 	@awk 'BEGIN { FS = ":.*?## " } \
@@ -128,6 +128,19 @@ test-tpm: ## Run the keyring sealing tests against a software TPM
 	trap 'kill $$(cat $$state/pid) 2>/dev/null; rm -rf $$state' EXIT; \
 	N0PASSTEMPS_TEST_TPM_TCP=127.0.0.1:$(SWTPM_PORT),127.0.0.1:$(SWTPM_CTRL_PORT) \
 		go test $(GOFLAGS_BUILD) -count=1 ./internal/crypto/kek/
+
+# kits/ holds app kits, each its own Go module with a replace pointing at the
+# SDK in this repository. They are separate modules so that they cannot become
+# a dependency of the service and so the root go.mod carries no replace, which
+# means "go build ./..." from here does not reach them and they would rot
+# unnoticed. This is what stops that.
+KITS ?= kits/login
+
+test-kits: ## Build and test the app kits, which are separate modules
+	@for k in $(KITS); do \
+		echo "==> $$k"; \
+		( cd $$k && go build ./... && go vet ./... && go test $(GOFLAGS_BUILD) -count=1 ./... ) || exit 1; \
+	done
 
 cover: ## Write coverage.out and print the total statement coverage
 	go test $(GOFLAGS_BUILD) -covermode=atomic -coverprofile=$(COVER_FILE) ./...
@@ -219,5 +232,5 @@ clean: ## Remove build output and coverage data
 # lint-cleared rather than lint, because lint cannot pass while the style budget
 # in docs/ROADMAP.md is not empty, and a gate CONTRIBUTING.md asks contributors
 # to pass has to be one that can pass. Run 'make lint' to see the backlog.
-ci: fmt-check vet lint-cleared migrate-check test-race cover sec secrets build ## Run the full gate, in the order CI runs it
+ci: fmt-check vet lint-cleared migrate-check test-race test-kits cover sec secrets build ## Run the full gate, in the order CI runs it
 	@echo "ci gate passed for $(VERSION)"

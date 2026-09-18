@@ -1,0 +1,140 @@
+/*
+ * Plain enough to read and to replace. No framework, no build step, no web
+ * font: a sign-in page that waits on a stylesheet from somewhere else is a
+ * sign-in page that fails when that somewhere else does, and this one has to
+ * work on the day the rest of the estate does not.
+ *
+ * It follows the system colour scheme rather than choosing one, because an
+ * application drops this into its own design and the least presumptuous
+ * starting point is the one the reader already set.
+ */
+
+:root {
+  color-scheme: light dark;
+  --fg: #16181d;
+  --muted: #5c6370;
+  --bg: #ffffff;
+  --line: #d7dbe0;
+  --accent: #1f4ed8;
+  --warn-fg: #6b4400;
+  --warn-bg: #fff6e0;
+  --error-fg: #8a1c1c;
+  --error-bg: #fdecec;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e6e8ec;
+    --muted: #98a0ac;
+    --bg: #14161a;
+    --line: #333942;
+    --accent: #7ea2ff;
+    --warn-fg: #ffd89a;
+    --warn-bg: #2e2413;
+    --error-fg: #ffb4b4;
+    --error-bg: #2e1616;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 2rem 1rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+main {
+  max-width: 26rem;
+  margin: 0 auto;
+}
+
+h1 { font-size: 1.5rem; margin: 0 0 1.5rem; }
+h2 { font-size: 1.15rem; margin: 0 0 0.75rem; }
+
+button {
+  width: 100%;
+  padding: 0.7rem 1rem;
+  font: inherit;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+button:hover { border-color: var(--accent); }
+
+button.primary {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+/* A control mid-ceremony is waiting on a person and their device, which can
+ * take a while. Saying so is better than looking broken. */
+button[aria-busy="true"] { opacity: 0.6; cursor: progress; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Focus is never removed: this page is used by people who navigate it with a
+ * keyboard, and an authenticator prompt returns focus here. */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+label {
+  display: block;
+  margin: 1rem 0 0.3rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.optional { font-weight: 400; color: var(--muted); }
+
+input {
+  width: 100%;
+  padding: 0.6rem 0.7rem;
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+form { margin: 0 0 1.5rem; }
+form button { margin-top: 1rem; }
+
+details {
+  margin-top: 1.5rem;
+  border-top: 1px solid var(--line);
+  padding-top: 1rem;
+}
+
+summary { cursor: pointer; color: var(--muted); }
+summary:hover { color: var(--fg); }
+
+hr { border: 0; border-top: 1px solid var(--line); margin: 1.5rem 0; }
+
+.hint { font-size: 0.88rem; color: var(--muted); margin: 0.5rem 0 0; }
+
+.warn {
+  padding: 0.7rem 0.9rem;
+  border-radius: 8px;
+  color: var(--warn-fg);
+  background: var(--warn-bg);
+}
+
+#error {
+  margin-top: 1.5rem;
+  padding: 0.7rem 0.9rem;
+  border-radius: 8px;
+  color: var(--error-fg);
+  background: var(--error-bg);
+}
+
+#status { color: var(--muted); margin-top: 1.5rem; min-height: 1.5rem; }
+
+dl { display: grid; grid-template-columns: auto 1fr; gap: 0.4rem 1rem; margin: 0 0 1.5rem; }
+dt { color: var(--muted); }
+dd { margin: 0; overflow-wrap: anywhere; }

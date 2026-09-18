@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="same-origin">
+<title>Sign in</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<main>
+  <h1>Sign in</h1>
+
+  <!--
+    One page, three ways in, in the order they should be offered.
+
+    A passkey first and with no field to fill: the authenticator already knows
+    which credentials it holds for this site, so asking who you are before
+    asking the authenticator is a question with no purpose. The rest is behind a
+    disclosure, because a fallback presented as an equal choice is one people
+    take, and the fallbacks are the weaker paths.
+  -->
+
+  <section id="signed-out">
+    <button id="passkey" class="primary" type="button">Continue with a passkey</button>
+    <p class="hint" id="passkey-hint">Your device will ask for your fingerprint, face or PIN.</p>
+
+    <details>
+      <summary>Other ways to sign in</summary>
+
+      <form id="named-form" autocomplete="on">
+        <label for="named-ref">Email address</label>
+        <input id="named-ref" name="username" type="email" autocomplete="username webauthn"
+               inputmode="email" autocapitalize="none" spellcheck="false" required>
+        <button type="submit">Use a passkey for this address</button>
+      </form>
+
+      <form id="totp-form">
+        <label for="totp-ref">Email address</label>
+        <input id="totp-ref" type="email" autocomplete="username"
+               inputmode="email" autocapitalize="none" spellcheck="false" required>
+        <label for="totp-code">Code from your authenticator app</label>
+        <!--
+          inputmode numeric and autocomplete one-time-code are what make a phone
+          offer the code from the notification rather than the keyboard.
+        -->
+        <input id="totp-code" type="text" inputmode="numeric" pattern="[0-9]*"
+               autocomplete="one-time-code" maxlength="10" required>
+        <button type="submit">Sign in with a code</button>
+      </form>
+
+      <form id="recovery-form">
+        <label for="recovery-ref">Email address</label>
+        <input id="recovery-ref" type="email" autocomplete="username"
+               inputmode="email" autocapitalize="none" spellcheck="false" required>
+        <label for="recovery-code">Recovery code</label>
+        <input id="recovery-code" type="text" autocomplete="off"
+               autocapitalize="characters" spellcheck="false" required>
+        <button type="submit">Use a recovery code</button>
+        <p class="hint">
+          A recovery code is single use and is the way back in when you have lost
+          your authenticator. Using one does not replace it.
+        </p>
+      </form>
+    </details>
+
+    <hr>
+
+    <details id="enrol">
+      <summary>I do not have a passkey yet</summary>
+      <form id="enrol-form">
+        <label for="enrol-ref">Email address</label>
+        <input id="enrol-ref" type="email" autocomplete="username"
+               inputmode="email" autocapitalize="none" spellcheck="false" required>
+        <label for="enrol-label">Name this device <span class="optional">optional</span></label>
+        <input id="enrol-label" type="text" autocomplete="off" maxlength="60"
+               placeholder="Work laptop">
+        <button type="submit">Create a passkey</button>
+      </form>
+      <p class="hint">
+        Creating a passkey does not sign you in. You will be asked to use it
+        afterwards, which is the first time it proves anything.
+      </p>
+    </details>
+  </section>
+
+  <section id="signed-in" hidden>
+    <h2>Signed in</h2>
+    <dl>
+      <dt>Subject</dt><dd id="who"></dd>
+      <dt>Factors</dt><dd id="factors"></dd>
+    </dl>
+    <div id="after"></div>
+    <button id="logout" type="button">Sign out</button>
+  </section>
+
+  <p id="status" role="status" aria-live="polite"></p>
+  <p id="error" role="alert" hidden></p>
+</main>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,5 +1,9 @@
 # Build output
 /bin/
+# Kits build to a binary named after their directory when "go build" is run
+# inside one, which is the natural thing to do while adapting them.
+kits/*/login
+kits/*/*.exe
 /dist/
 /n0passtemps-server
 /n0passtemps-wizard

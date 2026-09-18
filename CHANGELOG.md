@@ -52,6 +52,32 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   what this does not do for the assertion signing key, and why: Ed25519 and
   TPM 2.0 do not meet in the field.
 
+- **[kits/login](kits/login/README.md)**, a reference sign-in and enrolment page
+  with the backend that belongs behind it.
+
+  A passkey offered first and with no field to fill, the named ceremony, TOTP and
+  recovery codes behind a disclosure, enrolment behind another, and conditional
+  mediation where the browser supports it. The backend holds the API key, calls
+  the service through `sdk/go`, and turns a verified assertion into its own
+  session.
+
+  The shape is the point. `examples/node/register.html` puts the API key in the
+  page on purpose, to demonstrate a ceremony with no backend, and says in
+  capitals not to copy that; nothing showed the arrangement to copy. Here the
+  browser talks to `/api` on its own origin, the backend talks to the service,
+  and `kit_test.go` asserts that no served asset contains a credential.
+
+  It is its own Go module with a `replace` pointing at the SDK in this
+  repository, so it cannot become a dependency of the service and so it
+  demonstrates the API the server actually serves rather than the last tagged
+  one. `make test-kits` builds it, and CI runs that, because a separate module is
+  one `go build ./...` does not reach and a reference integration that stopped
+  compiling is worse than none.
+
+  `public/webauthn.js` is a byte-for-byte copy of `sdk/node/src/browser.js`, kept
+  identical by a test: `go:embed` cannot reach outside its package, and two
+  versions of the base64url conversions would be one version that is wrong.
+
 - **A Prometheus endpoint**, `GET /v1/metrics`, behind a new `metrics` scope.
   Three series: `n0passtemps_build_info`, `n0passtemps_http_requests_total` by
   route, method and status, and a `n0passtemps_http_request_duration_seconds`

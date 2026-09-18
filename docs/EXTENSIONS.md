@@ -60,7 +60,7 @@ They call the HTTP API and hold nothing.
 |---|---|
 | SDKs for Node, Python and Go | Built, in `sdk/`. Node and Python are unpublished |
 | Browser helpers | Built, `sdk/node/src/browser.js`: the base64url and `ArrayBuffer` conversions every WebAuthn integration gets wrong |
-| A reference enrolment and login page | `examples/node/register.html` is a sketch, not a deployable page |
+| A reference enrolment and login page | Built, `kits/login/`. Its own Go module, so it cannot become a dependency of the service |
 | Helm chart, Terraform module | Not built. `deploy/kubernetes/` is raw manifests |
 | SIEM field mapping and shipping recipes | [SIEM.md](SIEM.md), and it is documentation with no code, which is the right amount |
 | A reverse-proxy authentication helper | Not built |
@@ -153,7 +153,7 @@ marked ✅ have been built since.
 | # | Candidate | Cost | What it removes | What would make it a bad idea |
 |---|---|---|---|---|
 | 1 | **Publish `sdk/node` and `sdk/python`** | No engineering. It needs registry accounts | Today the answer to "how do I use this" is "clone the repository". Already the first row of the maintainer table in [ROADMAP.md](ROADMAP.md) | Nothing. It is the cheapest thing on this list by a wide margin |
-| 2 | **A reference enrolment and login page**, deployable rather than illustrative | Small. The hard part, the encoding conversions, is already in `sdk/node/src/browser.js` | The wall an integrator hits first: both ceremonies, the TOTP fallback and recovery codes, in a page to adapt rather than write | If it grows into a user portal. It is a page, not an account management surface |
+| 2 | **A reference enrolment and login page** — ✅ built | Small, as estimated. `kits/login/` | `kits/login/` is a page and a backend that holds the API key, which is the shape the existing examples deliberately do not show. Both ceremonies, the TOTP fallback, recovery codes, and conditional mediation | If it grows into a user portal. Its README and its package comment both say it is a page and not an account management surface, which is the only thing keeping it one |
 | 3 | **`/metrics`** — ✅ built | Small, and it went in the core beside `/v1/health` | `GET /v1/metrics`, the Prometheus text exposition behind the `metrics` scope. The exposition is written by hand rather than through client_golang, for the reason `internal/assertion` does not use a JWT library | It emits no per-subject label, which is what would turn the endpoint into a list of users. See the cardinality paragraph in `internal/metrics` |
 | 4 | **A Helm chart** | Small | The distance between "there are manifests" and "it is installable" | Carrying deployment opinions the raw manifests deliberately do not |
 | 5 | **An integration architecture document** | Documentation | [ARCHITECTURE.md](ARCHITECTURE.md) describes the service. Nothing describes where it sits next to an application that already has users, sessions and a login page | Nothing |
