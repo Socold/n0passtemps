@@ -1,6 +1,7 @@
 package assertion
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -1152,7 +1153,7 @@ func TestJWKSRetiredKeyOrderIsStable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("JWKS: %v", err)
 	}
-	if string(a) != string(b) {
+	if !bytes.Equal(a, b) {
 		t.Errorf("jwks depends on the order the retired keys were listed:\n%s\n%s", a, b)
 	}
 

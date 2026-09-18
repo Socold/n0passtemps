@@ -310,10 +310,11 @@ deserves a record with a working implementation behind it rather than a
 paragraph here, and the seam has to be introduced by the first backend that
 proves it fits, not before.
 
-**What is cheap and worth doing first**, whichever backend comes: give the
-signer seam a single in-process implementation and move `Issuer` onto it, so
-that the interface is exercised by the tests that already exist before anything
-depends on it being right.
+**No seam before a backend.** An interface with one in-process implementation
+and nothing else behind it is decoration, and decoration around a key is worse
+than none because it is believed. The first backend that proves the shape fits
+is what introduces it, which is the same rule ADR 0018 applies to the second
+signing key it rejects.
 
 ## Maintenance backlog
 
@@ -326,13 +327,13 @@ The pinned linter could not run at all until 1.1.0: `v2.6.0` cannot read the
 export data of the toolchain this project builds with, so every `make lint`
 ended with one `typecheck` error and no analysis. With the pin moved and the
 misconfigurations corrected, the correctness linters report nothing and the
-`errcheck` backlog has been cleared. What remains is 413 findings from the
+`errcheck` backlog has been cleared. What remains is 423 findings from the
 budget linters, which accumulated in code written while nothing was checking
 it:
 
 | Linter | Count | What it is |
 |---|---|---|
-| `govet` (`shadow`) | 165 | A nested `err` shadowing an outer one. Idiomatic in most cases, and the check is famously noisy, but it is also how a handled error becomes an unhandled one |
+| `govet` (`shadow`) | 175 | A nested `err` shadowing an outer one. Idiomatic in most cases, and the check is famously noisy, but it is also how a handled error becomes an unhandled one |
 | `lll` | 119 | Lines past 120 columns |
 | `gocritic` | 82 | Diagnostic, style and performance suggestions |
 | `revive` | 33 | Mostly missing doc comments on methods with unexported receivers |
@@ -341,6 +342,15 @@ it:
 None is a defect today, and none of them is `errcheck`, which was the one
 category worth reading line by line. Clearing it turned up two real faults and
 one class of false positive, all recorded in the changelog.
+
+The `shadow` count grew by ten with the signing key rotation, every one of them
+`if err := f(); err != nil` in a test, which is the form the surrounding files
+use throughout. Contorting the new code to avoid a finding the rest of the tree
+carries 165 of would buy a smaller number and a file that reads unlike its
+neighbours. The count is recorded here rather than worked around, because the
+point of a budget is to be visible: it goes to zero when the category is cleared
+across the tree, in one deliberate pass, and not by writing unidiomatic Go at
+the edges in the meantime.
 
 `make lint` is deliberately not wired into CI while this stands. Wiring it in is
 the exit criterion, not the starting point: the backlog goes to zero first, and
