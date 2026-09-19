@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/base64"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -55,6 +56,20 @@ type answers struct {
 	TenantName string
 	Lite       bool
 	AdminUI    bool
+
+	// Exposure says how a listener that is not loopback is protected, and is
+	// empty when it is loopback and the question was never asked. One of
+	// "tls", "proxy" or "constrained", which are the three the validator
+	// accepts. See askExposure.
+	Exposure   string
+	TLSCert    string
+	TLSKey     string
+	ProxyCIDRs string
+
+	// AdminAllowList is the networks the administrative surface is reachable
+	// from, asked for only when it is served on a listener that is not
+	// loopback, whether or not the console is. See askAdminAllowList.
+	AdminAllowList string
 }
 
 // runSetup asks a short series of questions and writes the files.
@@ -134,11 +149,21 @@ func runSetup(args []string) error {
 		break
 	}
 
-	addr, err := prompt(in, "\nListen address", "127.0.0.1:8080")
-	if err != nil {
+	for {
+		addr, aerr := prompt(in, "\nListen address", "127.0.0.1:8080")
+		if aerr != nil {
+			return aerr
+		}
+		if perr := probeAddr(addr); perr != nil {
+			fmt.Printf("  %v\n", perr)
+			continue
+		}
+		a.Addr = addr
+		break
+	}
+	if err = askExposure(in, &a); err != nil {
 		return err
 	}
-	a.Addr = addr
 
 	name, err := prompt(in, "Organisation name, shown by the authenticator", "n0passtemps")
 	if err != nil {
@@ -151,6 +176,9 @@ func runSetup(args []string) error {
 		return err
 	}
 	a.AdminUI = ui
+	if err = askAdminAllowList(in, &a); err != nil {
+		return err
+	}
 
 	// The files are rendered and validated before anything is written, so a
 	// rejected configuration does not leave half a deployment on disk.
@@ -237,6 +265,173 @@ func runSetup(args []string) error {
 		"Back up the secrets volume and the pepper now. Losing the pepper makes every\n" +
 		"existing user unfindable; losing the keyring makes the TOTP secrets unreadable.\n")
 	return nil
+}
+
+// askAdminAllowList asks who may reach the administrative surface, when it is
+// served somewhere an allow list is required.
+//
+// The condition is the validator's: the administrative surface on a listener
+// that is not loopback, with no allow list, is refused. It does not depend on
+// the console. Saying no to the console turns off the pages and leaves
+// /admin/v1 on the same port, answering a bearer token from anywhere. This had the same shape
+// of failure askExposure fixes -- the list was written into the file as a
+// commented example, so the run ended on "this is a bug in this tool" for
+// anybody who said yes to the console on a listener they had also been allowed
+// to set to anything.
+func askAdminAllowList(in *bufio.Reader, a *answers) error {
+	if !listenerNeedsExposure(a.Addr) {
+		return nil
+	}
+
+	fmt.Print("\nThe administrative routes would be reachable from every network that\n" +
+		"can reach the service, so it needs an allow list. A container published to\n" +
+		"127.0.0.1, which is what the generated compose file does, is reached from\n" +
+		"the host itself.\n\n")
+
+	for {
+		list, err := prompt(in, "Networks administration is reachable from, comma separated", "127.0.0.1/32")
+		if err != nil {
+			return err
+		}
+		if perr := probeAdminAllowList(list); perr != nil {
+			fmt.Printf("  %v\n", perr)
+			continue
+		}
+		a.AdminAllowList = list
+		return nil
+	}
+}
+
+// probeAdminAllowList reproduces the CIDR rules for the console's list.
+func probeAdminAllowList(list string) error {
+	cfg := config.Default()
+	cfg.Admin.IPAllowList = splitCIDRs(list)
+	if len(cfg.Admin.IPAllowList) == 0 {
+		return errors.New("at least one network is required")
+	}
+	return firstRelevantError(cfg.Validate(), "ip_allow_list")
+}
+
+// probeAddr reproduces the listener's shape rules, so a malformed address is
+// re-asked rather than failing the whole run at the end.
+//
+// It probes with allow_plaintext set, because the plaintext rule is a separate
+// question askExposure puts to the operator; this one is only about whether the
+// string is an address at all.
+func probeAddr(addr string) error {
+	cfg := config.Default()
+	cfg.Server.Addr = addr
+	cfg.Server.AllowPlaintext = true
+	return firstRelevantError(cfg.Validate(), "server.addr")
+}
+
+// listenerNeedsExposure reports whether the address obliges the operator to say
+// how TLS is accounted for.
+//
+// The rule is the validator's rather than a copy of it: an address that
+// validates with allow_plaintext and fails without it is exactly one the
+// service will not serve in clear, which is the set askExposure exists for. A
+// malformed address fails both and is caught by probeAddr first.
+func listenerNeedsExposure(addr string) bool {
+	cfg := config.Default()
+	cfg.Server.Addr = addr
+	cfg.Server.AllowPlaintext = true
+	if firstRelevantError(cfg.Validate(), "server.addr") != nil {
+		return false
+	}
+	cfg.Server.AllowPlaintext = false
+	return firstRelevantError(cfg.Validate(), "server.addr") != nil
+}
+
+// askExposure puts the one question a non-loopback listener cannot be set up
+// without.
+//
+// It is conditional, like the PostgreSQL question, so the common answer of
+// 127.0.0.1:8080 still walks the six questions the tool promises. Before it
+// existed, answering 0.0.0.0:8080 -- the obvious answer for a container, and
+// the one the generated compose file publishes behind -- produced a file that
+// the service refuses, so the run ended on "this is a bug in this tool" and
+// wrote nothing at all. An operator with no support channel was left with the
+// tool blaming itself and no files.
+//
+// The three choices are the three the validator names in its own message, in
+// the order an operator is likely to want them.
+func askExposure(in *bufio.Reader, a *answers) error {
+	if !listenerNeedsExposure(a.Addr) {
+		return nil
+	}
+
+	fmt.Printf("\n%s is not loopback, so every credential would cross the network\n"+
+		"in clear unless something accounts for TLS. Three arrangements are accepted.\n\n"+
+		"  1. This process terminates TLS.\n"+
+		"  2. A reverse proxy in front terminates it.\n"+
+		"  3. Something outside already constrains who can reach the port, such as a\n"+
+		"     container published to loopback, which is what the generated compose\n"+
+		"     file does.\n\n", a.Addr)
+
+	for {
+		choice, err := prompt(in, "Which one", "3")
+		if err != nil {
+			return err
+		}
+		switch strings.TrimSpace(choice) {
+		case "1":
+			a.Exposure = "tls"
+			if a.TLSCert, err = prompt(in, "Certificate chain path",
+				"/etc/n0passtemps/tls/fullchain.pem"); err != nil {
+				return err
+			}
+			if a.TLSKey, err = prompt(in, "Private key path",
+				"/etc/n0passtemps/tls/privkey.pem"); err != nil {
+				return err
+			}
+			return nil
+		case "2":
+			a.Exposure = "proxy"
+			// The networks are asked for rather than defaulted, because
+			// trusting a forwarded address from anywhere lets a caller choose
+			// the address rate limiting and audit entries are keyed on.
+			for {
+				cidrs, cerr := prompt(in, "Networks the proxy speaks from, comma separated", "10.0.0.0/8")
+				if cerr != nil {
+					return cerr
+				}
+				if perr := probeProxyCIDRs(cidrs); perr != nil {
+					fmt.Printf("  %v\n", perr)
+					continue
+				}
+				a.ProxyCIDRs = cidrs
+				return nil
+			}
+		case "3":
+			a.Exposure = "constrained"
+			return nil
+		default:
+			fmt.Print("  Answer 1, 2 or 3.\n")
+		}
+	}
+}
+
+// probeProxyCIDRs reproduces the CIDR rules, so a typo is re-asked.
+func probeProxyCIDRs(list string) error {
+	cfg := config.Default()
+	cfg.Server.TrustProxy = true
+	cfg.Server.TrustedProxyCIDRs = splitCIDRs(list)
+	if len(cfg.Server.TrustedProxyCIDRs) == 0 {
+		return errors.New("at least one network is required")
+	}
+	return firstRelevantError(cfg.Validate(), "trusted_proxy_cidrs")
+}
+
+// splitCIDRs turns the comma separated answer into the list the config holds.
+func splitCIDRs(list string) []string {
+	var out []string
+	for _, part := range strings.Split(list, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // withTemporaryEnv sets variables and returns a function restoring them.

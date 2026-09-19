@@ -122,6 +122,8 @@ func applyEnv(cfg *Config) error {
 	str("WEBAUTHN_METADATA_PATH", &cfg.WebAuthn.MetadataPath)
 	list("WEBAUTHN_ALLOWED_AAGUIDS", &cfg.WebAuthn.AllowedAAGUIDs)
 	list("WEBAUTHN_BLOCKED_AAGUIDS", &cfg.WebAuthn.BlockedAAGUIDs)
+	list("WEBAUTHN_ADMIN_ORIGINS", &cfg.WebAuthn.AdminOrigins)
+	boolean("WEBAUTHN_REFUSE_SIGN_COUNT_REGRESSION", &cfg.WebAuthn.RefuseSignCountRegression)
 	num("WEBAUTHN_MAX_CREDENTIALS_PER_SUBJECT", &cfg.WebAuthn.MaxCredentialsPerSubject)
 	boolean("WEBAUTHN_CLONE_WARNING_ALERTS", &cfg.WebAuthn.CloneWarningAlerts)
 
@@ -191,7 +193,9 @@ func applyEnv(cfg *Config) error {
 	boolean("LOGGING_INCLUDE_SOURCE_IP", &cfg.Logging.IncludeSourceIP)
 	boolean("LOGGING_REDACT_SUBJECT_REFS", &cfg.Logging.RedactSubjectRefs)
 
+	errsBeforeLiteMode := len(errs)
 	boolean("FEATURES_LITE_MODE", &cfg.Features.LiteMode)
+	prefixedLiteMode := envSets("features.lite_mode") && len(errs) == errsBeforeLiteMode
 	boolean("FEATURES_ADMIN_RBAC", &cfg.Features.AdminRBAC)
 	boolean("FEATURES_DUAL_APPROVAL", &cfg.Features.DualApproval)
 	list("FEATURES_DUAL_APPROVAL_OPERATIONS", &cfg.Features.DualApprovalOperations)
@@ -205,11 +209,22 @@ func applyEnv(cfg *Config) error {
 	// LITE_MODE is accepted without the prefix as well, because the published
 	// quickstart uses the short form and changing it would break copied
 	// commands.
+	//
+	// The two forms name one setting, so when both are present they have to
+	// agree. Letting either win would mean a deployment that exports
+	// N0PASSTEMPS_FEATURES_LITE_MODE=false still starts without role
+	// enforcement because a stray LITE_MODE=true was inherited from a shell,
+	// and the operator is the only one who knows which of the two they meant.
 	if v, ok := os.LookupEnv("LITE_MODE"); ok {
 		b, err := parseBool("LITE_MODE", v)
-		if err != nil {
+		switch {
+		case err != nil:
 			fail(err)
-		} else {
+		case prefixedLiteMode && b != cfg.Features.LiteMode:
+			fail(fmt.Errorf("config: LITE_MODE is %t but %sFEATURES_LITE_MODE is %t; they are two "+
+				"names for features.lite_mode and must not disagree, so unset the one that "+
+				"was not meant", b, EnvPrefix, cfg.Features.LiteMode))
+		default:
 			cfg.Features.LiteMode = b
 		}
 	}
@@ -240,6 +255,17 @@ func recordedEnvKeys() []string {
 		_ = applyEnv(&cfg)
 	}
 	return observedKeys
+}
+
+// envSets reports whether the environment sets the dotted configuration key,
+// under the same rule as lookup: an empty value counts as unset.
+//
+// It does not go through lookup, which records every key it is asked about;
+// this is asked about keys applyEnv has already consulted.
+func envSets(dotted string) bool {
+	name := EnvPrefix + strings.ToUpper(strings.ReplaceAll(dotted, ".", "_"))
+	v, ok := os.LookupEnv(name)
+	return ok && strings.TrimSpace(v) != ""
 }
 
 // lookup reads a prefixed variable, treating an empty value as unset. An

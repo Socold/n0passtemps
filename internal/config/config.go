@@ -43,6 +43,17 @@ const SystemTenantID = "system"
 // reaching a driver that takes the pool size as an int32.
 const MaxDatabaseConns = 4096
 
+// MaxRequestBodyBytes is the largest value server.max_body_bytes accepts.
+//
+// The largest body the API legitimately receives is a WebAuthn attestation
+// object, a few tens of KiB with a full certificate chain, and the default of
+// 256 KiB already leaves room around it. Sixteen MiB is sixty-four times that
+// default: generous to a deployment with a reason to raise the cap, and still a
+// bound, which a value mistyped by three digits is not. The cap applies before
+// authentication, so it is also the most an anonymous caller can make the
+// service read per request.
+const MaxRequestBodyBytes = 16 << 20
+
 // Config is the complete server configuration.
 type Config struct {
 	Tenant    Tenant    `toml:"tenant"`
@@ -249,8 +260,9 @@ type WebAuthn struct {
 	AttestationPreference string `toml:"attestation_preference"`
 
 	// RequireAttestation refuses a registration whose attestation cannot be
-	// verified. Enabling it without a metadata source configured is a
-	// configuration error and Validate says so.
+	// verified. Verifying one means checking a certificate chain against trust
+	// anchors, and the only source of anchors this service has is MetadataPath,
+	// so Validate refuses the setting without one.
 	RequireAttestation bool `toml:"require_attestation"`
 
 	// MetadataPath is a FIDO Metadata Service BLOB on disk. Supplying it
@@ -259,8 +271,17 @@ type WebAuthn struct {
 	MetadataPath string `toml:"metadata_path"`
 
 	// AllowedAAGUIDs restricts registration to named authenticator models.
-	// Empty means any model. This is the offline-friendly alternative to full
-	// attestation verification.
+	// Empty means any model.
+	//
+	// It is an inventory filter and not a cryptographic control. The AAGUID it
+	// matches on is a value carried in the authenticator data of the
+	// registration response, and unless an attestation statement has been
+	// verified against a trust anchor nothing has proved that the device
+	// reporting it is the model it names. Software able to produce a
+	// well-formed response can put any AAGUID it likes there, including one
+	// from this list. Use it to keep a fleet on the models an operator has
+	// chosen, not to keep an attacker out: that is what MetadataPath with
+	// RequireAttestation is for.
 	AllowedAAGUIDs []string `toml:"allowed_aaguids"`
 
 	// BlockedAAGUIDs refuses named models, for withdrawing a device whose
@@ -275,6 +296,37 @@ type WebAuthn struct {
 	// counter fails to advance. It does not refuse the assertion: many
 	// authenticators legitimately report a constant zero.
 	CloneWarningAlerts bool `toml:"clone_warning_alerts"`
+
+	// RefuseSignCountRegression turns a counter that moved backwards into a
+	// refusal rather than a signal.
+	//
+	// It is off by default so that turning it on is a deliberate change of
+	// behaviour. The narrow case it covers is a counter strictly below a
+	// stored value that is not zero, which no correct authenticator produces:
+	// a counter either advances or is absent altogether. A counter that
+	// stalled at its stored value is left alone, because that is what every
+	// counter-less passkey does on every assertion.
+	//
+	// The cost of turning it on is that a user whose authenticator has been
+	// restored from a backup, or replaced under warranty with its secrets
+	// migrated, is locked out until an operator revokes the credential.
+	RefuseSignCountRegression bool `toml:"refuse_sign_count_regression"`
+
+	// AdminOrigins lists the origins the administration console's own
+	// ceremonies accept, which is narrower than Origins and deliberately so.
+	//
+	// Origins is the list the integrating application's front end is served
+	// from. Without a list of its own the console would accept an assertion
+	// collected at any of them, so any origin trusted to sign a user in would
+	// also be trusted to sign an administrator in, and the phishing resistance
+	// a passkey is chosen for would be gone from the surface that needs it
+	// most.
+	//
+	// Empty means "derive it": a deployment serving one origin has no question
+	// to answer, and the console is held to that origin. A deployment serving
+	// several has to say which one is the console's, and Validate refuses to
+	// start with the interface enabled until it does.
+	AdminOrigins []string `toml:"admin_origins"`
 }
 
 // TOTP configures time-based one-time passwords, per RFC 6238.
@@ -393,11 +445,18 @@ type Throttle struct {
 
 	// MaxFailuresPerSubject and MaxFailuresPerIP trigger a lockout for
 	// LockoutDuration once exceeded inside Window.
+	//
+	// The per-subject budget is held once per authentication factor, so wrong
+	// TOTP codes cannot lock a subject out of WebAuthn. On the public API the
+	// address is the one the integrating application declares for its end
+	// user, and the limit is not applied to a request that declares none.
 	MaxFailuresPerSubject int `toml:"max_failures_per_subject"`
 	MaxFailuresPerIP      int `toml:"max_failures_per_ip"`
 
 	// MaxRequestsPerKey caps total volume from one API key, which limits the
-	// damage a leaked key can do before it is noticed.
+	// damage a leaked key can do before it is noticed. It is a rate limit and
+	// never a lockout: past it the key is refused until Window rolls, and
+	// LockoutDuration plays no part.
 	MaxRequestsPerKey int `toml:"max_requests_per_key"`
 
 	LockoutDuration Duration `toml:"lockout_duration"`
@@ -616,7 +675,9 @@ type Logging struct {
 	IncludeSourceIP bool `toml:"include_source_ip"`
 
 	// RedactSubjectRefs keeps application-supplied subject references out of
-	// logs, replacing them with a short prefix of their HMAC. These
+	// logs, replacing them with a short prefix of their SHA-256. The digest
+	// is unkeyed, so whoever holds the logs can confirm a guessed reference
+	// by hashing it; it cannot be read back from the prefix. These
 	// references are frequently email addresses whatever the documentation
 	// advises, so redaction is on by default.
 	RedactSubjectRefs bool `toml:"redact_subject_refs"`
@@ -629,7 +690,8 @@ type Logging struct {
 type Features struct {
 	// LiteMode is a shorthand that turns off AdminRBAC, DualApproval,
 	// DeferredErasure and KEKRotationReminder together. Applied before
-	// validation, so an explicit setting in the file still wins.
+	// validation, so an explicit setting in the file or in the environment
+	// still wins.
 	LiteMode bool `toml:"lite_mode"`
 
 	// AdminRBAC enforces the three administrative roles. With it off, every
@@ -664,6 +726,22 @@ type Features struct {
 	// successor when the rotation request names no grace of its own. Zero
 	// means the predecessor stops at once. It is bounded by MaxRotationGrace.
 	RotationGrace Duration `toml:"rotation_grace"`
+}
+
+// DualApprovalOperationNames lists the values accepted in
+// features.dual_approval_operations.
+//
+// Each one is the string a handler in internal/api passes to its approval gate.
+// The list is declared here rather than imported because internal/api reads
+// this package and importing it back would be circular, which is the same
+// arrangement as RiskReasons. A name belongs here once its route exists and not
+// before: the gate matches by string comparison, so a name nothing passes would
+// be accepted, held for nobody, and read by the operator as a control in force.
+var DualApprovalOperationNames = []string{
+	"credential.revoke_bulk",
+	"subject.erase",
+	"admin_token.create",
+	"kek.rotate",
 }
 
 // MaxRotationGrace is the longest overlap a rotation may leave between a
@@ -887,24 +965,32 @@ func Load(path string) (*Config, error) {
 // applyLiteMode turns off the governance features. It runs after the file and
 // the environment have been read, but only relaxes settings the operator did
 // not set explicitly, so lite_mode is a shorthand rather than an override.
+//
+// A key set through the environment is as explicit as one set in the file. The
+// environment is the higher-precedence source, so letting the shorthand undo it
+// would turn N0PASSTEMPS_FEATURES_ADMIN_RBAC=true into no role enforcement, and
+// N0PASSTEMPS_DATABASE_DRIVER=postgres into a fresh SQLite file, without a word.
 func applyLiteMode(cfg *Config, path string) {
-	explicit := explicitKeys(path)
-	if !explicit["features.admin_rbac"] {
+	inFile := explicitKeys(path)
+	explicit := func(key string) bool {
+		return inFile[key] || envSets(key)
+	}
+	if !explicit("features.admin_rbac") {
 		cfg.Features.AdminRBAC = false
 	}
-	if !explicit["features.dual_approval"] {
+	if !explicit("features.dual_approval") {
 		cfg.Features.DualApproval = false
 	}
-	if !explicit["features.deferred_erasure"] {
+	if !explicit("features.deferred_erasure") {
 		cfg.Features.DeferredErasure = false
 	}
-	if !explicit["features.kek_rotation_reminder"] {
+	if !explicit("features.kek_rotation_reminder") {
 		cfg.Features.KEKRotationReminder = false
 	}
-	if !explicit["database.driver"] {
+	if !explicit("database.driver") {
 		cfg.Database.Driver = "sqlite"
 	}
-	if !explicit["recovery.code_count"] && cfg.Recovery.CodeCount == 16 {
+	if !explicit("recovery.code_count") && cfg.Recovery.CodeCount == 16 {
 		cfg.Recovery.CodeCount = 8
 	}
 }
@@ -948,115 +1034,260 @@ var (
 // Validate checks the configuration for internal consistency and for settings
 // that would leave the service insecure. It returns every problem found rather
 // than the first, so an operator fixes one round of errors instead of many.
+// Validate checks the configuration for internal consistency and for settings
+// that would leave the service insecure. It returns every problem found rather
+// than the first, so an operator fixes one round of errors instead of many.
+//
+// The work is split one method per section, in the order the sections appear in
+// the file, because a single function over every setting reached a hundred and
+// thirty branches and nothing that long is read before it is edited. Each
+// method returns its own problems and holds no state, so the order below is
+// presentation rather than dependency, with the one exception named on
+// validateAdmin.
 func (c *Config) Validate() error {
-	var errs []error
-	add := func(format string, args ...any) {
-		errs = append(errs, fmt.Errorf(format, args...))
+	var errs errList
+	for _, section := range []func() errList{
+		c.validateTenant,
+		c.validateServer,
+		c.validateDatabase,
+		c.validateKEK,
+		c.validateSubject,
+		c.validateWebAuthn,
+		c.validateTOTP,
+		c.validateRecovery,
+		c.validateTickets,
+		c.validateAssertion,
+		c.validateThrottle,
+		c.validateRisk,
+		c.validateAudit,
+		c.validateAdmin,
+		c.validateLogging,
+		c.validateFeatures,
+	} {
+		errs = append(errs, section()...)
 	}
+	return errors.Join(errs...)
+}
 
+// errList accumulates the problems found in one section.
+//
+// It carries addf so that a section reads as a list of conditions and messages
+// rather than as a list of appends, which is what the single Validate used a
+// closure for.
+type errList []error
+
+// addf records a problem described by a format string.
+func (e *errList) addf(format string, args ...any) {
+	*e = append(*e, fmt.Errorf(format, args...))
+}
+
+// tlsEnabled reports whether this process terminates TLS itself.
+//
+// Either file alone is a misconfiguration rather than a disabled listener, and
+// validateServer says so; this reports the operator's intent, which is what
+// validateAdmin needs in order to decide about the session cookie.
+func (c *Config) tlsEnabled() bool {
+	return c.Server.TLSCertFile != "" || c.Server.TLSKeyFile != ""
+}
+
+// validateTenant checks the tenant identifier, which every row is keyed on.
+func (c *Config) validateTenant() errList {
+	var errs errList
 	// Tenant.
 	if c.Tenant.ID == "" {
-		add("config: tenant.id is required")
+		errs.addf("config: tenant.id is required")
 	} else if c.Tenant.ID == SystemTenantID {
-		add("config: tenant.id %q is reserved for records that cannot be attributed "+
+		errs.addf("config: tenant.id %q is reserved for records that cannot be attributed "+
 			"to a tenant, such as a failed authentication", SystemTenantID)
 	} else {
 		for _, r := range c.Tenant.ID {
 			if !(r == '-' || r == '_' ||
 				(r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')) {
-				add("config: tenant.id %q may contain only lowercase letters, digits, "+
+				errs.addf("config: tenant.id %q may contain only lowercase letters, digits, "+
 					"hyphen and underscore", c.Tenant.ID)
 				break
 			}
 		}
 	}
 
-	// Server.
-	if c.Server.Addr == "" {
-		add("config: server.addr is required")
-	} else if _, _, err := net.SplitHostPort(c.Server.Addr); err != nil {
-		add("config: server.addr %q is not host:port: %v", c.Server.Addr, err)
+	return errs
+}
+
+// validateServer checks the listener, TLS and the proxy trust settings.
+func (c *Config) validateServer() errList {
+	errs := c.validateListener()
+	errs = append(errs, c.validateProxyAndCORS()...)
+	return append(errs, c.validateTimeouts()...)
+}
+
+// validateTimeouts checks the three deadlines for which net/http reads zero, or
+// anything below it, as "none".
+//
+// Such a value removes the deadline rather than choosing one: a connection that
+// stops sending, or stops reading, is then held open for as long as the peer
+// likes, and enough of them exhaust the listener without one request ever
+// completing. A zero idle_timeout alone would fall back to read_timeout, but it
+// is refused with the others so that no key of this section means "unlimited".
+// server.read_header_timeout is checked in validateProxyAndCORS.
+func (c *Config) validateTimeouts() errList {
+	var errs errList
+	for _, t := range []struct {
+		key     string
+		value   time.Duration
+		example string
+	}{
+		{"server.read_timeout", c.Server.ReadTimeout.Duration, "15s"},
+		{"server.write_timeout", c.Server.WriteTimeout.Duration, "15s"},
+		{"server.idle_timeout", c.Server.IdleTimeout.Duration, "60s"},
+	} {
+		if t.value <= 0 {
+			errs.addf("config: %s must be positive, got %s; net/http takes zero to mean no "+
+				"deadline of its own, which lets a stalled connection be held open for as "+
+				"long as the peer likes. Set a duration such as %q, the default",
+				t.key, t.value, t.example)
+		}
 	}
-	tlsEnabled := c.Server.TLSCertFile != "" || c.Server.TLSKeyFile != ""
+	return errs
+}
+
+// validateListener checks the address and the TLS pair.
+//
+// The plaintext rule is the substance of it: a listener that is neither on
+// loopback nor behind TLS nor behind a proxy that terminates it is refused,
+// because every credential this service takes would cross the network in clear.
+func (c *Config) validateListener() errList {
+	var errs errList
+	if c.Server.Addr == "" {
+		errs.addf("config: server.addr is required")
+	} else if _, _, err := net.SplitHostPort(c.Server.Addr); err != nil {
+		errs.addf("config: server.addr %q is not host:port: %v", c.Server.Addr, err)
+	}
+	tlsEnabled := c.tlsEnabled()
 	if tlsEnabled && (c.Server.TLSCertFile == "" || c.Server.TLSKeyFile == "") {
-		add("config: server.tls_cert_file and server.tls_key_file must be set together")
+		errs.addf("config: server.tls_cert_file and server.tls_key_file must be set together")
 	}
 	if !tlsEnabled && !c.Server.TrustProxy && !c.Server.AllowPlaintext && !isLoopbackAddr(c.Server.Addr) {
-		add("config: server.addr %q is not loopback but TLS is not configured and "+
+		errs.addf("config: server.addr %q is not loopback but TLS is not configured and "+
 			"server.trust_proxy is false; either terminate TLS here, set trust_proxy "+
 			"with trusted_proxy_cidrs when a reverse proxy terminates it, or set "+
 			"server.allow_plaintext when something outside this process already "+
 			"constrains who can reach the port, such as a container published to "+
 			"loopback", c.Server.Addr)
 	}
+	return errs
+}
+
+// validateProxyAndCORS checks who may speak for a client and who may call from
+// a browser.
+//
+// Both settings decide whose word the service takes for something: the proxy
+// list for the client address that rate limiting and audit entries are keyed
+// on, the origin list for which pages may make a credentialed request.
+func (c *Config) validateProxyAndCORS() errList {
+	var errs errList
 	if c.Server.TrustProxy && len(c.Server.TrustedProxyCIDRs) == 0 {
-		add("config: server.trust_proxy requires server.trusted_proxy_cidrs; accepting " +
+		errs.addf("config: server.trust_proxy requires server.trusted_proxy_cidrs; accepting " +
 			"a forwarded client address from any source lets a caller spoof the address " +
 			"that rate limiting and audit entries are keyed on")
 	}
 	for _, cidr := range c.Server.TrustedProxyCIDRs {
-		if _, _, err := net.ParseCIDR(cidr); err != nil {
-			add("config: server.trusted_proxy_cidrs entry %q is not a CIDR: %v", cidr, err)
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			errs.addf("config: server.trusted_proxy_cidrs entry %q is not a CIDR: %v", cidr, err)
+			continue
+		}
+		// The widest blocks reserved for private use are 10.0.0.0/8 and
+		// fc00::/7, so they are the widest a single operator can own outright.
+		// Anything wider takes in networks that belong to somebody else, and a
+		// peer there is a caller, not a proxy: it would choose its own
+		// X-Forwarded-For and with it the address that rate limiting, the admin
+		// allow list and the audit entries all rely on.
+		ones, bits := prefixLength(network)
+		if widest := widestProxyPrefix(bits); ones < widest {
+			errs.addf("config: server.trusted_proxy_cidrs entry %q is wider than /%d, the widest "+
+				"block a single operator controls; every address in it could choose the client "+
+				"address that rate limiting, the admin allow list and the audit entries rely on. "+
+				"List the addresses of the reverse proxies themselves, such as \"10.0.3.7/32\" "+
+				"or the subnet the load balancer sits in", cidr, widest)
 		}
 	}
 	if c.Server.MaxBodyBytes <= 0 {
-		add("config: server.max_body_bytes must be positive")
+		errs.addf("config: server.max_body_bytes must be positive")
+	}
+	if c.Server.MaxBodyBytes > MaxRequestBodyBytes {
+		errs.addf("config: server.max_body_bytes is %d, above the maximum of %d; the largest "+
+			"legitimate request is a WebAuthn attestation of a few tens of KiB and every "+
+			"body is decoded in memory, so a larger cap only sizes what an unauthenticated "+
+			"caller can make the service hold. Use the default of 262144 unless a client is "+
+			"actually refused", c.Server.MaxBodyBytes, MaxRequestBodyBytes)
 	}
 	for _, o := range c.Server.CORSAllowedOrigins {
 		if o == "*" {
-			add("config: server.cors_allowed_origins must not contain \"*\"; these " +
+			errs.addf("config: server.cors_allowed_origins must not contain \"*\"; these " +
 				"endpoints are credentialed and a wildcard is both forbidden with " +
 				"credentials and unsafe")
 			continue
 		}
 		if err := validateOrigin(o); err != nil {
-			add("config: server.cors_allowed_origins: %v", err)
+			errs.addf("config: server.cors_allowed_origins: %v", err)
 		}
 	}
 	if c.Server.ReadHeaderTimeout.Duration <= 0 {
-		add("config: server.read_header_timeout must be positive, it is the defence " +
+		errs.addf("config: server.read_header_timeout must be positive, it is the defence " +
 			"against a slow-header denial of service")
 	}
 
+	return errs
+}
+
+// validateDatabase checks the driver, the connection string and the pool bounds.
+func (c *Config) validateDatabase() errList {
+	var errs errList
 	// Database.
 	switch c.Database.Driver {
 	case "sqlite", "postgres":
 	case "":
-		add("config: database.driver is required")
+		errs.addf("config: database.driver is required")
 	default:
-		add("config: database.driver %q is not supported, use \"sqlite\" or \"postgres\"", c.Database.Driver)
+		errs.addf("config: database.driver %q is not supported, use \"sqlite\" or \"postgres\"", c.Database.Driver)
 	}
 	if c.Database.DSN == "" {
-		add("config: database.dsn is required")
+		errs.addf("config: database.dsn is required")
 	}
 	if c.Database.Driver == "postgres" && c.Database.DSN != "" {
 		if err := validatePostgresDSN(c.Database.DSN, c.Database.AllowPlaintext); err != nil {
-			add("config: database.dsn: %v", err)
+			errs.addf("config: database.dsn: %v", err)
 		}
 	}
 	if c.Database.MaxOpenConns <= 0 {
-		add("config: database.max_open_conns must be positive")
+		errs.addf("config: database.max_open_conns must be positive")
 	}
 	if c.Database.MaxOpenConns > MaxDatabaseConns {
-		add("config: database.max_open_conns (%d) cannot exceed %d",
+		errs.addf("config: database.max_open_conns (%d) cannot exceed %d",
 			c.Database.MaxOpenConns, MaxDatabaseConns)
 	}
 	if c.Database.MaxIdleConns > c.Database.MaxOpenConns {
-		add("config: database.max_idle_conns (%d) cannot exceed max_open_conns (%d)",
+		errs.addf("config: database.max_idle_conns (%d) cannot exceed max_open_conns (%d)",
 			c.Database.MaxIdleConns, c.Database.MaxOpenConns)
 	}
 
+	return errs
+}
+
+// validateKEK checks the keyring provider and where its material comes from.
+func (c *Config) validateKEK() errList {
+	var errs errList
 	// KEK.
 	switch c.KEK.Provider {
 	case "file":
 		if c.KEK.Path == "" {
-			add("config: kek.path is required when kek.provider is \"file\"")
+			errs.addf("config: kek.path is required when kek.provider is \"file\"")
 		} else if err := c.checkKEKOutsideDataDir(); err != nil {
-			add("%v", err)
+			errs.addf("%v", err)
 		}
 	case "env":
 		if c.KEK.EnvVar == "" {
-			add("config: kek.env_var is required when kek.provider is \"env\"")
+			errs.addf("config: kek.env_var is required when kek.provider is \"env\"")
 		}
 	case "tpm":
 		// The same path check as "file". A sealed keyring in the data volume is
@@ -1064,150 +1295,263 @@ func (c *Config) Validate() error {
 		// useless without the TPM, but it is the same mistake made in the same
 		// place and a deployment that seals today may stop sealing tomorrow.
 		if c.KEK.Path == "" {
-			add("config: kek.path is required when kek.provider is \"tpm\"; it is the sealed keyring")
+			errs.addf("config: kek.path is required when kek.provider is \"tpm\"; it is the sealed keyring")
 		} else if err := c.checkKEKOutsideDataDir(); err != nil {
-			add("%v", err)
+			errs.addf("%v", err)
 		}
 	case "":
-		add("config: kek.provider is required")
+		errs.addf("config: kek.provider is required")
 	default:
-		add("config: kek.provider %q is not supported, use \"file\", \"env\" or \"tpm\"", c.KEK.Provider)
+		errs.addf("config: kek.provider %q is not supported, use \"file\", \"env\" or \"tpm\"", c.KEK.Provider)
 	}
 
+	return errs
+}
+
+// validateSubject checks the pepper and the bound on a caller-supplied reference.
+func (c *Config) validateSubject() errList {
+	var errs errList
 	// Subject.
 	if c.Subject.PepperEnv == "" {
-		add("config: subject.pepper_env is required")
+		errs.addf("config: subject.pepper_env is required")
 	}
 	if c.Subject.MaxRefLength < 1 || c.Subject.MaxRefLength > 4096 {
-		add("config: subject.max_ref_length must be between 1 and 4096, got %d", c.Subject.MaxRefLength)
+		errs.addf("config: subject.max_ref_length must be between 1 and 4096, got %d", c.Subject.MaxRefLength)
 	}
 
-	// WebAuthn.
+	return errs
+}
+
+// validateWebAuthn checks the relying party, the origins and the attestation policy.
+func (c *Config) validateWebAuthn() errList {
+	errs := c.validateRelyingParty()
+	errs = append(errs, c.validateAdminOrigins()...)
+	errs = append(errs, c.validateAttestationPolicy()...)
+	return append(errs, c.validateCeremonyBounds()...)
+}
+
+// validateAdminOrigins checks the origins the console's own ceremonies accept.
+//
+// It lives beside the relying party checks rather than with the rest of the
+// administration settings because it is the same question those checks answer,
+// asked of a narrower surface: which origins may produce a response this
+// service will verify. The answer is only allowed to be a subset of the
+// origins the relying party serves, since an origin outside them cannot
+// produce a response that matches the relying party identifier in any case.
+func (c *Config) validateAdminOrigins() errList {
+	var errs errList
+	for _, o := range c.WebAuthn.AdminOrigins {
+		if err := validateOrigin(o); err != nil {
+			errs.addf("config: webauthn.admin_origins: %v", err)
+			continue
+		}
+		if c.WebAuthn.RPID != "" {
+			if err := originMatchesRPID(o, c.WebAuthn.RPID); err != nil {
+				errs.addf("config: webauthn.admin_origins: %v", err)
+			}
+		}
+	}
+
+	// With the interface off there is no console ceremony to hold to an
+	// origin, so an unanswered question costs nothing and the deployment is
+	// not stopped over it.
+	if !c.Admin.UIEnabled || len(c.WebAuthn.AdminOrigins) > 0 || len(c.WebAuthn.Origins) < 2 {
+		return errs
+	}
+	errs.addf("config: webauthn.admin_origins is empty while webauthn.origins lists %d "+
+		"origins and the administration interface is enabled; the console would accept an "+
+		"assertion collected at any of them, so name the one it is served from, for "+
+		"example admin_origins = [%q]", len(c.WebAuthn.Origins), c.WebAuthn.Origins[0])
+	return errs
+}
+
+// validateRelyingParty checks the identifier and the origins allowed to speak
+// for it.
+//
+// An origin that does not match the relying party identifier is refused here
+// rather than at the first ceremony, because the browser's refusal names
+// neither setting and the operator has no way to tell which of the two is
+// wrong.
+func (c *Config) validateRelyingParty() errList {
+	var errs errList
 	if c.WebAuthn.RPID == "" {
 		errs = append(errs, ErrMissingRPID)
 	} else if err := validateRPID(c.WebAuthn.RPID); err != nil {
-		add("config: webauthn.rp_id: %v", err)
+		errs.addf("config: webauthn.rp_id: %v", err)
 	}
 	if len(c.WebAuthn.Origins) == 0 {
 		errs = append(errs, ErrMissingOrigins)
 	}
 	for _, o := range c.WebAuthn.Origins {
 		if err := validateOrigin(o); err != nil {
-			add("config: webauthn.origins: %v", err)
+			errs.addf("config: webauthn.origins: %v", err)
 			continue
 		}
 		if c.WebAuthn.RPID != "" {
 			if err := originMatchesRPID(o, c.WebAuthn.RPID); err != nil {
-				add("config: webauthn.origins: %v", err)
+				errs.addf("config: webauthn.origins: %v", err)
 			}
 		}
 	}
+	return errs
+}
+
+// validateAttestationPolicy checks what the service asks an authenticator to
+// prove about itself, and what it checks that proof against.
+//
+// The combinations matter more than the individual values: requiring
+// attestation while asking for none means the authenticator is never asked for
+// a statement, and requiring it without a metadata file means there is nothing
+// to verify the statement against.
+func (c *Config) validateAttestationPolicy() errList {
+	var errs errList
 	switch c.WebAuthn.UserVerification {
 	case "required", "preferred", "discouraged":
 	default:
-		add("config: webauthn.user_verification %q is not valid, use \"required\", "+
+		errs.addf("config: webauthn.user_verification %q is not valid, use \"required\", "+
 			"\"preferred\" or \"discouraged\"", c.WebAuthn.UserVerification)
 	}
 	if c.WebAuthn.UserVerification == "discouraged" {
-		add("config: webauthn.user_verification \"discouraged\" means the authenticator " +
+		errs.addf("config: webauthn.user_verification \"discouraged\" means the authenticator " +
 			"proves possession only, so a WebAuthn assertion is no longer sufficient on " +
 			"its own; set \"required\" or \"preferred\"")
 	}
 	switch c.WebAuthn.AttestationPreference {
 	case "none", "indirect", "direct":
 	default:
-		add("config: webauthn.attestation_preference %q is not valid, use \"none\", "+
+		errs.addf("config: webauthn.attestation_preference %q is not valid, use \"none\", "+
 			"\"indirect\" or \"direct\"", c.WebAuthn.AttestationPreference)
 	}
 	if c.WebAuthn.RequireAttestation {
 		if c.WebAuthn.AttestationPreference == "none" {
-			add("config: webauthn.require_attestation needs attestation_preference " +
+			errs.addf("config: webauthn.require_attestation needs attestation_preference " +
 				"\"direct\" or \"indirect\", otherwise the authenticator is never asked " +
 				"for a statement to verify")
 		}
-		if c.WebAuthn.MetadataPath == "" && len(c.WebAuthn.AllowedAAGUIDs) == 0 {
-			add("config: webauthn.require_attestation needs either a metadata_path or " +
-				"an allowed_aaguids list; with neither there is nothing to verify an " +
-				"attestation statement against")
+		// The allow list used to satisfy this requirement, and it cannot: the
+		// verification the setting promises needs trust anchors, and a list of
+		// AAGUIDs is a list of values the client declares. Without a BLOB the
+		// library's VerifyAttestation returns as soon as the statement is
+		// internally consistent, so a self-signed packed statement naming an
+		// allowed AAGUID registers successfully and the setting reports a
+		// check nobody made.
+		if c.WebAuthn.MetadataPath == "" {
+			errs.addf("config: webauthn.require_attestation = true needs webauthn.metadata_path; " +
+				"with no metadata BLOB no attestation statement is checked against a trust " +
+				"anchor, and allowed_aaguids does not stand in for one because the AAGUID it " +
+				"matches on is declared by the client. Either point metadata_path at a FIDO " +
+				"Metadata Service BLOB, or set require_attestation = false and keep " +
+				"allowed_aaguids as the inventory filter it is")
 		}
 	}
 	if c.WebAuthn.MetadataPath != "" {
 		if _, err := os.Stat(c.WebAuthn.MetadataPath); err != nil {
-			add("config: webauthn.metadata_path %q is not readable: %v", c.WebAuthn.MetadataPath, err)
+			errs.addf("config: webauthn.metadata_path %q is not readable: %v", c.WebAuthn.MetadataPath, err)
 		}
 	}
 	for _, g := range c.WebAuthn.AllowedAAGUIDs {
 		if err := validateAAGUID(g); err != nil {
-			add("config: webauthn.allowed_aaguids: %v", err)
+			errs.addf("config: webauthn.allowed_aaguids: %v", err)
 		}
 	}
 	for _, g := range c.WebAuthn.BlockedAAGUIDs {
 		if err := validateAAGUID(g); err != nil {
-			add("config: webauthn.blocked_aaguids: %v", err)
+			errs.addf("config: webauthn.blocked_aaguids: %v", err)
 		}
 	}
 	if overlap := intersect(c.WebAuthn.AllowedAAGUIDs, c.WebAuthn.BlockedAAGUIDs); len(overlap) > 0 {
-		add("config: AAGUID %s appears in both allowed_aaguids and blocked_aaguids", overlap[0])
+		errs.addf("config: AAGUID %s appears in both allowed_aaguids and blocked_aaguids", overlap[0])
 	}
+	return errs
+}
+
+// validateCeremonyBounds checks the two limits on a ceremony: how long a
+// challenge stays open, and how many credentials one subject may hold.
+func (c *Config) validateCeremonyBounds() errList {
+	var errs errList
 	if c.WebAuthn.ChallengeTTL.Duration < 30*time.Second || c.WebAuthn.ChallengeTTL.Duration > 15*time.Minute {
-		add("config: webauthn.challenge_ttl must be between 30s and 15m, got %s",
+		errs.addf("config: webauthn.challenge_ttl must be between 30s and 15m, got %s",
 			c.WebAuthn.ChallengeTTL.Duration)
 	}
 	if c.WebAuthn.MaxCredentialsPerSubject < 1 {
-		add("config: webauthn.max_credentials_per_subject must be at least 1")
+		errs.addf("config: webauthn.max_credentials_per_subject must be at least 1")
 	}
 
+	return errs
+}
+
+// validateTOTP checks the parameters of RFC 6238.
+func (c *Config) validateTOTP() errList {
+	var errs errList
 	// TOTP.
 	switch c.TOTP.Algorithm {
 	case "SHA1", "SHA256", "SHA512":
 	default:
-		add("config: totp.algorithm %q is not valid, use \"SHA1\", \"SHA256\" or \"SHA512\"",
+		errs.addf("config: totp.algorithm %q is not valid, use \"SHA1\", \"SHA256\" or \"SHA512\"",
 			c.TOTP.Algorithm)
 	}
 	if c.TOTP.Digits != 6 && c.TOTP.Digits != 8 {
-		add("config: totp.digits must be 6 or 8, got %d", c.TOTP.Digits)
+		errs.addf("config: totp.digits must be 6 or 8, got %d", c.TOTP.Digits)
 	}
 	if c.TOTP.Period.Duration < 15*time.Second || c.TOTP.Period.Duration > 120*time.Second {
-		add("config: totp.period must be between 15s and 120s, got %s", c.TOTP.Period.Duration)
+		errs.addf("config: totp.period must be between 15s and 120s, got %s", c.TOTP.Period.Duration)
 	}
 	if c.TOTP.SecretBytes < 20 {
-		add("config: totp.secret_bytes must be at least 20, RFC 4226 section 4 requires "+
+		errs.addf("config: totp.secret_bytes must be at least 20, RFC 4226 section 4 requires "+
 			"a shared secret of at least 128 bits and recommends 160, got %d", c.TOTP.SecretBytes)
 	}
 	if c.TOTP.Skew < 0 || c.TOTP.Skew > 2 {
-		add("config: totp.skew must be between 0 and 2; each additional period widens "+
+		errs.addf("config: totp.skew must be between 0 and 2; each additional period widens "+
 			"the window an attacker may guess in, got %d", c.TOTP.Skew)
 	}
 
+	return errs
+}
+
+// validateRecovery checks the size of a batch and when it is reported low.
+func (c *Config) validateRecovery() errList {
+	var errs errList
 	// Recovery.
 	if c.Recovery.CodeCount < 1 || c.Recovery.CodeCount > 64 {
-		add("config: recovery.code_count must be between 1 and 64, got %d", c.Recovery.CodeCount)
+		errs.addf("config: recovery.code_count must be between 1 and 64, got %d", c.Recovery.CodeCount)
 	}
 	if c.Recovery.LowWatermark >= c.Recovery.CodeCount {
-		add("config: recovery.low_watermark (%d) must be below code_count (%d), otherwise "+
+		errs.addf("config: recovery.low_watermark (%d) must be below code_count (%d), otherwise "+
 			"a fresh batch is already in the warning state",
 			c.Recovery.LowWatermark, c.Recovery.CodeCount)
 	}
 
+	return errs
+}
+
+// validateTickets checks the lifetime of an enrolment ticket.
+func (c *Config) validateTickets() errList {
+	var errs errList
 	// Enrolment tickets. The ceiling is a working day: the ticket's lifetime is
 	// the whole window in which whoever intercepts the delivery channel can
 	// enrol an authenticator of their own, and one that outlives a shift is
 	// being used as a standing credential rather than as a hand-off.
 	if c.Tickets.TTL.Duration <= 0 || c.Tickets.TTL.Duration > 24*time.Hour {
-		add("config: tickets.ttl must be positive and at most 24h; the lifetime is "+
+		errs.addf("config: tickets.ttl must be positive and at most 24h; the lifetime is "+
 			"the window in which an intercepted ticket can be redeemed, got %s",
 			c.Tickets.TTL.Duration)
 	}
 
+	return errs
+}
+
+// validateAssertion checks the issuer, the signing key and the retired public keys.
+func (c *Config) validateAssertion() errList {
+	var errs errList
 	// Assertion.
 	if c.Assertion.Issuer == "" {
-		add("config: assertion.issuer is required")
+		errs.addf("config: assertion.issuer is required")
 	}
 	if c.Assertion.SigningKeyPath == "" {
-		add("config: assertion.signing_key_path is required")
+		errs.addf("config: assertion.signing_key_path is required")
 	}
 	if c.Assertion.TTL.Duration <= 0 || c.Assertion.TTL.Duration > 5*time.Minute {
-		add("config: assertion.ttl must be positive and at most 5m; the assertion "+
+		errs.addf("config: assertion.ttl must be positive and at most 5m; the assertion "+
 			"proves a ceremony just completed and is exchanged immediately, got %s",
 			c.Assertion.TTL.Duration)
 	}
@@ -1219,64 +1563,92 @@ func (c *Config) Validate() error {
 	for n, p := range c.Assertion.RetiredPublicKeyPaths {
 		clean := strings.TrimSpace(p)
 		if clean == "" {
-			add("config: assertion.retired_public_key_paths[%d] is empty", n)
+			errs.addf("config: assertion.retired_public_key_paths[%d] is empty", n)
 			continue
 		}
 		if clean == strings.TrimSpace(c.Assertion.SigningKeyPath) {
-			add("config: assertion.retired_public_key_paths[%d] is the signing key path; "+
+			errs.addf("config: assertion.retired_public_key_paths[%d] is the signing key path; "+
 				"a rotation points signing_key_path at the new key and lists the previous "+
 				"public key here", n)
 			continue
 		}
 		if _, dup := seenRetired[clean]; dup {
-			add("config: assertion.retired_public_key_paths[%d] repeats %q", n, clean)
+			errs.addf("config: assertion.retired_public_key_paths[%d] repeats %q", n, clean)
 			continue
 		}
 		seenRetired[clean] = struct{}{}
 	}
 
+	return errs
+}
+
+// validateThrottle checks the rate limits, checked only when throttling is on.
+func (c *Config) validateThrottle() errList {
+	var errs errList
 	// Throttle.
 	if c.Throttle.Enabled {
 		if c.Throttle.Window.Duration <= 0 {
-			add("config: throttle.window must be positive when throttling is enabled")
+			errs.addf("config: throttle.window must be positive when throttling is enabled")
 		}
 		if c.Throttle.MaxFailuresPerSubject < 1 {
-			add("config: throttle.max_failures_per_subject must be at least 1")
+			errs.addf("config: throttle.max_failures_per_subject must be at least 1")
 		}
 		if c.Throttle.MaxFailuresPerIP < c.Throttle.MaxFailuresPerSubject {
-			add("config: throttle.max_failures_per_ip (%d) below max_failures_per_subject "+
+			errs.addf("config: throttle.max_failures_per_ip (%d) below max_failures_per_subject "+
 				"(%d) makes the per-subject limit unreachable",
 				c.Throttle.MaxFailuresPerIP, c.Throttle.MaxFailuresPerSubject)
 		}
+		// Zero used to mean no ceiling, which nothing said and nothing logged.
+		// A leaked key is then bounded by nothing at all.
+		if c.Throttle.MaxRequestsPerKey < 1 {
+			errs.addf("config: throttle.max_requests_per_key must be at least 1; the per-key ceiling cannot " +
+				"be switched off on its own, so raise it if an application legitimately needs more")
+		}
 		if c.Throttle.LockoutDuration.Duration <= 0 {
-			add("config: throttle.lockout_duration must be positive when throttling is enabled")
+			errs.addf("config: throttle.lockout_duration must be positive when throttling is enabled")
+		}
+		// A lockout that ends inside the window it was earned in finds the
+		// failures still counted, so the first attempt after it is refused and
+		// the lockout reapplied without anything having been evaluated. The
+		// subject stays out until the window rolls, whatever the setting says.
+		if c.Throttle.Window.Duration > 0 && c.Throttle.LockoutDuration.Duration > 0 &&
+			c.Throttle.LockoutDuration.Duration < c.Throttle.Window.Duration {
+			errs.addf("config: throttle.lockout_duration (%s) is shorter than throttle.window (%s), so a "+
+				"lockout would be reapplied by the first attempt after it; set lockout_duration to at "+
+				"least the window", c.Throttle.LockoutDuration.Duration, c.Throttle.Window.Duration)
 		}
 		if c.Throttle.AdminRevokeBurst < 1 {
-			add("config: throttle.admin_revoke_burst must be at least 1")
+			errs.addf("config: throttle.admin_revoke_burst must be at least 1")
 		}
 	}
 
+	return errs
+}
+
+// validateRisk checks the thresholds and weights, checked even when reporting is off.
+func (c *Config) validateRisk() errList {
+	var errs errList
 	// Risk. Checked even when reporting is off, so that turning it on later
 	// does not turn a file that loaded yesterday into one that refuses to.
 	if c.Risk.ElevatedAt < 1 {
-		add("config: risk.elevated_at must be at least 1, got %d; a threshold of zero "+
+		errs.addf("config: risk.elevated_at must be at least 1, got %d; a threshold of zero "+
 			"or below reports every ceremony as elevated, including one where no "+
 			"signal fired", c.Risk.ElevatedAt)
 	}
 	if c.Risk.HighAt < 1 {
-		add("config: risk.high_at must be at least 1, got %d", c.Risk.HighAt)
+		errs.addf("config: risk.high_at must be at least 1, got %d", c.Risk.HighAt)
 	}
 	if c.Risk.ElevatedAt >= c.Risk.HighAt {
-		add("config: risk.elevated_at (%d) must be below risk.high_at (%d), otherwise "+
+		errs.addf("config: risk.elevated_at (%d) must be below risk.high_at (%d), otherwise "+
 			"the elevated level is unreachable and every signal that fires reads as high",
 			c.Risk.ElevatedAt, c.Risk.HighAt)
 	}
 	if c.Risk.DormantAfter.Duration <= 0 {
-		add("config: risk.dormant_after must be positive, got %s; every credential "+
+		errs.addf("config: risk.dormant_after must be positive, got %s; every credential "+
 			"would otherwise be dormant the instant it is used", c.Risk.DormantAfter.Duration)
 	}
 	if c.Risk.NewCredentialWithin.Duration <= 0 {
-		add("config: risk.new_credential_within must be positive, got %s; no credential "+
+		errs.addf("config: risk.new_credential_within must be positive, got %s; no credential "+
 			"would ever be new", c.Risk.NewCredentialWithin.Duration)
 	}
 	for reason, weight := range c.Risk.Weights {
@@ -1284,90 +1656,177 @@ func (c *Config) Validate() error {
 		// sits in the file doing nothing while the operator believes they have
 		// retuned the policy, and nothing at runtime would ever tell them.
 		if !slices.Contains(RiskReasons, reason) {
-			add("config: risk.weights has no reason %q; the reasons are %s",
+			errs.addf("config: risk.weights has no reason %q; the reasons are %s",
 				reason, strings.Join(RiskReasons, ", "))
 		}
 		if weight < 0 {
-			add("config: risk.weights.%s is %d; a negative weight would let one signal "+
+			errs.addf("config: risk.weights.%s is %d; a negative weight would let one signal "+
 				"cancel another out, so a reason an operator wants ignored is given a "+
 				"weight of 0 instead", reason, weight)
 		}
 	}
+	// Silencing one reason is a policy. Silencing all of them leaves a score
+	// that is always zero and a claim that always reads "low", which a verifier
+	// cannot tell from a deployment that looked and found nothing.
+	if c.riskWeightsAllZero() {
+		errs.addf("config: risk.weights sets every reason to 0, so the score is always 0 and " +
+			"the risk claim always reads \"low\"; give at least one reason a positive " +
+			"weight, or set risk.enabled = false so that the claim is omitted instead " +
+			"of always reassuring")
+	}
 
+	return errs
+}
+
+// riskWeightsAllZero reports whether the table leaves no reason able to score.
+//
+// A reason the table does not name keeps its default weight, and every default
+// is positive, so the table only silences the policy when it names all of them.
+func (c *Config) riskWeightsAllZero() bool {
+	for _, reason := range RiskReasons {
+		if weight, ok := c.Risk.Weights[reason]; !ok || weight != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// validateAudit checks the query ceiling, the retention window and the external sink.
+func (c *Config) validateAudit() errList {
+	var errs errList
 	// Audit.
 	if c.Audit.MaxQueryLimit < 1 || c.Audit.MaxQueryLimit > 10000 {
-		add("config: audit.max_query_limit must be between 1 and 10000, got %d", c.Audit.MaxQueryLimit)
+		errs.addf("config: audit.max_query_limit must be between 1 and 10000, got %d", c.Audit.MaxQueryLimit)
 	}
 	if c.Audit.RetentionDays < 0 {
-		add("config: audit.retention_days cannot be negative")
+		errs.addf("config: audit.retention_days cannot be negative")
 	}
 	errs = append(errs, validateAuditSink(c.Audit.Sink)...)
 
+	return errs
+}
+
+// validateAdmin checks the console, its session and who may reach it.
+//
+// It is the one section that writes as well as reads: a console behind TLS, or
+// behind a proxy that terminates it, has its session cookie marked Secure
+// whatever the file said, because a cookie that travels in clear is the whole
+// session. Nothing else in Validate changes the configuration it is checking.
+func (c *Config) validateAdmin() errList {
+	var errs errList
 	// Admin.
 	if c.Admin.UIEnabled {
 		if c.Admin.SessionTTL.Duration <= 0 || c.Admin.SessionTTL.Duration > 12*time.Hour {
-			add("config: admin.session_ttl must be positive and at most 12h, got %s",
+			errs.addf("config: admin.session_ttl must be positive and at most 12h, got %s",
 				c.Admin.SessionTTL.Duration)
 		}
-		if !isLoopbackAddr(c.Server.Addr) && len(c.Admin.IPAllowList) == 0 {
-			add("config: admin.ui_enabled on the non-loopback listener %q without "+
-				"admin.ip_allow_list exposes the administration interface to every "+
-				"network that can reach the service; set an allow list or disable the UI",
-				c.Server.Addr)
-		}
-		if tlsEnabled || c.Server.TrustProxy {
+		if c.tlsEnabled() || c.Server.TrustProxy {
 			c.Admin.SessionCookieSecure = true
 		}
 	}
+	// Required whatever admin.ui_enabled says, because turning the console off
+	// removes /admin and leaves /admin/v1 on the same port. A loopback listener
+	// with trust_proxy counts as reachable: the proxy in front of it is what
+	// faces the network, and the binary cannot see how far that reaches.
+	//
+	// The message describes the listener without spelling its key. The setup
+	// wizard sorts validation problems by the key they mention, and this one
+	// belongs under admin.ip_allow_list, not under the address question.
+	if c.reachableBeyondLoopback() && len(c.Admin.IPAllowList) == 0 {
+		errs.addf("config: admin.ip_allow_list is empty while the service is reachable beyond "+
+			"loopback (listener %q, trust_proxy %t); /admin/v1 is served on that "+
+			"port whether or not admin.ui_enabled is set, so every network that reaches the "+
+			"service could present an administrative token. List the networks administrators "+
+			"connect from, such as [\"10.0.0.0/8\"] or a single workstation as "+
+			"[\"192.0.2.10/32\"]", c.Server.Addr, c.Server.TrustProxy)
+	}
 	for _, cidr := range c.Admin.IPAllowList {
-		if _, _, err := net.ParseCIDR(cidr); err != nil {
-			add("config: admin.ip_allow_list entry %q is not a CIDR: %v", cidr, err)
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			errs.addf("config: admin.ip_allow_list entry %q is not a CIDR: %v", cidr, err)
+			continue
+		}
+		if ones, _ := prefixLength(network); ones == 0 {
+			errs.addf("config: admin.ip_allow_list entry %q admits every address, so the list "+
+				"restricts nothing while reading as though it did. Replace it with the "+
+				"networks administrators connect from, such as \"10.0.0.0/8\" or "+
+				"\"192.0.2.10/32\"", cidr)
 		}
 	}
 
+	return errs
+}
+
+// reachableBeyondLoopback reports whether a caller on another machine can reach
+// the listener, directly or through the reverse proxy the operator declared.
+func (c *Config) reachableBeyondLoopback() bool {
+	return !isLoopbackAddr(c.Server.Addr) || c.Server.TrustProxy
+}
+
+// validateLogging checks the level and the format.
+func (c *Config) validateLogging() errList {
+	var errs errList
 	// Logging.
 	switch c.Logging.Level {
 	case "debug", "info", "warn", "error":
 	default:
-		add("config: logging.level %q is not valid, use \"debug\", \"info\", \"warn\" or \"error\"",
+		errs.addf("config: logging.level %q is not valid, use \"debug\", \"info\", \"warn\" or \"error\"",
 			c.Logging.Level)
 	}
 	switch c.Logging.Format {
 	case "json", "text":
 	default:
-		add("config: logging.format %q is not valid, use \"json\" or \"text\"", c.Logging.Format)
+		errs.addf("config: logging.format %q is not valid, use \"json\" or \"text\"", c.Logging.Format)
 	}
 
+	return errs
+}
+
+// validateFeatures checks the settings that only make sense together.
+func (c *Config) validateFeatures() errList {
+	var errs errList
 	// Features.
 	if c.Features.DualApproval && len(c.Features.DualApprovalOperations) == 0 {
-		add("config: features.dual_approval is on but dual_approval_operations is empty, " +
+		errs.addf("config: features.dual_approval is on but dual_approval_operations is empty, " +
 			"so nothing is actually held for a second administrator")
 	}
+	// Checked whether or not dual approval is on, for the reason the risk
+	// section gives: turning it on later must not turn a file that loaded
+	// yesterday into one that refuses to. A name nothing matches is refused
+	// rather than ignored, because the gate compares strings and a misspelled
+	// operation simply goes ahead on one administrator's word.
+	for _, op := range c.Features.DualApprovalOperations {
+		if !slices.Contains(DualApprovalOperationNames, op) {
+			errs.addf("config: features.dual_approval_operations has no operation %q, so it would "+
+				"hold nothing; the operations are %s", op,
+				strings.Join(DualApprovalOperationNames, ", "))
+		}
+	}
 	if c.Features.DualApproval && !c.Features.AdminRBAC {
-		add("config: features.dual_approval requires features.admin_rbac; without " +
+		errs.addf("config: features.dual_approval requires features.admin_rbac; without " +
 			"distinct roles there is no way to tell two administrators apart")
 	}
 	if c.Features.DualApproval && c.Features.ApprovalTTL.Duration <= 0 {
-		add("config: features.approval_ttl must be positive when dual_approval is on")
+		errs.addf("config: features.approval_ttl must be positive when dual_approval is on")
 	}
 	if c.Features.DeferredErasure && c.Features.ErasureRetention.Duration <= 0 {
-		add("config: features.erasure_retention must be positive when deferred_erasure is on")
+		errs.addf("config: features.erasure_retention must be positive when deferred_erasure is on")
 	}
 	if c.Features.JanitorInterval.Duration <= 0 {
-		add("config: features.janitor_interval must be positive; expired challenges and " +
+		errs.addf("config: features.janitor_interval must be positive; expired challenges and " +
 			"due erasures would otherwise never be swept")
 	}
 	if c.Features.RotationGrace.Duration < 0 {
-		add("config: features.rotation_grace must not be negative; use \"0s\" to stop a " +
+		errs.addf("config: features.rotation_grace must not be negative; use \"0s\" to stop a " +
 			"rotated credential at once")
 	}
 	if c.Features.RotationGrace.Duration > MaxRotationGrace {
-		add("config: features.rotation_grace is %s, above the maximum of %s; an overlap "+
+		errs.addf("config: features.rotation_grace is %s, above the maximum of %s; an overlap "+
 			"that long is two live credentials, not a rotation",
 			c.Features.RotationGrace.Duration, MaxRotationGrace)
 	}
 
-	return errors.Join(errs...)
+	return errs
 }
 
 // validateAuditSink checks the external sink section.
@@ -1524,8 +1983,8 @@ func sqlitePath(dsn string) string {
 // inside the data directory. A textual comparison alone is defeated by a
 // symbolic link or a bind mount.
 func resolveSymlinks(path string) string {
-	if real, err := filepath.EvalSymlinks(path); err == nil {
-		return real
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
 	}
 	dir, base := filepath.Split(path)
 	if dir == "" {
@@ -1551,6 +2010,31 @@ func isLoopbackAddr(addr string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// prefixLength returns the length of a network's prefix and of its address
+// family, 32 or 128.
+//
+// An IPv4 network written in its IPv6-mapped form is reported as the IPv4
+// network it matches. net.IPNet.Contains makes the same reduction, so
+// "::ffff:0.0.0.0/96" admits every IPv4 address exactly as "0.0.0.0/0" does,
+// and a check that read it as a 96-bit prefix would wave it through.
+func prefixLength(network *net.IPNet) (ones, bits int) {
+	ones, bits = network.Mask.Size()
+	if bits == 8*net.IPv6len && ones >= 96 && network.IP.To4() != nil {
+		return ones - 96, 8 * net.IPv4len
+	}
+	return ones, bits
+}
+
+// widestProxyPrefix is the shortest prefix server.trusted_proxy_cidrs accepts
+// for an address family of the given size: /8 for IPv4 and /7 for IPv6, the
+// private blocks 10.0.0.0/8 and fc00::/7.
+func widestProxyPrefix(bits int) int {
+	if bits == 8*net.IPv4len {
+		return 8
+	}
+	return 7
 }
 
 // isLoopbackHost reports whether a bare host, with no port, names this machine.

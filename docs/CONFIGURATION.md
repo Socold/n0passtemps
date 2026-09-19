@@ -95,13 +95,13 @@ Refused by the validator:
 | `server.tls_key_file` | string | empty | `N0PASSTEMPS_SERVER_TLS_KEY_FILE` | PEM private key. |
 | `server.allow_plaintext` | bool | `false` | `N0PASSTEMPS_SERVER_ALLOW_PLAINTEXT` | Permits plain HTTP on a non-loopback address without declaring a reverse proxy. See below. |
 | `server.trust_proxy` | bool | `false` | `N0PASSTEMPS_SERVER_TRUST_PROXY` | Declares that a reverse proxy terminates TLS and sets `X-Forwarded-For`. |
-| `server.trusted_proxy_cidrs` | list of CIDR | empty | `N0PASSTEMPS_SERVER_TRUSTED_PROXY_CIDRS` | The networks a forwarded client address is honoured from. Required with `trust_proxy`. |
-| `server.read_timeout` | duration | `15s` | `N0PASSTEMPS_SERVER_READ_TIMEOUT` | Whole-request read deadline. |
-| `server.write_timeout` | duration | `15s` | `N0PASSTEMPS_SERVER_WRITE_TIMEOUT` | Response write deadline. |
-| `server.idle_timeout` | duration | `60s` | `N0PASSTEMPS_SERVER_IDLE_TIMEOUT` | Keep-alive idle deadline. |
+| `server.trusted_proxy_cidrs` | list of CIDR | empty | `N0PASSTEMPS_SERVER_TRUSTED_PROXY_CIDRS` | The networks a forwarded client address is honoured from. Required with `trust_proxy`. No entry may be wider than `/8` in IPv4 or `/7` in IPv6. |
+| `server.read_timeout` | duration | `15s` | `N0PASSTEMPS_SERVER_READ_TIMEOUT` | Whole-request read deadline. Must be positive. |
+| `server.write_timeout` | duration | `15s` | `N0PASSTEMPS_SERVER_WRITE_TIMEOUT` | Response write deadline. Must be positive. |
+| `server.idle_timeout` | duration | `60s` | `N0PASSTEMPS_SERVER_IDLE_TIMEOUT` | Keep-alive idle deadline. Must be positive. |
 | `server.read_header_timeout` | duration | `5s` | `N0PASSTEMPS_SERVER_READ_HEADER_TIMEOUT` | The defence against a slow-header denial of service. |
 | `server.shutdown_grace` | duration | `20s` | `N0PASSTEMPS_SERVER_SHUTDOWN_GRACE` | How long in-flight requests have to finish on shutdown. |
-| `server.max_body_bytes` | int64 | `262144` (256 KiB) | `N0PASSTEMPS_SERVER_MAX_BODY_BYTES` | Caps every request body. A WebAuthn attestation object is the largest legitimate payload and stays well under this. |
+| `server.max_body_bytes` | int64 | `262144` (256 KiB) | `N0PASSTEMPS_SERVER_MAX_BODY_BYTES` | Caps every request body. A WebAuthn attestation object is the largest legitimate payload and stays well under this. At most `16777216` (16 MiB). |
 | `server.cors_allowed_origins` | list of origin | empty | `N0PASSTEMPS_SERVER_CORS_ALLOWED_ORIGINS` | Explicit allow list for the `/v1` routes. Never a wildcard. |
 
 Refused by the validator:
@@ -112,9 +112,27 @@ Refused by the validator:
 - `config: server.addr %q is not loopback but TLS is not configured and server.trust_proxy is false; either terminate TLS here, set trust_proxy with trusted_proxy_cidrs when a reverse proxy terminates it, or set server.allow_plaintext when something outside this process already constrains who can reach the port, such as a container published to loopback`
 - `config: server.trust_proxy requires server.trusted_proxy_cidrs; accepting a forwarded client address from any source lets a caller spoof the address that rate limiting and audit entries are keyed on`
 - `config: server.trusted_proxy_cidrs entry %q is not a CIDR: ...`
+- `config: server.trusted_proxy_cidrs entry %q is wider than /%d, the widest block a single operator controls; ...`
 - `config: server.max_body_bytes must be positive`
+- `config: server.max_body_bytes is %d, above the maximum of 16777216; ...`
 - `config: server.cors_allowed_origins must not contain "*"; these endpoints are credentialed and a wildcard is both forbidden with credentials and unsafe`
 - `config: server.read_header_timeout must be positive, it is the defence against a slow-header denial of service`
+- `config: server.read_timeout must be positive, got %s; ...`, and the same for `server.write_timeout` and `server.idle_timeout`
+
+A trusted proxy network is one whose every address is believed when it names
+the client, so it has to be a network the operator owns outright. The widest
+blocks reserved for private use are `10.0.0.0/8` and `fc00::/7`; anything wider,
+`0.0.0.0/0` and `::/0` included, takes in addresses that belong to somebody else,
+and any of them could then choose the address that rate limiting,
+`admin.ip_allow_list` and the audit entries rely on. List the proxies
+themselves, or the subnet the load balancer sits in.
+
+`net/http` takes a zero or negative `read_timeout` or `write_timeout` to mean no
+deadline at all, which lets a stalled connection be held open for as long as the
+peer likes. None of the four timeouts accepts a value that means "unlimited".
+`server.max_body_bytes` is bounded above for the same reason: the cap applies
+before authentication, so it is also the most an anonymous caller can make the
+service read per request.
 
 An origin must be a scheme, a host and an optional port, with no path, no query
 and no fragment. `http` is accepted only for `localhost`, `127.0.0.1` and
@@ -136,7 +154,9 @@ ConfigMap in `deploy/` set it.
 
 Setting `server.tls_cert_file`, or `server.trust_proxy`, also makes the service
 emit `Strict-Transport-Security: max-age=31536000; includeSubDomains`, but only
-on a request that actually arrived over TLS.
+on a request that actually arrived over TLS: at this process, or at a proxy
+inside `server.trusted_proxy_cidrs` that says so in `X-Forwarded-Proto`. The
+header is ignored from any other peer.
 
 ## database
 
@@ -386,6 +406,8 @@ party](adr/0003-the-service-is-the-webauthn-relying-party.md).
 | `webauthn.blocked_aaguids` | list of AAGUID | empty | `N0PASSTEMPS_WEBAUTHN_BLOCKED_AAGUIDS` | Refuses named models, for withdrawing a device whose firmware has a published flaw. |
 | `webauthn.max_credentials_per_subject` | int | `10` | `N0PASSTEMPS_WEBAUTHN_MAX_CREDENTIALS_PER_SUBJECT` | Bounds enrolment, so a compromised API key cannot quietly add an unbounded number of authenticators. |
 | `webauthn.clone_warning_alerts` | bool | `true` | `N0PASSTEMPS_WEBAUTHN_CLONE_WARNING_ALERTS` | Raises an alert when an authenticator's signature counter fails to advance. It does not refuse the assertion. |
+| `webauthn.refuse_sign_count_regression` | bool | `false` | `N0PASSTEMPS_WEBAUTHN_REFUSE_SIGN_COUNT_REGRESSION` | Refuses an assertion whose signature counter moved strictly backwards from a stored value that was not zero, which no authenticator does by itself. A counter that stays still is still accepted, because most passkeys report zero for ever. Off by default: the signal is reported either way, and refusing is a policy an operator chooses. |
+| `webauthn.admin_origins` | list of origin | empty | `N0PASSTEMPS_WEBAUTHN_ADMIN_ORIGINS` | The origins the administration console's own passkey ceremonies accept. Empty is allowed only when `webauthn.origins` names exactly one origin, which the console then shares. With several, the console would otherwise accept an assertion obtained from any of them, which is the anti-phishing property a passkey exists for. |
 
 An AAGUID is the canonical 36-character 8-4-4-4-12 hexadecimal form.
 
@@ -403,7 +425,8 @@ Refused by the validator:
 - `config: webauthn.user_verification "discouraged" means the authenticator proves possession only, so a WebAuthn assertion is no longer sufficient on its own; set "required" or "preferred"`
 - `config: webauthn.attestation_preference %q is not valid, use "none", "indirect" or "direct"`
 - `config: webauthn.require_attestation needs attestation_preference "direct" or "indirect", otherwise the authenticator is never asked for a statement to verify`
-- `config: webauthn.require_attestation needs either a metadata_path or an allowed_aaguids list; with neither there is nothing to verify an attestation statement against`
+- `config: webauthn.require_attestation = true needs webauthn.metadata_path; with no metadata BLOB no attestation statement is checked against a trust anchor, and allowed_aaguids does not stand in for one because the AAGUID it matches on is declared by the client...`
+- `config: webauthn.admin_origins is empty while webauthn.origins lists %d origins, so a console ceremony would accept an assertion obtained from any of them...`
 - `config: webauthn.metadata_path %q is not readable: ...`
 - `config: webauthn.allowed_aaguids: %q is not a 36 character AAGUID`
 - `config: AAGUID %s appears in both allowed_aaguids and blocked_aaguids`
@@ -596,10 +619,10 @@ user behind one NAT gateway.
 |---|---|---|---|---|
 | `throttle.enabled` | bool | `true` | `N0PASSTEMPS_THROTTLE_ENABLED` | Turns rate limiting on. With it off nothing in this section is read and the store is never consulted. |
 | `throttle.window` | duration | `15m` | `N0PASSTEMPS_THROTTLE_WINDOW` | The fixed counting window. |
-| `throttle.max_failures_per_subject` | int | `10` | `N0PASSTEMPS_THROTTLE_MAX_FAILURES_PER_SUBJECT` | Failures against one subject before a lockout. |
-| `throttle.max_failures_per_ip` | int | `50` | `N0PASSTEMPS_THROTTLE_MAX_FAILURES_PER_IP` | Failures from one normalised source network before a lockout. |
-| `throttle.max_requests_per_key` | int | `6000` | `N0PASSTEMPS_THROTTLE_MAX_REQUESTS_PER_KEY` | Total volume from one API key inside the window, which bounds what a leaked key achieves. Metered by a middleware on every public route that takes a key, whether or not the route records an authentication outcome. |
-| `throttle.lockout_duration` | duration | `15m` | `N0PASSTEMPS_THROTTLE_LOCKOUT_DURATION` | How long a tripped bucket refuses attempts. |
+| `throttle.max_failures_per_subject` | int | `10` | `N0PASSTEMPS_THROTTLE_MAX_FAILURES_PER_SUBJECT` | Failures against one subject, on one factor, before that factor is locked out for the subject. WebAuthn, TOTP and recovery codes each hold this budget separately, and a success clears the count of the factor it used. The same number bounds guesses at one enrolment ticket. |
+| `throttle.max_failures_per_ip` | int | `50` | `N0PASSTEMPS_THROTTLE_MAX_FAILURES_PER_IP` | Failures from one normalised network before a lockout. On `/v1` the network is the one declared in `X-End-User-IP`, and the limit is not applied to a request that declares none; see below. |
+| `throttle.max_requests_per_key` | int | `6000` | `N0PASSTEMPS_THROTTLE_MAX_REQUESTS_PER_KEY` | Total volume from one API key inside the window, which bounds what a leaked key achieves. Metered by a middleware on every public route that takes a key, whether or not the route records an authentication outcome. A rate limit, not a lockout: the request after the ceiling is refused with a `Retry-After` that runs to the end of the window, and `lockout_duration` plays no part. |
+| `throttle.lockout_duration` | duration | `15m` | `N0PASSTEMPS_THROTTLE_LOCKOUT_DURATION` | How long a tripped failure bucket refuses attempts. Not shorter than `throttle.window`. |
 | `throttle.admin_revoke_burst` | int | `10` | `N0PASSTEMPS_THROTTLE_ADMIN_REVOKE_BURST` | Revocations one administrator may perform inside the window. This is the control that replaces the reversible revocation the specification called for; see [ADR 0010](adr/0010-revocation-is-final.md). |
 
 Refused by the validator, when `throttle.enabled` is true:
@@ -607,12 +630,54 @@ Refused by the validator, when `throttle.enabled` is true:
 - `config: throttle.window must be positive when throttling is enabled`
 - `config: throttle.max_failures_per_subject must be at least 1`
 - `config: throttle.max_failures_per_ip (%d) below max_failures_per_subject (%d) makes the per-subject limit unreachable`
+- `config: throttle.max_requests_per_key must be at least 1; the per-key ceiling cannot be switched off on its own, so raise it if an application legitimately needs more`
 - `config: throttle.lockout_duration must be positive when throttling is enabled`
+- `config: throttle.lockout_duration (%s) is shorter than throttle.window (%s), so a lockout would be reapplied by the first attempt after it; set lockout_duration to at least the window`
 - `config: throttle.admin_revoke_burst must be at least 1`
+
+A threshold of zero is refused rather than read as "no limit". It used to load,
+and the dimension it belonged to then counted attempts and never acted on the
+count.
 
 IPv6 sources are bucketed by their `/64` prefix, IPv4 by the single address. A
 single host is routinely delegated a whole `/64`, so a per-address limit there
 is bypassed at no cost.
+
+### Whose address the per-address limit counts
+
+`/v1` is called by the integrating application's backend, so the peer address
+of a request is the backend's and is the same for every one of its users.
+Limiting on it would put them all in one bucket, which any visitor of the
+application's sign-in page could fill with wrong codes, locking everybody out.
+
+The application therefore declares the end user's address on the ceremony
+routes, in the `X-End-User-IP` request header:
+
+```
+X-End-User-IP: 203.0.113.50
+```
+
+- The value is one IPv4 or IPv6 address, with no port, no zone and no prefix
+  length. Anything else is a 400, not a silent fallback: a fallback would run
+  the integration without the limit and nobody would notice.
+- When the header is present, its value is the network the per-address limit
+  and the `recent_failures_network` risk reason are computed on.
+- When it is absent, the per-address limit is not applied to that request. The
+  per-subject, per-ticket and per-key limits still are.
+- The audit log keeps the peer address as `source_ip` and records the declared
+  one as `end_user_ip` in the entry's detail. One was observed and the other
+  was stated by an authenticated caller, and the log keeps them apart.
+
+The header is trusted as far as the API key is: a caller that lies in it only
+removes a limit from its own users. It has nothing to do with
+`server.trust_proxy`, which decides how the peer address is read through a
+reverse proxy. The administration console and the authentication of API keys
+and administrative tokens limit on the peer address, which for them is the
+right one. The three SDKs take the address as a per-request option.
+
+A route that names no subject, the usernameless assertion, has no per-subject
+dimension to fall back on. Without the header it is bounded by the per-key
+ceiling alone, which is one more reason to send it.
 
 ## risk
 
@@ -665,6 +730,7 @@ it on later does not turn a file that loaded yesterday into one that refuses to:
 - `config: risk.new_credential_within must be positive, got %s`
 - `config: risk.weights has no reason %q` for a key that is not one of the nine
 - `config: risk.weights.%s is %d` for a negative weight
+- `config: risk.weights sets every reason to 0, so the score is always 0 and the risk claim always reads "low"; give at least one reason a positive weight, or set risk.enabled = false so that the claim is omitted instead of always reassuring`
 
 An unknown reason key is refused rather than ignored because a misspelled
 reason would sit in the file doing nothing while the operator believed they had
@@ -871,18 +937,33 @@ only what the receiver has acknowledged.
 | `admin.ui_enabled` | bool | `true` | `N0PASSTEMPS_ADMIN_UI_ENABLED` | Serves the server-rendered interface at `/admin`. Deployments that administer the service purely through the API turn it off to remove the surface. |
 | `admin.session_ttl` | duration | `30m` | `N0PASSTEMPS_ADMIN_SESSION_TTL` | Bounds an administrator's browser session. |
 | `admin.session_cookie_secure` | bool | `true` | `N0PASSTEMPS_ADMIN_SESSION_COOKIE_SECURE` | Marks the session cookie `Secure`. Forced on whenever TLS is terminated in process or a trusted proxy is declared. |
-| `admin.ip_allow_list` | list of CIDR | empty | `N0PASSTEMPS_ADMIN_IP_ALLOW_LIST` | Restricts the whole `/admin` surface to named networks. Applied before authentication, and a caller outside it receives 404 rather than 403. |
+| `admin.ip_allow_list` | list of CIDR | empty | `N0PASSTEMPS_ADMIN_IP_ALLOW_LIST` | Restricts the whole `/admin` surface, the `/admin/v1` API included, to named networks. Applied before authentication, and a caller outside it receives 404 rather than 403. Required unless the listener is loopback with no trusted proxy. |
 | `admin.passkey_required` | bool | `false` | `N0PASSTEMPS_ADMIN_PASSKEY_REQUIRED` | Refuses an administrative token pasted into the console once that token has a passkey enrolled, so the operator signs in with the key instead. Scoped to the token and not to the deployment. |
 
 Refused by the validator:
 
 - `config: admin.session_ttl must be positive and at most 12h, got %s`
-- `config: admin.ui_enabled on the non-loopback listener %q without admin.ip_allow_list exposes the administration interface to every network that can reach the service; set an allow list or disable the UI`
+- `config: admin.ip_allow_list is empty while the service is reachable beyond loopback (listener %q, trust_proxy %t); ...`
 - `config: admin.ip_allow_list entry %q is not a CIDR: ...`
+- `config: admin.ip_allow_list entry %q admits every address, so the list restricts nothing while reading as though it did. ...`
 
-The first two apply only when `admin.ui_enabled` is true. The CIDR check applies
-always, because the allow list guards the `/admin/v1` API as well as the
-interface.
+The first applies only when `admin.ui_enabled` is true. The others apply always,
+because the allow list guards the `/admin/v1` API as well as the interface, and
+turning the console off leaves that API served on the same port.
+
+The list is required as soon as a caller on another machine can reach the
+service: when `server.addr` is not loopback, and also when it is loopback but
+`server.trust_proxy` is set, since the proxy in front is then what faces the
+network. Behind a proxy the list is matched against the client address resolved
+from `X-Forwarded-For`, not against the proxy's own. An entry of prefix length
+zero, `0.0.0.0/0` or `::/0`, is refused: a list that admits everyone is not a
+list.
+
+`admin.session_cookie_secure = false` survives validation only on a loopback
+listener with no proxy, or where `server.allow_plaintext` is set. TLS and
+`trust_proxy` force it on, and a non-loopback listener with neither is refused
+by the `server` section unless `allow_plaintext` says something else constrains
+the port.
 
 `admin.passkey_required` is refused by nothing, and the scope is why. It asks a
 question per token rather than per deployment: a token that holds no usable
@@ -924,7 +1005,7 @@ one schema serve both and a deployment can adopt a feature without migrating.
 | `features.lite_mode` | bool | `false` | `N0PASSTEMPS_FEATURES_LITE_MODE`, or `LITE_MODE` | Shorthand that relaxes the four governance features below. |
 | `features.admin_rbac` | bool | `true` | `N0PASSTEMPS_FEATURES_ADMIN_RBAC` | Enforces the three administrative roles. With it off, every valid role carries full authority. |
 | `features.dual_approval` | bool | `true` | `N0PASSTEMPS_FEATURES_DUAL_APPROVAL` | Holds sensitive operations for a second administrator. The requester redeems the approval by repeating the identical request with the header `X-Approval-Id`. |
-| `features.dual_approval_operations` | list of string | `credential.revoke_bulk`, `subject.erase`, `admin_token.create`, `kek.rotate` | `N0PASSTEMPS_FEATURES_DUAL_APPROVAL_OPERATIONS` | Names the operations the queue intercepts. Each of the four has a route: revoke-all, erasure, administrative token creation and the keyring rewrap. |
+| `features.dual_approval_operations` | list of string | `credential.revoke_bulk`, `subject.erase`, `admin_token.create`, `kek.rotate` | `N0PASSTEMPS_FEATURES_DUAL_APPROVAL_OPERATIONS` | Names the operations the queue intercepts. Each of the four has a route: revoke-all, erasure, administrative token creation and the keyring rewrap. Any other name is refused, because the gate matches by name and a misspelled one would hold nothing. |
 | `features.approval_ttl` | duration | `24h` | `N0PASSTEMPS_FEATURES_APPROVAL_TTL` | How long a queued operation lives, counted from the request. It bounds the decision and the redemption together. |
 | `features.deferred_erasure` | bool | `true` | `N0PASSTEMPS_FEATURES_DEFERRED_ERASURE` | Blocks a subject immediately and purges the record after the retention window, instead of deleting at once. |
 | `features.erasure_retention` | duration | `720h` (30 days) | `N0PASSTEMPS_FEATURES_ERASURE_RETENTION` | The window in which a pending erasure can still be cancelled. |
@@ -935,6 +1016,7 @@ one schema serve both and a deployment can adopt a feature without migrating.
 Refused by the validator:
 
 - `config: features.dual_approval is on but dual_approval_operations is empty, so nothing is actually held for a second administrator`
+- `config: features.dual_approval_operations has no operation %q, so it would hold nothing; the operations are credential.revoke_bulk, subject.erase, admin_token.create, kek.rotate`
 - `config: features.dual_approval requires features.admin_rbac; without distinct roles there is no way to tell two administrators apart`
 - `config: features.approval_ttl must be positive when dual_approval is on`
 - `config: features.erasure_retention must be positive when deferred_erasure is on`
@@ -945,21 +1027,28 @@ Refused by the validator:
 ### What lite mode actually changes
 
 `features.lite_mode` is applied after the file and the environment have been
-read, and only relaxes settings the TOML file did not set explicitly. An
-explicit setting in the file therefore wins over the shorthand.
+read, and only relaxes settings that neither of them set explicitly. An explicit
+setting therefore wins over the shorthand wherever it was made:
+`N0PASSTEMPS_FEATURES_ADMIN_RBAC=true` keeps role enforcement on under lite mode
+exactly as `admin_rbac = true` in the file does, and
+`N0PASSTEMPS_DATABASE_DRIVER=postgres` keeps PostgreSQL. A variable exported
+with an empty value counts as unset here as everywhere else.
 
 | Setting | Value lite mode applies | Condition |
 |---|---|---|
-| `features.admin_rbac` | `false` | The file did not set it |
-| `features.dual_approval` | `false` | The file did not set it |
-| `features.deferred_erasure` | `false` | The file did not set it |
-| `features.kek_rotation_reminder` | `false` | The file did not set it |
-| `database.driver` | `sqlite` | The file did not set it |
-| `recovery.code_count` | `8` | The file did not set it and the value is still the default 16 |
+| `features.admin_rbac` | `false` | Neither the file nor the environment set it |
+| `features.dual_approval` | `false` | Neither the file nor the environment set it |
+| `features.deferred_erasure` | `false` | Neither the file nor the environment set it |
+| `features.kek_rotation_reminder` | `false` | Neither the file nor the environment set it |
+| `database.driver` | `sqlite` | Neither the file nor the environment set it |
+| `recovery.code_count` | `8` | Neither the file nor the environment set it and the value is still the default 16 |
 
 `LITE_MODE` is accepted without the `N0PASSTEMPS_` prefix as well, because the
 published quickstart uses the short form and changing it would break copied
-commands.
+commands. The two forms name one setting, so when both are present they have to
+agree: `LITE_MODE=true` beside `N0PASSTEMPS_FEATURES_LITE_MODE=false` is refused
+at startup rather than settled in favour of either, because the operator is the
+only one who knows which was meant.
 
 Nothing else changes. WebAuthn, TOTP, recovery codes, the audit chain, the
 throttle and the alert engine are identical in both modes.
@@ -970,7 +1059,7 @@ throttle and the alert engine are identical in both modes.
 |---|---|---|
 | `N0PASSTEMPS_KEK` | `internal/crypto/kek` | The keyring itself, when `kek.provider = "env"`. The default value of `kek.env_var`. Unset by the process once parsed. |
 | `N0PASSTEMPS_SUBJECT_PEPPER` | `internal/subject` | The HMAC pepper. The default value of `subject.pepper_env`. Unset by the process once parsed. |
-| `LITE_MODE` | `internal/config` | Unprefixed alias for `features.lite_mode`. |
+| `LITE_MODE` | `internal/config` | Unprefixed alias for `features.lite_mode`. Refused when it contradicts `N0PASSTEMPS_FEATURES_LITE_MODE`. |
 
 ## Related documents
 
