@@ -18,7 +18,7 @@ type fakeKEK struct {
 	current uint32
 }
 
-func (f *fakeKEK) Current() (uint32, []byte, error) {
+func (f *fakeKEK) Current() (version uint32, key []byte, err error) {
 	k, ok := f.keys[f.current]
 	if !ok {
 		return 0, nil, fmt.Errorf("fake kek: current version %d absent", f.current)
@@ -43,7 +43,7 @@ type sameKeyEveryVersion struct {
 	key []byte
 }
 
-func (s sameKeyEveryVersion) Current() (uint32, []byte, error) {
+func (s sameKeyEveryVersion) Current() (version uint32, key []byte, err error) {
 	return 1, append([]byte(nil), s.key...), nil
 }
 
@@ -60,9 +60,20 @@ func newKey(t *testing.T) []byte {
 	return k
 }
 
+// rowA and rowB name two places a record could be stored: two rows of one
+// column, in one tenant. They are the simplest form of the substitution a
+// binding context exists to defeat, so they are shared by the tests below.
+var (
+	rowA = SubjectRef("tenant-1", "subject-1")
+	rowB = SubjectRef("tenant-1", "subject-2")
+)
+
+// mustSeal seals for rowA, which is the row used by every test that is about
+// something other than the binding. The tests that are about the binding name
+// their row at the call.
 func mustSeal(t *testing.T, s *Sealer, plaintext []byte) []byte {
 	t.Helper()
-	sealed, err := s.Seal(plaintext)
+	sealed, err := s.Seal(plaintext, rowA)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -96,7 +107,7 @@ func TestSealUnsealRoundTrip(t *testing.T) {
 			if len(tc.plaintext) > 0 && bytes.Contains(sealed, tc.plaintext) {
 				t.Fatal("sealed record contains the plaintext in clear")
 			}
-			got, err := s.Unseal(sealed)
+			got, err := s.Unseal(sealed, rowA)
 			if err != nil {
 				t.Fatalf("a record sealed by this Sealer must unseal, got %v", err)
 			}
@@ -146,7 +157,7 @@ func TestUnsealRejectsEverySingleBitFlip(t *testing.T) {
 			mutated := append([]byte(nil), sealed...)
 			mutated[i] ^= 1 << bit
 
-			got, err := s.Unseal(mutated)
+			got, err := s.Unseal(mutated, rowA)
 			if err == nil {
 				t.Fatalf("byte %d bit %d: a tampered record unsealed; every byte of the record must be authenticated", i, bit)
 			}
@@ -168,7 +179,7 @@ func TestUnsealRejectsTruncationAndExtension(t *testing.T) {
 	// header and nonce boundaries are where a slicing mistake would panic or
 	// accept a record whose tag has been cut off.
 	for n := 0; n < len(sealed); n++ {
-		got, err := s.Unseal(sealed[:n:n])
+		got, err := s.Unseal(sealed[:n:n], rowA)
 		if err == nil {
 			t.Fatalf("record truncated to %d of %d bytes unsealed", n, len(sealed))
 		}
@@ -181,7 +192,7 @@ func TestUnsealRejectsTruncationAndExtension(t *testing.T) {
 	}
 
 	extended := append(append([]byte(nil), sealed...), 0x00)
-	if _, err := s.Unseal(extended); !errors.Is(err, ErrUnsealFailed) {
+	if _, err := s.Unseal(extended, rowA); !errors.Is(err, ErrUnsealFailed) {
 		t.Fatalf("record with one appended byte: got %v, want ErrUnsealFailed", err)
 	}
 }
@@ -190,19 +201,29 @@ func TestUnsealRejectsUnknownFormatVersion(t *testing.T) {
 	s := NewSealer(&fakeKEK{keys: map[uint32][]byte{1: newKey(t)}, current: 1})
 	sealed := mustSeal(t, s, []byte("secret"))
 
-	// A future layout must never be parsed with today's offsets.
-	for _, v := range []byte{0x00, 0x02, 0xff} {
+	// A future layout must never be parsed with today's offsets. 0x01 and 0x02
+	// are the two layouts this package knows and are covered below instead.
+	for _, v := range []byte{0x00, 0x03, 0xff} {
 		mutated := append([]byte(nil), sealed...)
 		mutated[0] = v
-		if _, err := s.Unseal(mutated); !errors.Is(err, ErrMalformed) {
+		if _, err := s.Unseal(mutated, rowA); !errors.Is(err, ErrMalformed) {
 			t.Errorf("format byte %#x: Unseal got %v, want ErrMalformed", v, err)
 		}
-		if _, err := s.Rewrap(mutated); !errors.Is(err, ErrMalformed) {
+		if _, err := s.Rewrap(mutated, rowA); !errors.Is(err, ErrMalformed) {
 			t.Errorf("format byte %#x: Rewrap got %v, want ErrMalformed", v, err)
 		}
 		if _, err := KEKVersion(mutated); !errors.Is(err, ErrMalformed) {
 			t.Errorf("format byte %#x: KEKVersion got %v, want ErrMalformed", v, err)
 		}
+	}
+
+	// Relabelling a version 2 record as version 1 is the downgrade that would
+	// strip the binding from a record that has one, so it has to fail. It does
+	// because the format byte is the first byte of the authenticated header.
+	downgraded := append([]byte(nil), sealed...)
+	downgraded[0] = FormatLegacy
+	if _, err := s.Unseal(downgraded, rowA); !errors.Is(err, ErrUnsealFailed) {
+		t.Errorf("a version 2 record relabelled as version 1: got %v, want ErrUnsealFailed", err)
 	}
 }
 
@@ -210,7 +231,7 @@ func TestUnsealFailsUnderADifferentKEK(t *testing.T) {
 	sealed := mustSeal(t, NewSealer(&fakeKEK{keys: map[uint32][]byte{1: newKey(t)}, current: 1}), []byte("secret"))
 
 	other := NewSealer(&fakeKEK{keys: map[uint32][]byte{1: newKey(t)}, current: 1})
-	got, err := other.Unseal(sealed)
+	got, err := other.Unseal(sealed, rowA)
 	if !errors.Is(err, ErrUnsealFailed) {
 		t.Fatalf("record unsealed under a different key with the same version: got %v, want ErrUnsealFailed", err)
 	}
@@ -244,7 +265,7 @@ func TestHeaderCannotBeSplicedBetweenRecords(t *testing.T) {
 			b := mustSeal(t, s, []byte("record B, sealed under version 2"))
 
 			for _, rec := range [][]byte{a, b} {
-				if _, err := s.Unseal(rec); err != nil {
+				if _, err := s.Unseal(rec, rowA); err != nil {
 					t.Fatalf("baseline record does not unseal, the splices below would prove nothing: %v", err)
 				}
 			}
@@ -263,26 +284,26 @@ func TestHeaderCannotBeSplicedBetweenRecords(t *testing.T) {
 			}
 			for _, tc := range cases {
 				t.Run(tc.name, func(t *testing.T) {
-					got, err := s.Unseal(tc.record)
+					got, err := s.Unseal(tc.record, rowA)
 					if !errors.Is(err, ErrUnsealFailed) {
 						t.Fatalf("spliced record: got %v, want ErrUnsealFailed; the header must be bound to the wrapped DEK and to the payload", err)
 					}
 					if got != nil {
 						t.Fatal("plaintext returned alongside an error")
 					}
-					// Rewrap returns a record that is already under the current
-					// KEK as a copy, without authenticating its payload. The
-					// property that matters is therefore stated on the outcome:
-					// rotation must never turn a forged record into one that
-					// unseals.
-					out, err := s.Rewrap(tc.record)
+					// Rewrap authenticates before it decides anything, so a
+					// spliced record is refused outright. The outcome is
+					// checked as well as the error, because the property that
+					// matters is that rotation never turns a forged record
+					// into one that unseals.
+					out, err := s.Rewrap(tc.record, rowA)
 					if err != nil {
 						if !errors.Is(err, ErrUnsealFailed) {
 							t.Fatalf("Rewrap of a spliced record: got %v, want ErrUnsealFailed", err)
 						}
 						return
 					}
-					if _, err := s.Unseal(out); !errors.Is(err, ErrUnsealFailed) {
+					if _, err := s.Unseal(out, rowA); !errors.Is(err, ErrUnsealFailed) {
 						t.Fatalf("Rewrap laundered a spliced record into one that unseals (Unseal error: %v)", err)
 					}
 				})
@@ -303,10 +324,10 @@ func TestUnknownKEKVersionIsReportedAsUnavailable(t *testing.T) {
 	kek.keys = map[uint32][]byte{8: newKey(t)}
 	kek.current = 8
 
-	if got, err := s.Unseal(sealed); !errors.Is(err, ErrKEKUnavailable) || got != nil {
+	if got, err := s.Unseal(sealed, rowA); !errors.Is(err, ErrKEKUnavailable) || got != nil {
 		t.Fatalf("Unseal with the KEK version absent: got (%v, %v), want (nil, ErrKEKUnavailable)", got, err)
 	}
-	if got, err := s.Rewrap(sealed); !errors.Is(err, ErrKEKUnavailable) || got != nil {
+	if got, err := s.Rewrap(sealed, rowA); !errors.Is(err, ErrKEKUnavailable) || got != nil {
 		t.Fatalf("Rewrap with the KEK version absent: got (%v, %v), want (nil, ErrKEKUnavailable)", got, err)
 	}
 }
@@ -351,7 +372,7 @@ func TestRewrapMovesRecordToCurrentKEK(t *testing.T) {
 	kek.keys[2] = newKey(t)
 	kek.current = 2
 
-	rewrapped, err := s.Rewrap(original)
+	rewrapped, err := s.Rewrap(original, rowA)
 	if err != nil {
 		t.Fatalf("Rewrap from version 1 to version 2: %v", err)
 	}
@@ -371,7 +392,7 @@ func TestRewrapMovesRecordToCurrentKEK(t *testing.T) {
 		t.Fatal("rewrapped record reuses the payload nonce under the same DEK")
 	}
 
-	got, err := s.Unseal(rewrapped)
+	got, err := s.Unseal(rewrapped, rowA)
 	if err != nil {
 		t.Fatalf("rewrapped record does not unseal: %v", err)
 	}
@@ -383,14 +404,14 @@ func TestRewrapMovesRecordToCurrentKEK(t *testing.T) {
 	// rewrapped record still depended on version 1 in any way, removing it
 	// would lose data.
 	delete(kek.keys, 1)
-	got, err = s.Unseal(rewrapped)
+	got, err = s.Unseal(rewrapped, rowA)
 	if err != nil {
 		t.Fatalf("rewrapped record no longer unseals once the old KEK is removed: %v", err)
 	}
 	if !bytes.Equal(got, plaintext) {
 		t.Fatal("rewrapped record unseals to a different plaintext once the old KEK is removed")
 	}
-	if _, err := s.Unseal(original); !errors.Is(err, ErrKEKUnavailable) {
+	if _, err := s.Unseal(original, rowA); !errors.Is(err, ErrKEKUnavailable) {
 		t.Fatalf("the version 1 record after version 1 was removed: got %v, want ErrKEKUnavailable", err)
 	}
 }
@@ -401,7 +422,7 @@ func TestRewrapOfCurrentRecordReturnsIndependentCopy(t *testing.T) {
 	sealed := mustSeal(t, s, plaintext)
 	pristine := append([]byte(nil), sealed...)
 
-	out, err := s.Rewrap(sealed)
+	out, err := s.Rewrap(sealed, rowA)
 	if err != nil {
 		t.Fatalf("Rewrap of an already-current record: %v", err)
 	}
@@ -417,7 +438,7 @@ func TestRewrapOfCurrentRecordReturnsIndependentCopy(t *testing.T) {
 	if !bytes.Equal(sealed, pristine) {
 		t.Fatal("overwriting the Rewrap result altered the input: the result aliases it")
 	}
-	out2, err := s.Rewrap(sealed)
+	out2, err := s.Rewrap(sealed, rowA)
 	if err != nil {
 		t.Fatalf("Rewrap: %v", err)
 	}
@@ -427,7 +448,7 @@ func TestRewrapOfCurrentRecordReturnsIndependentCopy(t *testing.T) {
 	if !bytes.Equal(out2, pristine) {
 		t.Fatal("overwriting the input altered the Rewrap result: the result aliases it")
 	}
-	got, err := s.Unseal(out2)
+	got, err := s.Unseal(out2, rowA)
 	if err != nil || !bytes.Equal(got, plaintext) {
 		t.Fatalf("copy returned by Rewrap does not unseal to the original plaintext: %v", err)
 	}
@@ -450,17 +471,17 @@ func TestWrongSizeKeyIsRefused(t *testing.T) {
 			}
 			s := NewSealer(&fakeKEK{keys: map[uint32][]byte{1: bad}, current: 1})
 
-			if out, err := s.Seal([]byte("secret")); err == nil || out != nil {
+			if out, err := s.Seal([]byte("secret"), rowA); err == nil || out != nil {
 				t.Errorf("Seal accepted a %d byte KEK (err=%v, %d bytes out); only 32 byte keys may be used", n, err, len(out))
 			}
-			if out, err := s.Unseal(sealed); err == nil || out != nil {
+			if out, err := s.Unseal(sealed, rowA); err == nil || out != nil {
 				t.Errorf("Unseal accepted a %d byte KEK (err=%v)", n, err)
 			}
 
 			// Old key valid, new current key of the wrong size: rotation
 			// must stop rather than move records under a weaker key.
 			rot := NewSealer(&fakeKEK{keys: map[uint32][]byte{1: good, 2: bad}, current: 2})
-			if out, err := rot.Rewrap(sealed); err == nil || out != nil {
+			if out, err := rot.Rewrap(sealed, rowA); err == nil || out != nil {
 				t.Errorf("Rewrap moved a record under a %d byte KEK (err=%v)", n, err)
 			}
 		})

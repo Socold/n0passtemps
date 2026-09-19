@@ -50,6 +50,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Socold/n0passtemps/internal/alerts"
 	"github.com/Socold/n0passtemps/internal/audit"
 	"github.com/Socold/n0passtemps/internal/config"
 	"github.com/Socold/n0passtemps/internal/rbac"
@@ -81,6 +82,21 @@ type Deps struct {
 	// Recorder appends to the hash-chained audit log. Every sign-in attempt and
 	// every action writes an entry through it.
 	Recorder *audit.Recorder
+
+	// Alerts raises the conditions somebody is meant to be told about.
+	//
+	// The interface performs the actions the API performs, so it has to raise
+	// the alerts the API raises: a run of withdrawals past the burst, an action
+	// refused to a role, a passkey whose signature counter did not advance.
+	// Without it those reached the history alone, and an operator watching the
+	// alerts screen saw the API's incidents and not the console's, which is the
+	// worse half to miss because the console is where a person acts.
+	//
+	// A nil engine leaves them unraised and everything else working, the way a
+	// nil metrics observer does in internal/api. The main package wires it in
+	// beside the engine the API server is given, so that both surfaces write
+	// into one set of alerts rather than two.
+	Alerts *alerts.Engine
 
 	// Config supplies the tenant, the session settings and the feature gates.
 	Config *config.Config
@@ -169,6 +185,7 @@ const minIdleTimeout = 5 * time.Minute
 //	adminUI, err := ui.New(ui.Deps{
 //		Store:    st,
 //		Recorder: recorder,
+//		Alerts:   engine,
 //		Config:   cfg,
 //		Logger:   log,
 //		Clock:    clock,

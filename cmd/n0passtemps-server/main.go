@@ -112,7 +112,7 @@ func run() error {
 		}
 	}()
 
-	st, err := openStore(ctx, cfg, log)
+	st, err := openStore(cfg, log)
 	if err != nil {
 		return err
 	}
@@ -211,7 +211,7 @@ func run() error {
 		}
 	}
 
-	adminUI, err := buildAdminUI(cfg, st, recorder, subjects, rp, limiter, log)
+	adminUI, err := buildAdminUI(cfg, st, recorder, alertEngine, subjects, rp, limiter, log)
 	if err != nil {
 		return fmt.Errorf("administration interface: %w", err)
 	}
@@ -343,7 +343,7 @@ func openAuditSink(cfg *config.Config, st store.Store, al *alerts.Engine, log *s
 }
 
 // openStore connects to the configured database.
-func openStore(ctx context.Context, cfg *config.Config, log *slog.Logger) (store.Store, error) {
+func openStore(cfg *config.Config, log *slog.Logger) (store.Store, error) {
 	switch cfg.Database.Driver {
 	case "sqlite":
 		st, err := sqlite.Open(sqlite.Options{

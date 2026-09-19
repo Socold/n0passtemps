@@ -154,7 +154,7 @@ func TestJWKSIsPublicAndCarriesNoPrivateKey(t *testing.T) {
 }
 
 func containsKey(body, needle string) bool {
-	return len(body) > 0 && len(needle) > 0 && (indexOf(body, needle) >= 0)
+	return body != "" && needle != "" && (indexOf(body, needle) >= 0)
 }
 
 func indexOf(haystack, needle string) int {
@@ -462,7 +462,10 @@ func TestThrottleLocksOutAfterTheConfiguredFailures(t *testing.T) {
 	h := newHarness(t, func(c *config.Config) {
 		c.Throttle.MaxFailuresPerSubject = 3
 		c.Throttle.MaxFailuresPerIP = 100
-		c.Throttle.LockoutDuration = config.Duration{Duration: 10 * time.Minute}
+		// Not shorter than the window, which the validator now insists on: a
+		// lockout that ends inside the window it was earned in is reapplied
+		// by the next attempt, since the failures are still counted.
+		c.Throttle.LockoutDuration = config.Duration{Duration: 15 * time.Minute}
 	})
 
 	h.do(http.MethodPost, "/v1/subjects", h.apiKey, map[string]any{"subject_ref": "user-1"})
@@ -494,7 +497,7 @@ func TestThrottleLocksOutAfterTheConfiguredFailures(t *testing.T) {
 	}
 
 	// Past the lockout, attempts are accepted again.
-	h.clock.add(11 * time.Minute)
+	h.clock.add(16 * time.Minute)
 	after := h.do(http.MethodPost, "/v1/recovery/user-1/consume", h.apiKey,
 		map[string]any{"code": "AAAAA-BBBBB-CCCCC-DDDDD"})
 	if after.Status != http.StatusUnauthorized {
@@ -546,7 +549,7 @@ func TestRequestIDIsSanitised(t *testing.T) {
 		"quote\"mark",
 		"way-too-long-" + repeat("x", 100),
 	} {
-		req, err := http.NewRequest(http.MethodGet, h.srv.URL+"/v1/health", nil)
+		req, err := http.NewRequest(http.MethodGet, h.srv.URL+"/v1/health", http.NoBody)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -285,15 +285,19 @@ func TestFailuresBeforeASuccessAreReported(t *testing.T) {
 	h := newHarness(t)
 	next := enrolTOTP(t, h, "user-1")
 
+	// The network reason needs a network, and the only one that means anything
+	// on a server-to-server API is the one the application declares.
+	from := map[string]string{EndUserIPHeader: "198.51.100.7"}
+
 	for range 2 {
-		if res := h.do(http.MethodPost, "/v1/totp/user-1/verify", h.apiKey,
-			map[string]any{"code": "000000"}); res.Status != http.StatusUnauthorized {
+		if res := h.doWith(http.MethodPost, "/v1/totp/user-1/verify", h.apiKey,
+			map[string]any{"code": "000000"}, from); res.Status != http.StatusUnauthorized {
 			t.Fatalf("a wrong code = %d, want 401", res.Status)
 		}
 	}
 
-	res := h.do(http.MethodPost, "/v1/totp/user-1/verify", h.apiKey,
-		map[string]any{"code": next()})
+	res := h.doWith(http.MethodPost, "/v1/totp/user-1/verify", h.apiKey,
+		map[string]any{"code": next()}, from)
 	if res.Status != http.StatusOK {
 		t.Fatalf("verify after two failures = %d; body: %s", res.Status, res.Raw)
 	}
@@ -454,15 +458,19 @@ func TestHighRiskRaisesAnAlert(t *testing.T) {
 
 	// recovery_code_used together with failures against the subject and the
 	// network reaches the high threshold on the shipped defaults. This is the
-	// account-takeover shape the defaults are chosen for.
-	for range 2 {
-		h.do(http.MethodPost, "/v1/recovery/user-1/consume", h.apiKey,
-			map[string]any{"code": "AAAAA-AAAAA-AAAAA"})
-	}
+	// account-takeover shape the defaults are chosen for. The network is the
+	// one the application declares, and the failures are repeated before each
+	// redemption because a success clears the subject's count for the factor.
+	from := map[string]string{EndUserIPHeader: "198.51.100.7"}
 
 	for i := range 2 {
-		res := h.do(http.MethodPost, "/v1/recovery/user-1/consume", h.apiKey,
-			map[string]any{"code": asString(t, codes[i], "codes[i]")})
+		for range 2 {
+			h.doWith(http.MethodPost, "/v1/recovery/user-1/consume", h.apiKey,
+				map[string]any{"code": "AAAAA-AAAAA-AAAAA"}, from)
+		}
+
+		res := h.doWith(http.MethodPost, "/v1/recovery/user-1/consume", h.apiKey,
+			map[string]any{"code": asString(t, codes[i], "codes[i]")}, from)
 		if res.Status != http.StatusOK {
 			t.Fatalf("consume %d = %d; body: %s", i, res.Status, res.Raw)
 		}

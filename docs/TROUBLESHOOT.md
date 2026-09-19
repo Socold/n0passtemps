@@ -341,8 +341,11 @@ log before acting.
 
 A whole office locked out at once is the per-address dimension, not the
 per-subject one: `throttle.max_failures_per_ip`, default 50, counts failures
-from one normalised network, and everyone behind one NAT gateway shares it. The
-alert is `auth.failure_burst.ip`. The per-address reset is not exposed as a
+from one normalised network, and everyone behind one NAT gateway shares it. On
+the ceremony routes the address is the one the application declares in
+`X-End-User-IP`; an application that sends none has no per-address limit there,
+because the only address the service sees is the application's own. The alert is
+`auth.failure_burst.ip`. The per-address reset is not exposed as a
 route; either wait out `throttle.lockout_duration` or raise
 `throttle.max_failures_per_ip`. IPv6 sources are bucketed by `/64`, because a
 single host is routinely delegated a whole `/64` and a per-address limit there is

@@ -32,7 +32,7 @@ The equivalent operations, when a user cannot get in, are:
 
 | Situation | Operation |
 |---|---|
-| Locked out by repeated failures | Reset the throttle |
+| Locked out of one factor by repeated failures | Use another factor, which has a budget of its own, or reset the throttle, which clears every factor |
 | Locked by an operator | Unlock the subject |
 | Lost one authenticator, has another | Revoke the lost one |
 | Lost every authenticator, has recovery codes | Consume a code, then register a new authenticator in the same session |
@@ -377,6 +377,24 @@ those route families; a call outside them is a 403 and an audit entry. A key
 minted with no scopes is unrestricted, and the minting response says so.
 
 See [ADR 0002](adr/0002-authenticate-every-call-to-the-public-api-surface.md).
+
+## Why should my backend send `X-End-User-IP`?
+
+Because it is the only party that knows it. Every `/v1` request arrives from
+your backend, so the address this service observes is the same for all of your
+users and identifies none of them. A rate limit on it would be one bucket for
+the whole application, which any visitor of your sign-in page could fill with
+wrong codes, and then nobody signs in.
+
+So the per-address limit and the `recent_failures_network` risk reason work from
+the address you declare on the ceremony routes, and from nothing when you
+declare none. Without the header you keep the limits per subject, per factor and
+per key, and lose the one that makes an attacker spend addresses. Send the
+address your application observed for the browser, not a header the browser
+controls, and not a constant. A value that is not an IP address is a 400 rather
+than a silent fallback. The three SDKs take it as a per-request option, and
+[CONFIGURATION.md](CONFIGURATION.md#whose-address-the-per-address-limit-counts)
+has the details.
 
 ## Where is my first administrative token?
 

@@ -231,6 +231,12 @@ func (h *Handler) handlePasskeySignInComplete(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// A session the browser still holds ends here, before the new one exists.
+	// Signing in again is what an operator does when they suspect the session
+	// they have, and leaving the old one live in the store would keep whoever
+	// captured its cookie signed in for the rest of the idle window.
+	h.sessions.destroy(cookieValue(r))
+
 	value, sess, err := h.sessions.mint(now, result.Token, h.idleTTL, h.absoluteTTL)
 	if err != nil {
 		h.deps.Logger.ErrorContext(r.Context(), "adminui: session not created", slog.Any("error", err))
@@ -251,11 +257,11 @@ func (h *Handler) handlePasskeySignInComplete(w http.ResponseWriter, r *http.Req
 			slog.Any("error", err))
 	}
 
-	// The clone and binding signals travel on the audit entry rather than
-	// raising an alert. The interface holds no alert engine among its
-	// dependencies, and adding one for a signal this entry already carries
-	// would be a new collaborator for no new information. An operator reading
-	// the history sees both beside the sign-in they belong to.
+	// The clone and binding signals travel on the audit entry, where an
+	// operator reading the history finds them beside the sign-in they belong
+	// to. A counter that did not advance also raises the alert the public
+	// surface raises for a subject's authenticator, because the entry says so
+	// only to somebody already looking.
 	h.audited(w, r, audit.Event{
 		TenantID:     sess.TenantID,
 		EventType:    audit.EventAdminAuthorised,
@@ -275,8 +281,34 @@ func (h *Handler) handlePasskeySignInComplete(w http.ResponseWriter, r *http.Req
 		},
 	})
 
+	h.alertCloneWarning(r, sess, result)
+
 	h.setSessionCookie(w, value)
 	h.writeJSON(w, r, http.StatusOK, jsonDone{Redirect: "/admin/"})
+}
+
+// alertCloneWarning raises the alert for a signature counter that did not
+// advance.
+//
+// The assertion is not refused over it, here or on the public surface: many
+// authenticators legitimately report a constant zero, so refusing would break
+// those deployments and prove nothing about the rest. The alert is therefore
+// the only thing that brings a possible copy of an administrator's passkey to
+// anybody's attention while it is being used.
+//
+// The subject identifier is left empty on purpose. An administrative credential
+// belongs to a token and to nobody in the subject table, and putting a token
+// identifier in that column would file the alert under a person who does not
+// exist.
+func (h *Handler) alertCloneWarning(r *http.Request, sess *session, result *webauthn.AdminAssertionResult) {
+	if h.deps.Alerts == nil || result.Outcome == nil || !result.Outcome.CloneWarning {
+		return
+	}
+	if _, err := h.deps.Alerts.SignCountRegression(r.Context(), sess.TenantID, "", result.Credential.ID,
+		result.Outcome.PreviousSignCount, result.Outcome.NewSignCount); err != nil {
+		h.deps.Logger.WarnContext(r.Context(),
+			"adminui: alert not raised for a passkey that may have been copied", slog.Any("error", err))
+	}
 }
 
 // requireOwnToken resolves the administrative token the session was established
@@ -288,10 +320,9 @@ func (h *Handler) handlePasskeySignInComplete(w http.ResponseWriter, r *http.Req
 // ceremony produces something that signs in as that token, so enrolling one for
 // somebody else is handing yourself their sign-in.
 //
-// The token is re-read on each call rather than taken from the session, because
-// a session outlives the revocation of the token it was established with. That
-// is a deliberate trade for reading a screen; it must not extend to minting a
-// new credential.
+// The token is re-read here even though requireSession has just done so: these
+// routes need the row itself, and a credential minted for a token that stopped
+// being usable between the two reads would keep working after it.
 func (h *Handler) requireOwnToken(w http.ResponseWriter, r *http.Request, sess *session) *store.AdminToken {
 	tok, err := h.deps.Store.GetAdminTokenByID(r.Context(), h.tenantID(), sess.TokenID)
 	if err != nil {

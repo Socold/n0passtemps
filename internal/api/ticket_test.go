@@ -13,6 +13,7 @@ import (
 	"github.com/Socold/n0passtemps/internal/alerts"
 	"github.com/Socold/n0passtemps/internal/audit"
 	"github.com/Socold/n0passtemps/internal/config"
+	"github.com/Socold/n0passtemps/internal/crypto/envelope"
 	"github.com/Socold/n0passtemps/internal/crypto/recovery"
 	"github.com/Socold/n0passtemps/internal/crypto/token"
 	"github.com/Socold/n0passtemps/internal/store"
@@ -121,12 +122,14 @@ func seedTicketCredential(t *testing.T, h *harness, subjectID, label string) str
 // pending.
 func seedTOTPSecret(t *testing.T, h *harness, subjectID string, confirmed bool) {
 	t.Helper()
-	sealed, err := h.sealer.Seal([]byte("0123456789012345678901234567890123456789"))
+	secretID := uuid.NewString()
+	sealed, err := h.sealer.Seal([]byte("0123456789012345678901234567890123456789"),
+		envelope.TOTPSecret(h.cfg.TenantID(), subjectID, secretID))
 	if err != nil {
 		t.Fatal(err)
 	}
 	rec := &store.TOTPSecret{
-		ID:            uuid.NewString(),
+		ID:            secretID,
 		TenantID:      h.cfg.TenantID(),
 		SubjectID:     subjectID,
 		SecretSealed:  sealed,

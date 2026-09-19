@@ -130,6 +130,9 @@ type statusRecorder struct {
 	written int64
 }
 
+// WriteHeader records the first status written and passes it on. Only the first
+// is kept: a handler that writes twice has already committed the response, and
+// the log should say what the caller actually received.
 func (s *statusRecorder) WriteHeader(code int) {
 	if s.status == 0 {
 		s.status = code
@@ -221,13 +224,17 @@ func RequestMetrics(obs RequestObserver) Middleware {
 			start := time.Now()
 			rec := &statusRecorder{ResponseWriter: w}
 
-			routed := r.WithContext(r.Context())
-			next.ServeHTTP(rec, routed)
+			// The request is handed on as it is, not copied. The multiplexer
+			// sets Request.Pattern on the request it is given, and RequestLog
+			// reads the pattern from the request it passed down: a copy made
+			// here receives the pattern in its place, and the log line falls
+			// back to the concrete path, which is the subject reference.
+			next.ServeHTTP(rec, r)
 
 			if rec.status == 0 {
 				rec.status = http.StatusOK
 			}
-			obs.ObserveRequest(routePattern(routed), r.Method, rec.status, time.Since(start))
+			obs.ObserveRequest(routePattern(r), r.Method, rec.status, time.Since(start))
 		})
 	}
 }
@@ -324,8 +331,20 @@ func isTLS(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	// Set by the reverse proxy. It is only consulted when the request already
-	// came from a trusted proxy, which SourceIP establishes before this runs.
+	// X-Forwarded-Proto is a claim, and only a trusted proxy's claim counts.
+	// SourceIP has already made that decision for X-Forwarded-For, so its
+	// outcome is read rather than the rule repeated: a resolved client address
+	// that differs from the direct peer means the peer was inside the trusted
+	// networks and its forwarded address was honoured. The reading errs on the
+	// quiet side. A trusted proxy that forwards no client address, or only
+	// addresses inside the trusted networks, resolves to the peer and so gets no
+	// HSTS on that response, which costs a header and never sends one on the
+	// word of an arbitrary caller.
+	peer := peerIP(r.RemoteAddr)
+	source := SourceIPFrom(r.Context())
+	if peer == nil || source == "" || source == peer.String() {
+		return false
+	}
 	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
@@ -364,7 +383,7 @@ func RequireJSON() Middleware {
 
 			ct := r.Header.Get("Content-Type")
 			if ct == "" {
-				WriteProblem(w, r, &APIError{
+				WriteProblem(w, r, &Error{
 					Status: http.StatusUnsupportedMediaType, Type: TypeUnsupportedMedia,
 					Title:  "a JSON request body is required",
 					Detail: "set Content-Type to application/json",
@@ -373,7 +392,7 @@ func RequireJSON() Middleware {
 			}
 			media := strings.TrimSpace(strings.SplitN(ct, ";", 2)[0])
 			if !strings.EqualFold(media, "application/json") {
-				WriteProblem(w, r, &APIError{
+				WriteProblem(w, r, &Error{
 					Status: http.StatusUnsupportedMediaType, Type: TypeUnsupportedMedia,
 					Title:  "a JSON request body is required",
 					Detail: "Content-Type " + media + " is not accepted",
@@ -543,8 +562,9 @@ func IPAllowList(cidrs []string) Middleware {
 	return func(next http.Handler) http.Handler {
 		if len(nets) == 0 {
 			// No list configured means no restriction. The configuration
-			// validator is what refuses that combination on a non-loopback
-			// listener, so this does not have to second-guess it.
+			// validator refuses that combination whenever the listener is not
+			// loopback or a trusted proxy is declared, whether or not the
+			// console is enabled, so this does not have to second-guess it.
 			return next
 		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

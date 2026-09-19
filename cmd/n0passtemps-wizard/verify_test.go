@@ -135,12 +135,14 @@ func buildTrio(t *testing.T, opts trioOptions) trio {
 			t.Fatalf("resolve subject: %v", err)
 		}
 
-		sealed, err := sealer.Seal([]byte(tr.totpSecret))
+		secretID := uuid.NewString()
+		sealed, err := sealer.Seal([]byte(tr.totpSecret),
+			envelope.TOTPSecret(testTenant, sub.ID, secretID))
 		if err != nil {
 			t.Fatalf("seal totp secret: %v", err)
 		}
 		if err := st.CreateTOTPSecret(ctx, &store.TOTPSecret{
-			ID: uuid.NewString(), TenantID: testTenant, SubjectID: sub.ID,
+			ID: secretID, TenantID: testTenant, SubjectID: sub.ID,
 			SecretSealed: sealed, Algorithm: "SHA1", Digits: 6, PeriodSeconds: 30,
 			CreatedAt: now,
 		}); err != nil {
@@ -602,7 +604,7 @@ func TestExitCodeFor(t *testing.T) {
 
 // requireVerdict asserts both halves of the interface: the sentinel the command
 // reports, and the exit status an operator's cron job reads.
-func requireVerdict(t *testing.T, err error, want error, code int) {
+func requireVerdict(t *testing.T, err, want error, code int) {
 	t.Helper()
 	if err == nil {
 		t.Fatalf("expected %v, got no error", want)

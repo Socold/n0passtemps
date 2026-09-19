@@ -55,7 +55,7 @@ func (s *Server) Routes() http.Handler {
 
 	// A request that matches no route still passes through the outer chain, so
 	// it gets a request identifier, a log line and the security headers.
-	mux.Handle("/", Chain(wrap(func(w http.ResponseWriter, r *http.Request) error {
+	mux.Handle("/", Chain(wrap(func(http.ResponseWriter, *http.Request) error {
 		return NotFound(nil)
 	}), RouteLabel()))
 
@@ -111,8 +111,17 @@ func (s *Server) mountPublic(mux *http.ServeMux) {
 			RouteLabel(),
 			CORS(s.deps.Config.Server.CORSAllowedOrigins),
 			s.auth.RequireAPIKey(),
-			s.RequireScope(scope),
+			// The key is counted before the scope is checked, not after. A
+			// refusal for a scope the key does not hold is audited, so a key
+			// that has been taken could otherwise write one entry per request
+			// simply by calling a route it is not entitled to, at whatever rate
+			// it liked. Counting first puts that behind the same per-key
+			// ceiling as everything else. The cost is that a call outside the
+			// key's scopes consumes volume, which is the right answer: it was
+			// still a request, and the integration that makes it has a
+			// misconfiguration to fix either way.
 			s.MeterAPIKey(),
+			s.RequireScope(scope),
 			RequireJSON(),
 			NoStore(),
 		)
@@ -167,7 +176,7 @@ func (s *Server) mountPublic(mux *http.ServeMux) {
 	// A preflight request carries no credential, by definition, so it cannot
 	// pass through the authentication middleware. It is answered by the CORS
 	// middleware alone.
-	preflight := Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	preflight := Chain(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}), CORS(s.deps.Config.Server.CORSAllowedOrigins))
 	mux.Handle("OPTIONS /v1/", preflight)

@@ -187,6 +187,13 @@ expiry, which the response reports as `no_expiry: true` rather than refusing. A
 long-lived key is sometimes the only practical option for an integration that
 cannot rotate, and the response says so instead of pretending otherwise.
 
+A stated lifetime is bounded at 730 days, two years, and a negative one is
+refused rather than read as no expiry. That is not in tension with leaving the
+field out: no expiry is a decision the response reports and every listing
+shows, while `"expires_in_days": 36500` is almost always a digit too many and
+produces a credential that reads as bounded on every screen an operator will
+look at. The same bound applies when minting an administrative token.
+
 `scopes` restricts the key to the named families of public routes. It is
 enforced where each route is mounted, in `internal/api/router.go`:
 
@@ -214,8 +221,10 @@ the first call of every login.
 A key that calls a route outside its scopes gets 403, not 401: the credential is
 valid and presenting it again would not help. The attempt is audited as
 `api_key.rejected` with outcome `denied`, resource type `scope`, and the route
-and the scopes held in the detail. Scopes cannot be changed on an existing key;
-mint a new one and revoke the old.
+and the scopes held in the detail. The call is counted against the key's volume
+before the scope is checked, so a key making that mistake in a loop is stopped
+by `throttle.max_requests_per_key` like any other traffic. Scopes cannot be
+changed on an existing key; mint a new one and revoke the old.
 
 Every request a key makes on a public route counts against
 `throttle.max_requests_per_key` within `throttle.window`, whether or not
@@ -354,9 +363,11 @@ curl -sS -X POST "$BASE/admin/v1/admin-tokens" \
   -d '{"name":"support-desk","role":"admin_operator","expires_in_days":90}'
 ```
 
-The approval is bound to `name` and `role`. `expires_in_days` is not part of
-what the second administrator approved, so it can differ between the two calls;
-state the intended lifetime in the ticket if it matters to you. The full rules
+The approval is bound to `name`, `role` and `expires_in_days`, so the token that
+is minted is the token that was approved. Redeeming with a different lifetime,
+the omitted field included, is refused: asking for a credential that lasts a day
+and redeeming it for one that never expires was a way to have one thing approved
+and another issued. The full rules
 are under [The dual-approval queue](#the-dual-approval-queue).
 
 ### Rotating your own token
@@ -375,6 +386,14 @@ The response has the shape of the API key one, with `admin_token` in place of
 `api_key`. The successor has the same name and the same role. Put it in your
 password manager, confirm it works, and the old token stops at
 `predecessor_expires_at`. `grace` follows the same rules as for an API key.
+
+If this token has a console passkey enrolled, the call is refused with 409 and
+says so. A passkey belongs to the token it signs in as and cannot be moved to
+the successor, so a rotation would leave it working until the grace ran out and
+then not at all, and would hand you a successor that
+`admin.passkey_required` no longer applies to. Withdraw the passkeys from the
+overview screen first and enrol again on the successor, or ask a full
+administrator to mint you a replacement token and revoke this one.
 
 The path names no token, on purpose. The token that is rotated is the one that
 authenticated the request, and there is no route for rotating another
@@ -480,7 +499,14 @@ Audited as `admin_credential.revoked`.
 ### Why the last full administrator cannot be revoked
 
 `POST /admin/v1/admin-tokens/{token_id}/revoke` counts the usable `admin_full`
-tokens before acting. If the target is the last one, the call is refused:
+tokens before acting, at two instants. The first is now, which is who the
+deployment has to administer itself with the moment the call returns. The
+second is a week from now, the longest rotation grace: a token that has just
+been rotated still works today, so counting only the present would let its
+successor be revoked and leave nobody once the grace ran out. A target that
+expires inside that week is not counted at the second instant, because it will
+not be there either, but it is still counted at the first. If either count
+leaves nobody, the call is refused:
 
 ```json
 {
@@ -500,6 +526,11 @@ replacement, verify it works, then revoke the old one.
 Mint the replacement first, in that order, always. The count is of usable
 tokens, so an unexpired unrevoked `admin_full` token whose holder has lost it
 still counts and still blocks the revocation of the other one.
+
+The guard is a check and a write, in that order, and the service holds them
+together within one process. Two instances of the service over one database can
+still interleave two revocations, each having seen the other's token. Mint the
+replacement before either revocation and the case does not arise.
 
 ## The six things an operator actually does
 
@@ -653,7 +684,7 @@ What to look for in step 2 and 3:
 | `webauthn.sign_count_regression` | The authenticator's signature counter did not advance. Two copies of a private key in use, or an authenticator that reports a constant zero, which is common. See [WEBAUTHN.md](WEBAUTHN.md) |
 | `webauthn.binding_changed` | The authenticator's characteristics differ from registration. A firmware update does this legitimately |
 | `recovery.consumed` you did not expect | Someone used a code. If the user did not, the sheet is compromised |
-| `api_key.rejected` in volume | A leaked key being probed, or a deployment still running with a credential someone revoked |
+| `api_key.rejected` in volume | A leaked key being probed, or a deployment still running with a credential someone revoked. Read the `refusals` count on the entry rather than counting entries: refusals from one address are folded into one entry a minute, and a request that presented no credential at all is counted on the alert and written nowhere |
 | `admin.denied` | A token reaching for a permission its role does not hold: a misconfigured integration, or a stolen token being explored |
 | `totp.replay_detected` | A code that verified but whose timestep was already spent. Either a race, or a replay |
 

@@ -110,6 +110,14 @@ narrow by construction rather than by policy:
   began with, for no longer than it was given.
 - Nothing else is touched: no subject, no record, no other credential. The
   rotation is audited as `admin_token.rotated`.
+- A token that holds a console passkey is refused with 409 until the passkey is
+  withdrawn. A passkey names the token it signs in as, an authenticator may be
+  enrolled once, and nothing moves it onto the successor, so rotating would
+  leave the key working until the predecessor's grace ran out and then not at
+  all. It would also take the token out of `admin.passkey_required`, which
+  applies to a token that holds a passkey and not to one that holds none: the
+  successor would be accepted in the sign-in form without the key the
+  deployment asked for.
 
 Because it changes no authority it is not a dual-approval candidate. There is
 nothing for a second administrator to weigh, and holding it would mean that a

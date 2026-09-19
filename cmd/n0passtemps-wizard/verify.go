@@ -47,12 +47,18 @@ type sealedColumn struct {
 	table  string
 	column string
 
-	// query lists every sealed value with the identifier of its row. It is a
-	// literal rather than assembled from table and column, for the reason
-	// sealedStatementsFor in internal/store/sqlite gives: a statement built
-	// from a struct field becomes an injection point the day something sets
-	// that field from an argument.
+	// query lists every sealed value with the identifier of its row, the
+	// tenant that owns it, and the subject it belongs to where that is not the
+	// row itself. Those three are what the binding context is built from, so
+	// the query has to carry them: a record opens only under the context it was
+	// sealed with. It is a literal rather than assembled from table and column,
+	// for the reason sealedStatementsFor in internal/store/sqlite gives: a
+	// statement built from a struct field becomes an injection point the day
+	// something sets that field from an argument.
 	query string
+
+	// bind builds the context a record of this column is sealed under.
+	bind func(rec sealedRecord) envelope.Context
 }
 
 func (c sealedColumn) String() string { return c.table + "." + c.column }
@@ -71,17 +77,23 @@ var sealedColumns = []sealedColumn{
 	{
 		table:  "subjects",
 		column: "ref_sealed",
-		query: `SELECT id, ref_sealed FROM subjects
+		query: `SELECT id, tenant_id, '', ref_sealed FROM subjects
 			WHERE ref_sealed IS NOT NULL AND length(ref_sealed) > 0
 			ORDER BY id`,
+		bind: func(rec sealedRecord) envelope.Context {
+			return envelope.SubjectRef(rec.tenantID, rec.id)
+		},
 	},
 	{
 		table:  "totp_secrets",
 		column: "secret_sealed",
-		query: `SELECT id, secret_sealed FROM totp_secrets
+		query: `SELECT id, tenant_id, subject_id, secret_sealed FROM totp_secrets
 			WHERE secret_sealed IS NOT NULL AND length(secret_sealed) > 0
 			AND revoked_at IS NULL
 			ORDER BY id`,
+		bind: func(rec sealedRecord) envelope.Context {
+			return envelope.TOTPSecret(rec.tenantID, rec.subjectID, rec.id)
+		},
 	},
 }
 
@@ -461,8 +473,10 @@ func reportSchema(db *sql.DB, path string) error {
 
 // sealedRecord is one envelope-encrypted value and the row it came from.
 type sealedRecord struct {
-	id     string
-	sealed []byte
+	id        string
+	tenantID  string
+	subjectID string
+	sealed    []byte
 }
 
 // columnCensus is what one sealed column holds, grouped by key version.
@@ -508,7 +522,7 @@ func takeCensus(db *sql.DB, all bool) ([]*columnCensus, error) {
 
 		for rows.Next() {
 			var rec sealedRecord
-			if err := rows.Scan(&rec.id, &rec.sealed); err != nil {
+			if err := rows.Scan(&rec.id, &rec.tenantID, &rec.subjectID, &rec.sealed); err != nil {
 				_ = rows.Close()
 				return nil, fmt.Errorf("%w: reading %s: %v", errTrioDoesNotOpen, col, err)
 			}
@@ -614,7 +628,7 @@ func unsealSample(sealer *envelope.Sealer, censuses []*columnCensus) (int, error
 	for _, c := range censuses {
 		for _, v := range c.versions() {
 			for _, rec := range c.toUnseal[v] {
-				plain, err := sealer.Unseal(rec.sealed)
+				plain, err := sealer.Unseal(rec.sealed, c.column.bind(rec))
 				if err != nil {
 					// The envelope package will not say which of the two it is,
 					// and cannot: an authenticated cipher that distinguished a
@@ -659,17 +673,18 @@ type pepperProof struct {
 // either a wrong pepper or a reference that was never enrolled here.
 func checkPepper(db *sql.DB, sealer *envelope.Sealer, pepper []byte, ref string) (pepperProof, error) {
 	var (
-		id      string
-		refHMAC []byte
-		sealed  []byte
+		id       string
+		tenantID string
+		refHMAC  []byte
+		sealed   []byte
 	)
-	err := db.QueryRow(`SELECT id, ref_hmac, ref_sealed FROM subjects
+	err := db.QueryRow(`SELECT id, tenant_id, ref_hmac, ref_sealed FROM subjects
 		WHERE ref_sealed IS NOT NULL AND length(ref_sealed) > 0
-		ORDER BY id LIMIT 1`).Scan(&id, &refHMAC, &sealed)
+		ORDER BY id LIMIT 1`).Scan(&id, &tenantID, &refHMAC, &sealed)
 
 	switch {
 	case err == nil:
-		plain, uerr := sealer.Unseal(sealed)
+		plain, uerr := sealer.Unseal(sealed, envelope.SubjectRef(tenantID, id))
 		if uerr != nil {
 			return pepperProof{}, fmt.Errorf("%w: the sealed reference of subject %s did not "+
 				"open, so the pepper cannot be checked against it", errTrioDoesNotOpen, id)

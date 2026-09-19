@@ -128,7 +128,7 @@ func TestDiscoverableFailureCannotLockOutASubject(t *testing.T) {
 	h := newHarness(t, func(c *config.Config) {
 		c.Throttle.MaxFailuresPerSubject = 3
 		c.Throttle.MaxFailuresPerIP = 500
-		c.Throttle.LockoutDuration = config.Duration{Duration: 10 * time.Minute}
+		c.Throttle.LockoutDuration = config.Duration{Duration: 15 * time.Minute}
 	})
 
 	h.do(http.MethodPost, "/v1/subjects", h.apiKey, map[string]any{"subject_ref": "user-1"})
@@ -166,7 +166,7 @@ func TestDiscoverableBeginIsBoundedByTheNetworkLimit(t *testing.T) {
 	h := newHarness(t, func(c *config.Config) {
 		c.Throttle.MaxFailuresPerIP = 100
 		c.Throttle.MaxRequestsPerKey = 5
-		c.Throttle.LockoutDuration = config.Duration{Duration: 10 * time.Minute}
+		c.Throttle.LockoutDuration = config.Duration{Duration: 15 * time.Minute}
 	})
 
 	// The route mints a challenge for anyone with the scope and names no

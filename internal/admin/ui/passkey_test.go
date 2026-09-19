@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -424,13 +425,15 @@ func TestEveryRoleMayManageItsOwnPasskeys(t *testing.T) {
 	}
 }
 
-// TestPasskeyEnrolmentRefusesASessionWhoseTokenIsGone stops a session that
-// outlived its own credential from minting a new one.
+// TestASessionEndsWithTheTokenItWasMadeWith holds a session to the life of its
+// credential.
 //
-// A session deliberately survives the revocation of the token it was
-// established with, which is the trade made for reading a screen. It must not
-// extend to creating a credential that would keep working afterwards.
-func TestPasskeyEnrolmentRefusesASessionWhoseTokenIsGone(t *testing.T) {
+// A session used to survive the revocation of its token, on the reasoning that
+// checking the token on every request meant keeping it where the browser could
+// send it back. It does not: the token is read by its identifier. What the old
+// trade cost was the twelve hours in which a revoked administrator could still
+// lock subjects, reissue recovery codes and decide approval requests.
+func TestASessionEndsWithTheTokenItWasMadeWith(t *testing.T) {
 	h := newHarness(t)
 	tok, display := h.mintToken(store.RoleFull)
 	cookie := h.signIn(display)
@@ -440,9 +443,19 @@ func TestPasskeyEnrolmentRefusesASessionWhoseTokenIsGone(t *testing.T) {
 		t.Fatalf("revoke token: %v", err)
 	}
 
-	w := h.post("/admin/passkeys/begin", url.Values{csrfFieldName: {csrf}}, cookie)
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusForbidden)
+	// Reading a screen and changing something are refused alike, and both are
+	// sent to sign in.
+	for name, w := range map[string]*httptest.ResponseRecorder{
+		"reading the dashboard": h.get("/admin/", cookie),
+		"enrolling a passkey":   h.post("/admin/passkeys/begin", url.Values{csrfFieldName: {csrf}}, cookie),
+	} {
+		if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/admin/sign-in" {
+			t.Errorf("%s = %d to %q, want %d to /admin/sign-in",
+				name, w.Code, w.Header().Get("Location"), http.StatusSeeOther)
+		}
+	}
+	if n := h.handler.sessions.count(); n != 0 {
+		t.Errorf("%d sessions survive the revocation, want 0", n)
 	}
 }
 

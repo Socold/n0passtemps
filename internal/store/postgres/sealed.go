@@ -35,7 +35,7 @@ func sealedStatementsFor(kind store.SealedKind) (sealedStatements, error) {
 	switch kind {
 	case store.SealedTOTP:
 		return sealedStatements{
-			list: `SELECT id, secret_sealed FROM totp_secrets
+			list: `SELECT id, tenant_id, subject_id, secret_sealed FROM totp_secrets
 				WHERE revoked_at IS NULL AND id > $1
 				ORDER BY id ASC LIMIT $2`,
 			replace: `UPDATE totp_secrets SET secret_sealed = $1
@@ -47,7 +47,9 @@ func sealedStatementsFor(kind store.SealedKind) (sealedStatements, error) {
 		// not an envelope, so listing it would report a failure on every pass
 		// for a row that holds nothing to protect.
 		return sealedStatements{
-			list: `SELECT id, ref_sealed FROM subjects
+			// The empty column keeps one scan shape for every kind. A subject
+			// is its own subject, so there is no second identifier to read.
+			list: `SELECT id, tenant_id, '' AS subject_id, ref_sealed FROM subjects
 				WHERE ref_sealed IS NOT NULL AND length(ref_sealed) > 0 AND id > $1
 				ORDER BY id ASC LIMIT $2`,
 			replace: `UPDATE subjects SET ref_sealed = $1
@@ -80,7 +82,7 @@ func (s *Store) ListSealed(ctx context.Context, kind store.SealedKind, afterID s
 	var out []store.SealedRecord
 	for rows.Next() {
 		var rec store.SealedRecord
-		if err := rows.Scan(&rec.ID, &rec.Sealed); err != nil {
+		if err := rows.Scan(&rec.ID, &rec.TenantID, &rec.SubjectID, &rec.Sealed); err != nil {
 			return nil, fmt.Errorf("postgres: scan sealed record: %w", err)
 		}
 		out = append(out, rec)

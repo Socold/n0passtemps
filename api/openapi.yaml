@@ -199,7 +199,8 @@ servers:
 
 tags:
   - name: Health
-    description: Liveness and the detailed component report.
+    description: |
+      Liveness, the detailed component report and the Prometheus exposition.
   - name: Keys
     description: The public keys that verify an assertion.
   - name: Subjects
@@ -291,6 +292,63 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthReport"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/Throttled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/metrics:
+    get:
+      tags: [Health]
+      operationId: getMetrics
+      summary: Prometheus exposition.
+      description: |
+        Requires an API key that holds the `metrics` scope, or an unrestricted
+        key.
+
+        The counters and histograms of the running process in the Prometheus
+        text exposition format, version 0.0.4.
+
+        It is authenticated for the reason that split the health endpoint:
+        request rates by route, the shape of the `401` and `429` curves and the
+        version of the running binary are reconnaissance before they are
+        diagnostics. A scraper reads a bearer token from a file, so this costs a
+        scrape configuration two lines.
+
+        No series carries a per-subject label. A label whose values are users is
+        an enumeration of the deployment's population that happens to be
+        formatted as monitoring data, and its cardinality is unbounded for the
+        same reason.
+
+        A deployment with no registry configured is answered `503` rather than
+        an empty document, because an empty document scrapes clean and reads as
+        "nothing has happened".
+      security:
+        - apiKey: []
+      responses:
+        "200":
+          description: The exposition.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+            Content-Type:
+              description: Fixed at `text/plain; version=0.0.4; charset=utf-8`.
+              schema:
+                type: string
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                # HELP n0passtemps_build_info The running build.
+                # TYPE n0passtemps_build_info gauge
+                n0passtemps_build_info{version="1.1.0"} 1
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -461,6 +519,7 @@ paths:
   /v1/webauthn/{subject_ref}/register:
     parameters:
       - $ref: "#/components/parameters/SubjectRef"
+      - $ref: "#/components/parameters/EndUserIP"
     post:
       tags: [WebAuthn]
       operationId: beginRegistration
@@ -517,6 +576,7 @@ paths:
   /v1/webauthn/{subject_ref}/register/complete:
     parameters:
       - $ref: "#/components/parameters/SubjectRef"
+      - $ref: "#/components/parameters/EndUserIP"
     post:
       tags: [WebAuthn]
       operationId: completeRegistration
@@ -573,6 +633,7 @@ paths:
   /v1/webauthn/{subject_ref}/assert:
     parameters:
       - $ref: "#/components/parameters/SubjectRef"
+      - $ref: "#/components/parameters/EndUserIP"
     post:
       tags: [WebAuthn]
       operationId: beginAssertion
@@ -616,6 +677,8 @@ paths:
           $ref: "#/components/responses/Unavailable"
 
   /v1/webauthn/assert/discoverable:
+    parameters:
+      - $ref: "#/components/parameters/EndUserIP"
     post:
       tags: [WebAuthn]
       operationId: beginDiscoverableAssertion
@@ -643,7 +706,8 @@ paths:
         Only the per-network and per-key limits apply, because no subject is
         known yet. The challenges are single use, short lived and useless
         without an authenticator holding a matching credential, so those limits
-        bound the cost of issuing them.
+        bound the cost of issuing them. The per-network limit needs the
+        `X-End-User-IP` header; without it the per-key limit is the only one.
       security:
         - apiKey: []
       responses:
@@ -656,6 +720,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/BeginAssertionResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -668,6 +734,8 @@ paths:
           $ref: "#/components/responses/Unavailable"
 
   /v1/webauthn/assert/discoverable/complete:
+    parameters:
+      - $ref: "#/components/parameters/EndUserIP"
     post:
       tags: [WebAuthn]
       operationId: completeDiscoverableAssertion
@@ -728,6 +796,7 @@ paths:
   /v1/webauthn/{subject_ref}/assert/complete:
     parameters:
       - $ref: "#/components/parameters/SubjectRef"
+      - $ref: "#/components/parameters/EndUserIP"
     post:
       tags: [WebAuthn]
       operationId: completeAssertion
@@ -838,6 +907,7 @@ paths:
   /v1/totp/{subject_ref}/enrol/confirm:
     parameters:
       - $ref: "#/components/parameters/SubjectRef"
+      - $ref: "#/components/parameters/EndUserIP"
     post:
       tags: [TOTP]
       operationId: confirmTOTP
@@ -897,6 +967,7 @@ paths:
   /v1/totp/{subject_ref}/verify:
     parameters:
       - $ref: "#/components/parameters/SubjectRef"
+      - $ref: "#/components/parameters/EndUserIP"
     post:
       tags: [TOTP]
       operationId: verifyTOTP
@@ -993,6 +1064,7 @@ paths:
   /v1/totp/{subject_ref}/enroll/confirm:
     parameters:
       - $ref: "#/components/parameters/SubjectRef"
+      - $ref: "#/components/parameters/EndUserIP"
     post:
       tags: [TOTP]
       operationId: confirmTOTPAlias
@@ -1050,6 +1122,7 @@ paths:
   /v1/recovery/{subject_ref}/issue:
     parameters:
       - $ref: "#/components/parameters/SubjectRef"
+      - $ref: "#/components/parameters/EndUserIP"
     post:
       tags: [Recovery]
       operationId: issueRecoveryCodes
@@ -1098,6 +1171,7 @@ paths:
   /v1/recovery/{subject_ref}/consume:
     parameters:
       - $ref: "#/components/parameters/SubjectRef"
+      - $ref: "#/components/parameters/EndUserIP"
     post:
       tags: [Recovery]
       operationId: consumeRecoveryCode
@@ -1236,6 +1310,8 @@ paths:
           $ref: "#/components/responses/Unavailable"
 
   /v1/enrolment/register:
+    parameters:
+      - $ref: "#/components/parameters/EndUserIP"
     post:
       tags: [Enrolment tickets]
       operationId: redeemEnrolmentTicketBegin
@@ -1312,6 +1388,8 @@ paths:
           $ref: "#/components/responses/Unavailable"
 
   /v1/enrolment/register/complete:
+    parameters:
+      - $ref: "#/components/parameters/EndUserIP"
     post:
       tags: [Enrolment tickets]
       operationId: redeemEnrolmentTicketComplete
@@ -3214,6 +3292,45 @@ components:
         type: string
         minLength: 1
         maxLength: 256
+    EndUserIP:
+      name: X-End-User-IP
+      in: header
+      required: false
+      description: |
+        The address of the end user the call is made for, as the calling
+        application observed it. One IPv4 or IPv6 address, with no port, no
+        zone and no prefix length.
+
+        `/v1` is called from server to server, so the address a request arrives
+        from is the application's backend and is the same for every one of its
+        users. The per-address rate limit, `throttle.max_failures_per_ip`, and
+        the `recent_failures_network` risk reason are therefore computed on the
+        address declared here, normalised as any other: IPv4 by the address,
+        IPv6 by its `/64`.
+
+        When the header is absent, no per-address limit is applied to the call.
+        The per-subject and per-key limits still are, and so is the per-ticket
+        one on the enrolment routes. A route that names no subject is then
+        bounded by the per-key limit alone, so an application that exposes the
+        usernameless flow should always send it.
+
+        A value that is not one IP address is answered `400`. It is never
+        ignored, because a silent fallback would run an integration without the
+        limit for as long as nobody looked.
+
+        The audit log keeps the address the request arrived from as `source_ip`
+        and records this one as `end_user_ip` in the entry's detail: the first
+        was observed, the second is a statement by an authenticated caller.
+      schema:
+        type: string
+        anyOf:
+          - format: ipv4
+          - format: ipv6
+      examples:
+        ipv4:
+          value: 203.0.113.50
+        ipv6:
+          value: "2001:db8:1:2::1"
     SubjectId:
       name: subject_id
       in: path
@@ -3495,10 +3612,21 @@ components:
                 request_id: 9f2a1c7b5d3e4f60a1b2c3d4
     Throttled:
       description: |
-        A rate limit was reached. Limits apply per subject, per source address
+        A rate limit was reached. Limits apply per subject, per end-user address
         and per API key at the same time, and the two administrative revoke
         routes additionally share one per administrator. The response does not
         say which dimension tripped.
+
+        The per-subject limit is held once per factor. Failures at TOTP lock
+        the subject out of TOTP and leave WebAuthn and recovery codes usable,
+        and the reverse, so nobody can be kept from their passkey by somebody
+        else sending wrong codes in their name. The per-address limit works
+        from the `X-End-User-IP` request header and is not applied without it.
+        Both lock out for `throttle.lockout_duration`.
+
+        The per-key limit is a rate limit and not a lockout: `Retry-After`
+        runs to the end of the current `throttle.window`, after which the key
+        is served again.
 
         The per-key limit, `throttle.max_requests_per_key`, is metered on every
         `/v1` route that takes an API key, including the ones that perform no
@@ -5057,10 +5185,19 @@ components:
         rewrapped:
           type: integer
           minimum: 0
-          description: Records moved from an older version onto the current one.
+          description: |
+            Records rewritten: moved from an older key version onto the current
+            one, and records lifted from the older sealed format onto the one
+            that binds a record to the row it lives in. A pass that reports
+            `rewrapped: 0` with `failed: 0` is the proof that neither an old key
+            nor an old format is left.
         already_current:
           type: integer
           minimum: 0
+          description: |
+            Records already on the current key version and the current format,
+            and opened to say so. They are authenticated like every other
+            record, so a damaged one is counted in `failed` rather than here.
         failed:
           type: integer
           minimum: 0

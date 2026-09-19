@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -179,6 +181,12 @@ type rewrapReport struct {
 // record that could not be read at all has no version to report, which is why
 // failed has to be zero as well.
 //
+// The pass also carries records forward from the envelope format that predates
+// binding contexts, which it reports as rewrapped like any other rewrite. A
+// pass whose rewrapped and failed are both zero is therefore the signal that
+// nothing is left on an old key or an old format, and it is the signal to look
+// for after upgrading a deployment that was running before ADR 0021.
+//
 // A record that fails to rewrap is counted and logged and the pass carries on.
 // The response is 200 with the counts even then: a failure is usually one
 // record whose key version has already left the keyring, and the operator
@@ -295,7 +303,37 @@ func sortedVersions(set map[uint32]struct{}) []uint32 {
 	return out
 }
 
+// bindingFor rebuilds the binding context of a record the walk has read.
+//
+// The identifiers come from the row the sealed value was read from, which is
+// the whole point: a record opens only when the row it is stored in is the row
+// it was sealed for. Deriving them from the bytes instead would authenticate
+// the record against itself and prove nothing.
+func bindingFor(kind store.SealedKind, rec store.SealedRecord) (envelope.Context, error) {
+	switch kind {
+	case store.SealedSubjectRef:
+		return envelope.SubjectRef(rec.TenantID, rec.ID), nil
+	case store.SealedTOTP:
+		return envelope.TOTPSecret(rec.TenantID, rec.SubjectID, rec.ID), nil
+	default:
+		return envelope.Context{}, fmt.Errorf("no binding context for sealed kind %q", string(kind))
+	}
+}
+
 // rewrapOne handles a single record and accounts for it in the report.
+//
+// Every record is opened, including one already sealed under the current key in
+// the current format. An earlier version of this function counted such a record
+// as already current on the strength of its header alone, so a row whose
+// payload had been corrupted or substituted was reported as sound by the one
+// pass that reads every sealed value in the deployment. The only way to know a
+// record is intact is to open it, so it is opened.
+//
+// A record sealed before binding contexts existed is rewritten even when its
+// key version is already current, which is how the binding reaches the records
+// that predate it. It is counted as rewrapped, because that is what happened to
+// it; a pass that reports no rewraps and no failures is a deployment where
+// nothing is left on an old key or an old format.
 //
 // Log lines carry the record's identifier and key version and never its bytes.
 // The sealed value is ciphertext, but a log is kept for longer and read by more
@@ -314,27 +352,36 @@ func (s *Server) rewrapOne(ctx context.Context, sealer *envelope.Sealer, kind st
 		return
 	}
 
-	if version == current {
-		report.Examined++
-		report.AlreadyCurrent++
-		inUse[current] = struct{}{}
-		return
-	}
-
 	failed := func(msg string, err error) {
 		report.Examined++
 		report.Failed++
-		// The record still names the old version, so that version is still in
-		// use and must not be retired.
+		// The record still names the version it was read under, so that
+		// version is still in use and must not be retired.
 		inUse[version] = struct{}{}
 		s.deps.Logger.WarnContext(ctx, msg,
 			slog.String("kind", string(kind)), slog.String("id", rec.ID),
 			slog.Uint64("kek_version", uint64(version)), slog.Any("error", err))
 	}
 
-	replacement, err := sealer.Rewrap(rec.Sealed)
+	bind, err := bindingFor(kind, rec)
+	if err != nil {
+		failed("sealed record has no binding context and was not rewrapped", err)
+		return
+	}
+
+	replacement, err := sealer.Rewrap(rec.Sealed, bind)
 	if err != nil {
 		failed("sealed record could not be rewrapped", err)
+		return
+	}
+
+	if bytes.Equal(replacement, rec.Sealed) {
+		// Rewrap returns the record unchanged when there is nothing to move,
+		// and it returns it only after opening it. So this record is on the
+		// current key, in the current format, and now known to be intact.
+		report.Examined++
+		report.AlreadyCurrent++
+		inUse[current] = struct{}{}
 		return
 	}
 

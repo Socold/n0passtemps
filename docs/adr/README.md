@@ -31,6 +31,7 @@ superseded by a new record rather than edited in place. See
 | [0018](0018-reducing-the-blast-radius-of-a-central-key.md) | Reducing the blast radius of a central key: rotate now, split later, and never pretend two files are two keys | accepted |
 | [0019](0019-seal-the-keyring-to-a-tpm.md) | Seal the keyring to a TPM, and say plainly that it protects the disk and not the host | accepted |
 | [0020](0020-core-and-adapters.md) | Core and adapters: decide by the trust path, not by the category | **proposed** |
+| [0021](0021-bind-sealed-records-to-the-row-they-live-in.md) | Bind a sealed record to the row it lives in, so a ciphertext cannot be moved | accepted |
 
 Records 0013 and 0014 are of a different kind. The specification is silent on
 both questions, how an approved operation comes to run and where the first
@@ -57,6 +58,10 @@ specification nor the roadmap raises: what an operator does about the one key
 whose loss no other control here recovers from. It is the first record to say no
 to two designs by name, a second signing key and an enterprise-only edition, and
 the reasons are the point of writing it down.
+
+Record 0021 revisits 0005 and 0006, which settled what is encrypted and what is
+hashed, with the question they did not ask: what a ciphertext is allowed to mean
+once it is out of the column it was written to.
 
 Record 0020 is the first that is not accepted. It answers what to add to make
 the project usable by more people without turning it into an identity platform,

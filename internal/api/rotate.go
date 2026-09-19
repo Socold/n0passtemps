@@ -161,9 +161,15 @@ func (s *Server) handleAdminRotateAPIKey(w http.ResponseWriter, r *http.Request)
 		Scopes:    append([]string(nil), predecessor.Scopes...),
 		CreatedAt: now, CreatedBy: caller.ActorID(),
 	}
-	if req.ExpiresInDays > 0 {
-		exp := now.AddDate(0, 0, req.ExpiresInDays)
-		successor.ExpiresAt = &exp
+	// Bounded exactly as minting is. A rotation is where a lifetime is most
+	// often typed again, and a successor is a new credential whatever it
+	// replaces.
+	expiry, err := expiryFromDays(now, req.ExpiresInDays)
+	if err != nil {
+		return err
+	}
+	if expiry != nil {
+		successor.ExpiresAt = expiry
 	}
 
 	cutoff, effective := predecessorCutoff(now, grace, predecessor.ExpiresAt)
@@ -237,6 +243,10 @@ func (s *Server) handleAdminRotateAPIKey(w http.ResponseWriter, r *http.Request)
 // The last-administrator guard needs no special case. The successor is inserted
 // in the same transaction that bounds the predecessor, so a rotation cannot
 // leave a role with no usable token.
+//
+// A token that holds a console passkey is refused, because the passkey cannot
+// be carried across; see the check in the body for what that would otherwise
+// cost.
 func (s *Server) handleAdminRotateOwnToken(w http.ResponseWriter, r *http.Request) error {
 	caller, tenantID, err := s.adminContext(r)
 	if err != nil {
@@ -258,6 +268,29 @@ func (s *Server) handleAdminRotateOwnToken(w http.ResponseWriter, r *http.Reques
 	predecessor := caller.AdminToken
 	now := s.now().UTC()
 
+	// A console passkey enrolled for this token cannot follow it.
+	//
+	// The credential row names the token it signs in as, an authenticator may
+	// be enrolled once per relying party, and there is no operation that moves
+	// the row onto the successor. Rotating anyway would do two things, both
+	// without saying so. The passkeys would go on working until the
+	// predecessor's grace ran out and then stop, with nothing said at the
+	// moment the decision was taken. And admin.passkey_required, which applies
+	// to a token that holds a passkey, would stop applying: the successor holds
+	// none, so whoever held the rotated token could paste it into the console
+	// form and be let in without the key the deployment asked for. Refusing is
+	// what keeps the requirement and the credentials together until the
+	// rotation can carry them.
+	passkeys, err := s.deps.Store.CountActiveAdminCredentials(r.Context(), tenantID, predecessor.ID)
+	if err != nil {
+		return Internal(err)
+	}
+	if passkeys > 0 {
+		return Conflict(fmt.Sprintf("this token has %d console passkeys enrolled, and a passkey cannot "+
+			"follow a token to its successor; withdraw them in the administration interface first, or ask "+
+			"a full administrator to mint a replacement token and revoke this one", passkeys), nil)
+	}
+
 	tok, err := token.Generate(token.KindAdmin)
 	if err != nil {
 		return Internal(err)
@@ -272,8 +305,12 @@ func (s *Server) handleAdminRotateOwnToken(w http.ResponseWriter, r *http.Reques
 		inherited := *predecessor.ExpiresAt
 		successor.ExpiresAt = &inherited
 	}
-	if req.ExpiresInDays > 0 {
-		exp := now.AddDate(0, 0, req.ExpiresInDays)
+	expiry, err := expiryFromDays(now, req.ExpiresInDays)
+	if err != nil {
+		return err
+	}
+	if expiry != nil {
+		exp := *expiry
 		if predecessor.ExpiresAt != nil && exp.After(*predecessor.ExpiresAt) {
 			return BadRequest("expires_in_days would outlive the token being rotated, which expires at "+
 				predecessor.ExpiresAt.UTC().Format(time.RFC3339)+

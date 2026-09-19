@@ -203,6 +203,10 @@ type SubjectStore interface {
 	// PurgeSubject hard-deletes the subject and everything that cascades from
 	// it. Audit entries are not deleted: they are rewritten with the subject
 	// reference cleared, which preserves the hash chain.
+	//
+	// Only a subject that is pending deletion is purged. One that is live, which
+	// includes one restored by a cancelled erasure, is refused with
+	// ErrStaleWrite and nothing is removed.
 	PurgeSubject(ctx context.Context, tenantID, id string) error
 }
 
@@ -675,9 +679,22 @@ const (
 	SealedSubjectRef SealedKind = "subject_ref"
 )
 
-// SealedRecord is one sealed value and the identifier of the row holding it.
+// SealedRecord is one sealed value, the identifier of the row holding it, and
+// the identifiers a caller needs to rebuild the record's binding context.
+//
+// The envelope is bound to where it is stored, so a rewrap pass cannot open a
+// record from its bytes alone: it has to state which row the bytes came from,
+// and the store is the only thing that knows. Reading the identifiers from the
+// same row as the sealed value is what makes the check meaningful.
 type SealedRecord struct {
-	ID     string
+	ID       string
+	TenantID string
+
+	// SubjectID is the subject the row belongs to. It is empty for a kind
+	// whose row is the subject itself, as SealedSubjectRef is, where ID is
+	// already the subject identifier.
+	SubjectID string
+
 	Sealed []byte
 }
 

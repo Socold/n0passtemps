@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Socold/n0passtemps/internal/alerts"
 	"github.com/Socold/n0passtemps/internal/audit"
 	"github.com/Socold/n0passtemps/internal/config"
 	"github.com/Socold/n0passtemps/internal/crypto/envelope"
@@ -34,15 +35,15 @@ import (
 // that a subject reference can be sealed and read back.
 type testKEK struct{}
 
-func (testKEK) Current() (uint32, []byte, error) {
-	key := make([]byte, 32)
+func (testKEK) Current() (version uint32, key []byte, err error) {
+	key = make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i + 1)
 	}
 	return 1, key, nil
 }
 
-func (testKEK) ByVersion(v uint32) ([]byte, error) {
+func (testKEK) ByVersion(_ uint32) ([]byte, error) {
 	_, key, err := testKEK{}.Current()
 	return key, err
 }
@@ -145,6 +146,7 @@ func newHarness(t *testing.T, tune ...func(*config.Config)) *harness {
 	h, err := New(Deps{
 		Store:    st,
 		Recorder: audit.NewRecorder(st, log),
+		Alerts:   alerts.New(st, log, clk.now),
 		Config:   &cfg,
 		Logger:   log,
 		Clock:    clk.now,
@@ -161,14 +163,14 @@ func newHarness(t *testing.T, tune ...func(*config.Config)) *harness {
 
 // mintToken creates an administrative token in the store and returns the value
 // an operator would paste in.
-func (h *harness) mintToken(role store.Role) (*store.AdminToken, string) {
+func (h *harness) mintToken(role store.Role) (rec *store.AdminToken, display string) {
 	h.t.Helper()
 
 	tok, err := token.Generate(token.KindAdmin)
 	if err != nil {
 		h.t.Fatalf("generate token: %v", err)
 	}
-	rec := &store.AdminToken{
+	rec = &store.AdminToken{
 		ID: uuid.NewString(), TenantID: testTenantID,
 		Name:     "Token for " + string(role),
 		Selector: tok.Selector, VerifierHash: tok.Hash, Role: role,
@@ -196,7 +198,7 @@ func (h *harness) seedSubject() *store.Subject {
 func (h *harness) get(path string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
 	h.t.Helper()
 
-	r := httptest.NewRequest(http.MethodGet, path, nil)
+	r := httptest.NewRequest(http.MethodGet, path, http.NoBody)
 	r.RemoteAddr = "192.0.2.10:54321"
 	for _, c := range cookies {
 		r.AddCookie(c)
@@ -783,7 +785,7 @@ func TestAssetsAreCachedOnTheirDigest(t *testing.T) {
 		t.Fatal("no entity tag was set")
 	}
 
-	r := httptest.NewRequest(http.MethodGet, h.handler.assetRefs.CSS, nil)
+	r := httptest.NewRequest(http.MethodGet, h.handler.assetRefs.CSS, http.NoBody)
 	r.Header.Set("If-None-Match", etag)
 	again := httptest.NewRecorder()
 	h.handler.ServeHTTP(again, r)

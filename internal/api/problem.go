@@ -60,12 +60,16 @@ const (
 	TypeUnavailable      = "urn:n0passtemps:error:unavailable"
 )
 
-// APIError is an error that carries the response it should produce.
+// Error is an error that carries the response it should produce.
+//
+// Named Error rather than APIError because this package is imported as api, and
+// url.Error and net.Error are the shape the standard library uses for exactly
+// this. The Error method beside it is legal and conventional; see net/url.
 //
 // Handlers return one of these instead of writing a response themselves, so
 // that the status code, the logged message and the audit outcome are decided in
 // one place rather than drifting apart across handlers.
-type APIError struct {
+type Error struct {
 	Status int
 	Type   string
 	Title  string
@@ -80,7 +84,7 @@ type APIError struct {
 }
 
 // Error implements error.
-func (e *APIError) Error() string {
+func (e *Error) Error() string {
 	if e.Internal != nil {
 		return e.Title + ": " + e.Internal.Error()
 	}
@@ -88,14 +92,14 @@ func (e *APIError) Error() string {
 }
 
 // Unwrap exposes the internal cause to errors.Is and errors.As.
-func (e *APIError) Unwrap() error { return e.Internal }
+func (e *Error) Unwrap() error { return e.Internal }
 
 // Constructors for the cases that occur more than once. Each fixes the title so
 // that the same condition always produces the same body.
 
 // BadRequest reports malformed or invalid input. Detail is safe here.
-func BadRequest(detail string, cause error) *APIError {
-	return &APIError{
+func BadRequest(detail string, cause error) *Error {
+	return &Error{
 		Status: http.StatusBadRequest, Type: TypeBadRequest,
 		Title: "the request is not valid", Detail: detail, Internal: cause,
 	}
@@ -106,32 +110,32 @@ func BadRequest(detail string, cause error) *APIError {
 // The four cases are one response on purpose. Distinguishing "no credential"
 // from "unknown credential" from "revoked credential" would let a caller
 // enumerate valid selectors.
-func Unauthorized(cause error) *APIError {
-	return &APIError{
+func Unauthorized(cause error) *Error {
+	return &Error{
 		Status: http.StatusUnauthorized, Type: TypeUnauthorized,
 		Title: "authentication is required", Internal: cause,
 	}
 }
 
 // Forbidden reports a credential that is valid but lacks the permission.
-func Forbidden(cause error) *APIError {
-	return &APIError{
+func Forbidden(cause error) *Error {
+	return &Error{
 		Status: http.StatusForbidden, Type: TypeForbidden,
 		Title: "this credential is not permitted to perform that operation", Internal: cause,
 	}
 }
 
 // NotFound reports an absent resource.
-func NotFound(cause error) *APIError {
-	return &APIError{
+func NotFound(cause error) *Error {
+	return &Error{
 		Status: http.StatusNotFound, Type: TypeNotFound,
 		Title: "the resource does not exist", Internal: cause,
 	}
 }
 
 // Conflict reports a uniqueness or state conflict.
-func Conflict(detail string, cause error) *APIError {
-	return &APIError{
+func Conflict(detail string, cause error) *Error {
+	return &Error{
 		Status: http.StatusConflict, Type: TypeConflict,
 		Title: "the request conflicts with the current state", Detail: detail, Internal: cause,
 	}
@@ -142,19 +146,19 @@ func Conflict(detail string, cause error) *APIError {
 // Every such failure returns this, with no detail. A caller learns that
 // authentication did not succeed, which is all it needs to act on, and cannot
 // tell a wrong signature from an expired challenge from an unknown credential.
-func CeremonyFailed(cause error) *APIError {
-	return &APIError{
+func CeremonyFailed(cause error) *Error {
+	return &Error{
 		Status: http.StatusUnauthorized, Type: TypeCeremonyFailed,
 		Title: "authentication did not succeed", Internal: cause,
 	}
 }
 
 // Throttled reports a rate limit, with the wait a client should respect.
-func Throttled(retryAfterSeconds int, cause error) *APIError {
+func Throttled(retryAfterSeconds int, cause error) *Error {
 	if retryAfterSeconds < 1 {
 		retryAfterSeconds = 1
 	}
-	return &APIError{
+	return &Error{
 		Status: http.StatusTooManyRequests, Type: TypeThrottled,
 		Title: "too many attempts", Internal: cause,
 		RetryAfterSeconds: retryAfterSeconds,
@@ -163,8 +167,8 @@ func Throttled(retryAfterSeconds int, cause error) *APIError {
 
 // ApprovalRequired reports that the operation was queued for a second
 // administrator rather than performed.
-func ApprovalRequired(detail string) *APIError {
-	return &APIError{
+func ApprovalRequired(detail string) *Error {
+	return &Error{
 		Status: http.StatusAccepted, Type: TypeApprovalRequired,
 		Title:  "the operation requires approval by a second administrator",
 		Detail: detail,
@@ -183,8 +187,8 @@ func ApprovalRequired(detail string) *APIError {
 // operator reading that would go looking for a version mismatch. It is not an
 // empty body either: an empty document scrapes clean and reads as "nothing has
 // happened", which a monitoring system will believe until somebody checks.
-func NotConfigured(detail string, cause error) *APIError {
-	return &APIError{
+func NotConfigured(detail string, cause error) *Error {
+	return &Error{
 		Status: http.StatusServiceUnavailable, Type: TypeUnavailable,
 		Title:  "the service is not configured to answer that request",
 		Detail: detail, Internal: cause,
@@ -192,27 +196,27 @@ func NotConfigured(detail string, cause error) *APIError {
 }
 
 // Internal reports a fault in the service.
-func Internal(cause error) *APIError {
-	return &APIError{
+func Internal(cause error) *Error {
+	return &Error{
 		Status: http.StatusInternalServerError, Type: TypeInternal,
 		Title: "the service could not complete the request", Internal: cause,
 	}
 }
 
 // Unavailable reports a dependency being down, such as the database.
-func Unavailable(cause error) *APIError {
-	return &APIError{
+func Unavailable(cause error) *Error {
+	return &Error{
 		Status: http.StatusServiceUnavailable, Type: TypeUnavailable,
 		Title: "the service is temporarily unavailable", Internal: cause,
 	}
 }
 
-// WriteProblem sends an APIError as an RFC 9457 response.
+// WriteProblem sends an Error as an RFC 9457 response.
 //
-// Anything that is not an APIError becomes a 500 with no detail, so a new
+// Anything that is not an Error becomes a 500 with no detail, so a new
 // handler that returns a bare error cannot accidentally leak its text.
 func WriteProblem(w http.ResponseWriter, r *http.Request, err error) {
-	var apiErr *APIError
+	var apiErr *Error
 	if !errors.As(err, &apiErr) {
 		apiErr = Internal(err)
 	}

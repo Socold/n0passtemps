@@ -66,8 +66,11 @@ type Service struct {
 // New builds a Service, reading the pepper from the environment variable named
 // in the configuration.
 //
-// The variable is unset once read, so the pepper does not remain visible to
-// child processes or through /proc/self/environ.
+// The variable is unset once read, so a child process started later does not
+// inherit the pepper. It stays readable through /proc/<pid>/environ, by the
+// same uid and by root, for the life of the process: os.Unsetenv edits the Go
+// runtime's copy of the environment, not the block the kernel recorded when
+// the process started.
 func New(cfg config.Subject, st store.Store, sealer *envelope.Sealer, clock func() time.Time) (*Service, error) {
 	if clock == nil {
 		clock = time.Now
@@ -182,7 +185,10 @@ func (s *Service) Resolve(ctx context.Context, tenantID, ref, displayName string
 	}
 
 	if s.cfg.SealReference {
-		sub.RefSealed, err = s.sealer.Seal([]byte(ref))
+		// Bound to this subject in this tenant. The identifier is generated
+		// above and never changes, so the same context is available to every
+		// later read of the row.
+		sub.RefSealed, err = s.sealer.Seal([]byte(ref), envelope.SubjectRef(sub.TenantID, sub.ID))
 		if err != nil {
 			return nil, fmt.Errorf("subject: seal reference: %w", err)
 		}
@@ -213,7 +219,10 @@ func (s *Service) RevealRef(sub *store.Subject) (string, error) {
 	if len(sub.RefSealed) == 0 {
 		return "", fmt.Errorf("subject: %s has no sealed reference, seal_reference was off when it was created", sub.ID)
 	}
-	plain, err := s.sealer.Unseal(sub.RefSealed)
+	// The context comes from the row that carried the sealed bytes, so a
+	// reference moved into another subject or another tenant fails to open
+	// rather than being disclosed here under the wrong identity.
+	plain, err := s.sealer.Unseal(sub.RefSealed, envelope.SubjectRef(sub.TenantID, sub.ID))
 	if err != nil {
 		return "", fmt.Errorf("subject: unseal reference: %w", err)
 	}

@@ -38,7 +38,7 @@ func TestListSealedPages(t *testing.T) {
 	seedTenant(t, s, "tenant-a")
 	seedTenant(t, s, "tenant-b")
 
-	want := map[string]bool{}
+	want := map[string]string{}
 	for i := 0; i < 7; i++ {
 		tenant := "tenant-a"
 		if i%2 == 1 {
@@ -46,7 +46,7 @@ func TestListSealedPages(t *testing.T) {
 		}
 		id := fmt.Sprintf("subject-%02d", i)
 		seedSubject(t, s, tenant, id, fmt.Sprintf("ref-%02d", i))
-		want[id] = true
+		want[id] = tenant
 	}
 
 	// A subject with no sealed reference holds nothing to rewrap and must not
@@ -85,6 +85,14 @@ func TestListSealedPages(t *testing.T) {
 			if len(rec.Sealed) == 0 {
 				t.Errorf("record %s was listed with no sealed value", rec.ID)
 			}
+			// The caller rebuilds the binding context from these, so a walk
+			// that returned the bytes without them could not open a thing.
+			if rec.TenantID != want[rec.ID] {
+				t.Errorf("record %s is listed under tenant %q, want %q", rec.ID, rec.TenantID, want[rec.ID])
+			}
+			if rec.SubjectID != "" {
+				t.Errorf("record %s names subject %q; a subject is its own subject", rec.ID, rec.SubjectID)
+			}
 		}
 		after = page[len(page)-1].ID
 	}
@@ -99,6 +107,28 @@ func TestListSealedPages(t *testing.T) {
 		if !seen[id] {
 			t.Errorf("record %s was never listed", id)
 		}
+	}
+}
+
+// TestListSealedCarriesTheBindingIdentifiers checks the columns a rewrap pass
+// needs to open a TOTP secret. Without the subject the record is bound to, the
+// pass could read the bytes and never authenticate them.
+func TestListSealedCarriesTheBindingIdentifiers(t *testing.T) {
+	s := newStore(t)
+	seedTenant(t, s, "tenant-a")
+	seedSubject(t, s, "tenant-a", "subject-1", "ref-1")
+	seedTOTP(t, s, "tenant-a", "subject-1", "totp-1", []byte("sealed-live"), true)
+
+	page, err := s.ListSealed(context.Background(), store.SealedTOTP, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 1 {
+		t.Fatalf("ListSealed returned %d records, want 1", len(page))
+	}
+	if page[0].TenantID != "tenant-a" || page[0].SubjectID != "subject-1" {
+		t.Errorf("record is listed under tenant %q subject %q, want tenant-a and subject-1",
+			page[0].TenantID, page[0].SubjectID)
 	}
 }
 

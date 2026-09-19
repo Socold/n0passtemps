@@ -78,13 +78,12 @@ func adminWorks(h *harness, tok string) int {
 }
 
 // rotationDetail decodes the detail of the single rotation entry of a type.
-func rotationDetail(t *testing.T, h *harness, eventType string) (map[string]any, string) {
+func rotationDetail(t *testing.T, h *harness, eventType string) (detail map[string]any, raw string) {
 	t.Helper()
 	entries := h.auditEntries(eventType)
 	if len(entries) != 1 {
 		t.Fatalf("%d %s entries, want exactly 1", len(entries), eventType)
 	}
-	var detail map[string]any
 	if err := json.Unmarshal(entries[0].Detail, &detail); err != nil {
 		t.Fatalf("detail of %s: %v", eventType, err)
 	}
@@ -642,5 +641,46 @@ func TestAssertionBeginDoesNotRevealEnrolment(t *testing.T) {
 	}
 	if none.Body["detail"] != nil {
 		t.Errorf("the refusal carries a detail: %v", none.Body["detail"])
+	}
+}
+
+// TestRotationDoesNotMakeASecondAdministrator is the dual-approval rule against
+// the one route every role may call without asking anybody.
+//
+// A self-rotation returns a successor under a new identifier and leaves the
+// predecessor valid for the grace period. The rule compared token identifiers,
+// so one administrator could queue a request with the old token, rotate,
+// approve it with the new one and redeem it with the old: a second
+// administrator made out of the first, for every operation the rule guards.
+func TestRotationDoesNotMakeASecondAdministrator(t *testing.T) {
+	h := newHarness(t)
+	created := h.do(http.MethodPost, "/v1/subjects", h.apiKey, map[string]any{"subject_ref": "user-1"})
+	subjectID := created.str(t, "subject_id")
+	requester := h.admin[store.RoleFull]
+
+	approvalID, body := queueErasure(t, h, subjectID)
+
+	rotated := h.do(http.MethodPost, selfRotatePath, requester, map[string]any{"grace": "168h"})
+	if rotated.Status != http.StatusCreated {
+		t.Fatalf("self rotation = %d, want 201; body: %s", rotated.Status, rotated.Raw)
+	}
+	successor := rotated.str(t, "token")
+
+	approve := "/admin/v1/approvals/" + approvalID + "/approve"
+	if res := h.do(http.MethodPost, approve, successor, nil); res.Status != http.StatusForbidden {
+		t.Fatalf("the successor approving its predecessor's request = %d, want 403; body: %s", res.Status, res.Raw)
+	}
+
+	// Nothing was approved, so there is nothing to redeem.
+	path := "/admin/v1/subjects/" + subjectID + "/erasure"
+	hdr := map[string]string{ApprovalHeader: approvalID}
+	if res := h.doWith(http.MethodPost, path, requester, body, hdr); res.Status != http.StatusForbidden {
+		t.Fatalf("redeeming = %d, want 403; body: %s", res.Status, res.Raw)
+	}
+
+	// And the rule still admits a colleague, rotation or no rotation.
+	colleague := h.mintAdminToken("colleague", store.RoleFull)
+	if res := h.do(http.MethodPost, approve, colleague, nil); res.Status != http.StatusOK {
+		t.Fatalf("a colleague approving = %d, want 200; body: %s", res.Status, res.Raw)
 	}
 }

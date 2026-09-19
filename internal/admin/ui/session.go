@@ -34,11 +34,10 @@ const csrfFieldName = "csrf_token"
 // session is one signed-in operator.
 //
 // It holds the identity resolved from the administrative token, never the token
-// itself. An operator who signs in and then has their token revoked keeps this
-// session until it expires, which is the trade a session makes: the alternative
-// is verifying the token on every request, which means holding it somewhere the
-// browser can send it back, and a long-lived credential in a cookie is a worse
-// exposure than a bounded session.
+// itself: a long-lived credential in a cookie is a worse exposure than a bounded
+// session. It does not outlive the token either. requireSession reads the token
+// back by its identifier on every request, which needs nothing the browser
+// holds, so a revoked or expired token ends the sessions made with it.
 type session struct {
 	// TokenID is the administrative token this session was established with. It
 	// is the actor identifier on every audit entry the session writes.
@@ -321,6 +320,27 @@ func (h *Handler) requireSession(w http.ResponseWriter, r *http.Request) *sessio
 		http.Redirect(w, r, "/admin/sign-in", http.StatusSeeOther)
 		return nil
 	}
+
+	// The session is only as good as the token it was made with. Revoking a
+	// token is what an operator does about a colleague who has left or a
+	// credential that leaked, and a session that carried on for the rest of its
+	// twelve hours could still lock subjects, reissue recovery codes and decide
+	// approval requests under a role its holder no longer had.
+	tok, err := h.deps.Store.GetAdminTokenByID(r.Context(), sess.TenantID, sess.TokenID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		h.serverFault(w, r, nil, "read the session's administrative token", err)
+		return nil
+	}
+	// A role that no longer matches ends the session as well. Nothing changes a
+	// token's role today, and signing in again is the cheap answer if something
+	// ever does: the session is shared between requests, so correcting its copy
+	// in place would need a lock on every read of it.
+	if err != nil || !tok.Usable(h.now().UTC()) || tok.Role != sess.Role {
+		h.sessions.destroy(cookieValue(r))
+		h.clearSessionCookie(w)
+		http.Redirect(w, r, "/admin/sign-in", http.StatusSeeOther)
+		return nil
+	}
 	return sess
 }
 
@@ -442,6 +462,15 @@ func (h *Handler) handleSignInSubmit(w http.ResponseWriter, r *http.Request) {
 			"Use the passkey button rather than the token.")
 		return
 	}
+
+	// A session the browser still holds ends here, before the new one exists.
+	// Signing in again is what an operator does when they suspect the session
+	// they have, and leaving the old one live in the store would keep whoever
+	// captured its cookie signed in for the rest of the idle window. The form
+	// redirects a live session to the dashboard, so reaching this line with one
+	// means the request was made without loading the page, which is the case
+	// worth closing rather than the one to assume away.
+	h.sessions.destroy(cookieValue(r))
 
 	value, sess, err := h.sessions.mint(now, tok, h.idleTTL, h.absoluteTTL)
 	if err != nil {

@@ -323,8 +323,8 @@ type fakeKEK struct {
 	keys    map[uint32][]byte
 }
 
-func (f *fakeKEK) Current() (uint32, []byte, error) {
-	key, err := f.ByVersion(f.current)
+func (f *fakeKEK) Current() (version uint32, key []byte, err error) {
+	key, err = f.ByVersion(f.current)
 	return f.current, key, err
 }
 
@@ -391,7 +391,7 @@ func TestRewrapAll(t *testing.T) {
 		}
 		id := uuid.NewString()
 		ref := []byte(fmt.Sprintf("user-%03d@example.test", i))
-		sealed, err := v1.Seal(ref)
+		sealed, err := v1.Seal(ref, envelope.SubjectRef(tenant, id))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -405,7 +405,7 @@ func TestRewrapAll(t *testing.T) {
 		if i < secrets {
 			totpID := uuid.NewString()
 			secret := []byte(fmt.Sprintf("totp-seed-%03d", i))
-			sealed, err := v1.Seal(secret)
+			sealed, err := v1.Seal(secret, envelope.TOTPSecret(tenant, id, totpID))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -463,8 +463,13 @@ func TestRewrapAll(t *testing.T) {
 				if err != nil || version != 2 {
 					t.Errorf("%s %s reports version %d (%v), want 2", kind, rec.ID, version, err)
 				}
+				var bind envelope.Context
+				bind, err = bindingFor(kind, rec)
+				if err != nil {
+					t.Fatal(err)
+				}
 				var plain []byte
-				plain, err = v2only.Unseal(rec.Sealed)
+				plain, err = v2only.Unseal(rec.Sealed, bind)
 				if err != nil {
 					t.Errorf("%s %s does not unseal without the old key: %v", kind, rec.ID, err)
 					continue
@@ -499,11 +504,11 @@ func TestRewrapAll(t *testing.T) {
 	// the first failure would never reach the late record sealed under
 	// version 1, which sorts last.
 	orphanSealer := envelope.NewSealer(&fakeKEK{current: 9, keys: map[uint32][]byte{9: testKey(0x99)}})
-	orphan, err := orphanSealer.Seal([]byte("orphan"))
+	orphan, err := orphanSealer.Seal([]byte("orphan"), envelope.SubjectRef(testTenant, "!orphan"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	late, err := v1.Seal([]byte("late"))
+	late, err := v1.Seal([]byte("late"), envelope.SubjectRef(testTenant, "~late"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -538,6 +543,80 @@ func TestRewrapAll(t *testing.T) {
 	}
 }
 
+// TestARecordAlreadyOnTheCurrentKeyIsStillAuthenticated covers the flaw that
+// sat beside the missing binding. The pass used to take a record's header as
+// proof that the record was sound and move on, so the one job that reads every
+// sealed value in the deployment reported a corrupted row as healthy and the
+// damage surfaced months later as a user who could not sign in.
+func TestARecordAlreadyOnTheCurrentKeyIsStillAuthenticated(t *testing.T) {
+	srv, st := rewrapFixture(t)
+	ctx := context.Background()
+	v1 := envelope.NewSealer(&fakeKEK{current: 1, keys: map[uint32][]byte{1: testKey(0x11)}})
+
+	id := uuid.NewString()
+	sealed, err := v1.Seal([]byte("user@example.test"), envelope.SubjectRef(testTenant, id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One bit of the payload, as a restored backup or a half-written page
+	// would leave it. The header is untouched and still names version 1.
+	sealed[len(sealed)-1] ^= 0x01
+	if _, err = st.UpsertSubject(ctx, &store.Subject{
+		ID: id, TenantID: testTenant, RefHMAC: []byte("hmac"), RefSealed: sealed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := srv.rewrapAll(ctx, v1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := rewrapReport{CurrentVersion: 1, Examined: 1, Failed: 1, VersionsInUse: []uint32{1}}
+	if !reflect.DeepEqual(report, want) {
+		t.Fatalf("pass over a corrupted record on the current key = %+v, want %+v", report, want)
+	}
+}
+
+// TestARecordSealedForAnotherSubjectIsReportedAsFailed is the substitution seen
+// from the rotation pass. The bytes are a valid envelope under the current key;
+// what makes them wrong is the row they were found in, and the pass only knows
+// that because it rebuilds the binding from the row rather than from the bytes.
+func TestARecordSealedForAnotherSubjectIsReportedAsFailed(t *testing.T) {
+	srv, st := rewrapFixture(t)
+	ctx := context.Background()
+	v1 := envelope.NewSealer(&fakeKEK{current: 1, keys: map[uint32][]byte{1: testKey(0x11)}})
+
+	victim, attacker := uuid.NewString(), uuid.NewString()
+	sealed, err := v1.Seal([]byte("attacker@example.test"), envelope.SubjectRef(testTenant, attacker))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.UpsertSubject(ctx, &store.Subject{
+		ID: victim, TenantID: testTenant, RefHMAC: []byte("hmac-victim"), RefSealed: sealed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := srv.rewrapAll(ctx, v1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := rewrapReport{CurrentVersion: 1, Examined: 1, Failed: 1, VersionsInUse: []uint32{1}}
+	if !reflect.DeepEqual(report, want) {
+		t.Fatalf("pass over a record sealed for another subject = %+v, want %+v", report, want)
+	}
+
+	// The pass reports and leaves it alone, so an operator sees the row as it
+	// was found rather than as the pass rewrote it.
+	page, err := st.ListSealed(ctx, store.SealedSubjectRef, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 1 || !bytes.Equal(page[0].Sealed, sealed) {
+		t.Errorf("the record was altered by a pass that could not authenticate it: %+v", page)
+	}
+}
+
 // TestRewrapAllHonoursCancellation checks a pass stops for a caller who has
 // gone away, instead of walking the whole database on their behalf.
 func TestRewrapAllHonoursCancellation(t *testing.T) {
@@ -547,12 +626,13 @@ func TestRewrapAllHonoursCancellation(t *testing.T) {
 		1: testKey(0x11), 2: testKey(0x22),
 	}})
 
-	sealed, err := v1.Seal([]byte("user@example.test"))
+	subjectID := uuid.NewString()
+	sealed, err := v1.Seal([]byte("user@example.test"), envelope.SubjectRef(testTenant, subjectID))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err = st.UpsertSubject(context.Background(), &store.Subject{
-		ID: uuid.NewString(), TenantID: testTenant, RefHMAC: []byte("hmac"), RefSealed: sealed,
+		ID: subjectID, TenantID: testTenant, RefHMAC: []byte("hmac"), RefSealed: sealed,
 	}); err != nil {
 		t.Fatal(err)
 	}

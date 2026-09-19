@@ -277,6 +277,16 @@ func (h *Handler) requirePermission(w http.ResponseWriter, r *http.Request, sess
 	}
 	h.auditDenied(w, r, sess, "permission", p.String(),
 		fmt.Sprintf("role %s does not hold %s", sess.Role, p))
+	// The same alert the API raises for the same refusal. An operator probing
+	// for authority they do not hold looks identical whichever surface they use
+	// it from, and only one of the two used to say so where anybody was
+	// watching.
+	if h.deps.Alerts != nil {
+		if _, err := h.deps.Alerts.AdminDenied(r.Context(), sess.TenantID, sess.TokenID, p.String()); err != nil {
+			h.deps.Logger.WarnContext(r.Context(), "adminui: alert not raised for a refused action",
+				slog.Any("error", err))
+		}
+	}
 	h.renderMessage(w, r, sess, http.StatusForbidden, "You cannot do that",
 		"Your sign-in does not allow this action. Ask an administrator with more "+
 			"authority to carry it out.")
@@ -304,9 +314,9 @@ func pathID(r *http.Request, name string) (string, bool) {
 // already has for bounding a single read, and the audit log is the largest table
 // any of these screens touches.
 func (h *Handler) queryLimit(r *http.Request, def int) int {
-	max := h.deps.Config.Audit.MaxQueryLimit
-	if max < 1 {
-		max = def
+	maxLimit := h.deps.Config.Audit.MaxQueryLimit
+	if maxLimit < 1 {
+		maxLimit = def
 	}
 	raw := r.URL.Query().Get("limit")
 	if raw == "" {
@@ -316,8 +326,8 @@ func (h *Handler) queryLimit(r *http.Request, def int) int {
 	if err != nil || n <= 0 {
 		return def
 	}
-	if n > max {
-		return max
+	if n > maxLimit {
+		return maxLimit
 	}
 	return n
 }
@@ -653,8 +663,12 @@ func (h *Handler) handleSubjectDetail(w http.ResponseWriter, r *http.Request) {
 // Every action on a person re-renders this page, either directly when something
 // has to be shown once, such as a batch of recovery codes, or after a redirect
 // when there is nothing to show but a confirmation.
+//
+// It reports whether the application's reference was in fact put on the page,
+// which is what handleSubjectReference waits for before recording that somebody
+// read it. Every other caller asks for no reference and ignores the answer.
 func (h *Handler) renderSubject(w http.ResponseWriter, r *http.Request, sess *session, id string,
-	opts subjectRenderOptions) {
+	opts subjectRenderOptions) (revealed bool) {
 	ctx := r.Context()
 	tenantID := h.tenantID()
 
@@ -663,21 +677,21 @@ func (h *Handler) renderSubject(w http.ResponseWriter, r *http.Request, sess *se
 		if errors.Is(err, store.ErrNotFound) {
 			h.renderMessage(w, r, sess, http.StatusNotFound, "That person does not exist",
 				"They may have been deleted, or the link may be out of date.")
-			return
+			return false
 		}
 		h.serverFault(w, r, sess, "read person", err)
-		return
+		return false
 	}
 
 	creds, err := h.deps.Store.ListCredentials(ctx, tenantID, sub.ID, true)
 	if err != nil {
 		h.serverFault(w, r, sess, "list authenticators", err)
-		return
+		return false
 	}
 	remaining, err := h.deps.Store.CountUnusedRecoveryCodes(ctx, tenantID, sub.ID)
 	if err != nil {
 		h.serverFault(w, r, sess, "count recovery codes", err)
-		return
+		return false
 	}
 
 	data := subjectData{
@@ -719,7 +733,7 @@ func (h *Handler) renderSubject(w http.ResponseWriter, r *http.Request, sess *se
 		data.AuthenticatorApp = true
 	} else if !errors.Is(err, store.ErrNotFound) {
 		h.serverFault(w, r, sess, "read authenticator app state", err)
-		return
+		return false
 	}
 
 	if er, err := h.deps.Store.GetErasureBySubject(ctx, tenantID, sub.ID); err == nil {
@@ -735,7 +749,7 @@ func (h *Handler) renderSubject(w http.ResponseWriter, r *http.Request, sess *se
 		}
 	} else if !errors.Is(err, store.ErrNotFound) {
 		h.serverFault(w, r, sess, "read deletion request", err)
-		return
+		return false
 	}
 
 	if opts.RevealRef && data.ReferenceReady {
@@ -757,6 +771,7 @@ func (h *Handler) renderSubject(w http.ResponseWriter, r *http.Request, sess *se
 	pd.Problem = opts.Problem
 	pd.Data = data
 	h.render(w, r, status, "subject", pd)
+	return data.ReferenceShown
 }
 
 // actionPreamble is the common start of every action on a person: a session, a
@@ -969,17 +984,26 @@ func (h *Handler) handleSubjectReference(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// The entry is written after the page, and only when the page in fact
+	// carried the reference. Until the render has run there is nothing to say
+	// was disclosed: the person may have been deleted since the form was
+	// loaded, and the record may hold no sealed reference to open. An entry
+	// written first records a disclosure that did not happen, which is worse
+	// than no entry at all on the one operation whose whole purpose is to say
+	// who saw a person's reference.
+	if !h.renderSubject(w, r, sess, id, subjectRenderOptions{
+		Status:    http.StatusOK,
+		RevealRef: true,
+	}) {
+		return
+	}
+
 	h.audited(w, r, audit.Event{
 		TenantID: sess.TenantID, EventType: audit.EventAdminSubjectRefRevealed,
 		ActorType: store.ActorAdmin, ActorID: sess.TokenID,
 		SubjectID: id, ResourceType: "subject", ResourceID: id,
 		Outcome: store.OutcomeSuccess,
 		Detail:  map[string]any{"surface": "administration interface"},
-	})
-
-	h.renderSubject(w, r, sess, id, subjectRenderOptions{
-		Status:    http.StatusOK,
-		RevealRef: true,
 	})
 }
 
@@ -1098,8 +1122,20 @@ func (h *Handler) handleCredentialWithdraw(w http.ResponseWriter, r *http.Reques
 	}
 
 	if h.deps.Limiter != nil {
-		if _, err := h.deps.Limiter.Record(ctx, tenantID, dims, false); err != nil {
-			h.deps.Logger.WarnContext(ctx, "adminui: withdrawal not counted", slog.Any("error", err))
+		res, limitErr := h.deps.Limiter.Record(ctx, tenantID, dims, false)
+		switch {
+		case limitErr != nil:
+			h.deps.Logger.WarnContext(ctx, "adminui: withdrawal not counted", slog.Any("error", limitErr))
+		case !res.Allowed && h.deps.Alerts != nil:
+			// The withdrawal that crosses the burst is the one worth an alert,
+			// exactly as on the API surface. A run of withdrawals is the same
+			// incident whichever screen or script produced it, and an operator
+			// reading the alerts should not have to know which.
+			if _, err := h.deps.Alerts.BulkRevocation(ctx, tenantID, sess.TokenID,
+				res.Attempts, h.deps.Config.Throttle.AdminRevokeBurst); err != nil {
+				h.deps.Logger.WarnContext(ctx, "adminui: bulk withdrawal alert not raised",
+					slog.Any("error", err))
+			}
 		}
 	}
 

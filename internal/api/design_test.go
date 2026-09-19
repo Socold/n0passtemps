@@ -13,9 +13,9 @@ import (
 // queueErasure files an erasure request and returns the approval identifier
 // together with the body that was queued, since a redemption has to repeat it
 // exactly.
-func queueErasure(t *testing.T, h *harness, subjectID string) (string, map[string]any) {
+func queueErasure(t *testing.T, h *harness, subjectID string) (approvalID string, body map[string]any) {
 	t.Helper()
-	body := map[string]any{"reason": "user request"}
+	body = map[string]any{"reason": "user request"}
 	res := h.do(http.MethodPost, "/admin/v1/subjects/"+subjectID+"/erasure", h.admin[store.RoleFull], body)
 	if res.Status != http.StatusAccepted || res.Body["type"] != TypeApprovalRequired {
 		t.Fatalf("queueing = %d %v; body: %s", res.Status, res.Body["type"], res.Raw)
@@ -243,5 +243,44 @@ func TestKeyVolumeLimitCoversEveryRoute(t *testing.T) {
 	other := h.mintAPIKey("other")
 	if res := h.do(http.MethodPost, "/v1/subjects", other, map[string]any{"subject_ref": "user-1"}); res.Status != http.StatusOK {
 		t.Errorf("one key's volume limit refused a different key: %d", res.Status)
+	}
+}
+
+// TestTheLifetimeOfATokenIsPartOfWhatIsApproved holds the approved payload to
+// every field that decides what the token is.
+//
+// The payload used to carry the name and the role. The lifetime was read from
+// the redeeming request alone, so a requester could have a one-day token
+// approved and redeem the approval for one that never expires, and the approver
+// had been shown nothing that said otherwise.
+func TestTheLifetimeOfATokenIsPartOfWhatIsApproved(t *testing.T) {
+	h := newHarness(t)
+	requester := h.admin[store.RoleFull]
+	asked := map[string]any{"name": "contractor", "role": "admin_full", "expires_in_days": 1}
+
+	if res := h.do(http.MethodPost, "/admin/v1/admin-tokens", requester, asked); res.Status != http.StatusAccepted {
+		t.Fatalf("queueing = %d; body: %s", res.Status, res.Raw)
+	}
+	queue := h.do(http.MethodGet, "/admin/v1/approvals", requester, nil)
+	approvalID := asString(t, asObject(t, queue.list(t, "approvals")[0], "approvals[0]", queue.Raw)["id"], "approvals[0].id")
+	approver := h.mintAdminToken("approver", store.RoleFull)
+	if res := h.do(http.MethodPost, "/admin/v1/approvals/"+approvalID+"/approve", approver, nil); res.Status != http.StatusOK {
+		t.Fatalf("approve = %d; body: %s", res.Status, res.Raw)
+	}
+	hdr := map[string]string{ApprovalHeader: approvalID}
+
+	unbounded := map[string]any{"name": "contractor", "role": "admin_full"}
+	if res := h.doWith(http.MethodPost, "/admin/v1/admin-tokens", requester, unbounded, hdr); res.Status != http.StatusForbidden {
+		t.Fatalf("redeeming without the lifetime that was approved = %d, want 403; body: %s", res.Status, res.Raw)
+	}
+
+	// The refusal did not spend the approval: the request that was approved
+	// still goes through, and the token it mints expires.
+	res := h.doWith(http.MethodPost, "/admin/v1/admin-tokens", requester, asked, hdr)
+	if res.Status != http.StatusCreated {
+		t.Fatalf("redeeming what was approved = %d, want 201; body: %s", res.Status, res.Raw)
+	}
+	if _, ok := res.obj(t, "admin_token")["expires_at"]; !ok {
+		t.Errorf("the token minted has no expiry; body: %s", res.Raw)
 	}
 }

@@ -35,6 +35,13 @@ import (
 	"github.com/Socold/n0passtemps/internal/totp"
 )
 
+// benchBinding is the context a sealed TOTP secret carries. Every seal and
+// every open takes one, so a benchmark that left it out would be measuring an
+// operation the service cannot perform.
+func benchBinding() envelope.Context {
+	return envelope.TOTPSecret("tenant-bench", "subject-bench", "secret-bench")
+}
+
 // BenchmarkEnvelopeSeal measures sealing a TOTP-sized secret.
 //
 // This runs once per TOTP enrolment, which is rare, so its cost is not on the
@@ -43,10 +50,11 @@ import (
 func BenchmarkEnvelopeSeal(b *testing.B) {
 	sealer := newSealer(b)
 	secret := make([]byte, 20)
+	binding := benchBinding()
 
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := sealer.Seal(secret); err != nil {
+		if _, err := sealer.Seal(secret, binding); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -58,14 +66,15 @@ func BenchmarkEnvelopeSeal(b *testing.B) {
 // stored seed first.
 func BenchmarkEnvelopeUnseal(b *testing.B) {
 	sealer := newSealer(b)
-	sealed, err := sealer.Seal(make([]byte, 20))
+	binding := benchBinding()
+	sealed, err := sealer.Seal(make([]byte, 20), binding)
 	if err != nil {
 		b.Fatal(err)
 	}
 
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := sealer.Unseal(sealed); err != nil {
+		if _, err := sealer.Unseal(sealed, binding); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -78,14 +87,15 @@ func BenchmarkEnvelopeUnseal(b *testing.B) {
 // long rotating a large deployment takes.
 func BenchmarkEnvelopeRewrap(b *testing.B) {
 	sealer := newSealer(b)
-	sealed, err := sealer.Seal(make([]byte, 20))
+	binding := benchBinding()
+	sealed, err := sealer.Seal(make([]byte, 20), binding)
 	if err != nil {
 		b.Fatal(err)
 	}
 
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := sealer.Rewrap(sealed); err != nil {
+		if _, err := sealer.Rewrap(sealed, binding); err != nil {
 			b.Fatal(err)
 		}
 	}

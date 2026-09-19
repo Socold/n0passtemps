@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -59,7 +60,7 @@ func pathID(r *http.Request, name string) (string, error) {
 
 // queryLimit reads a page size, applying the configured cap.
 func (s *Server) queryLimit(r *http.Request, def int) int {
-	max := s.deps.Config.Audit.MaxQueryLimit
+	maxLimit := s.deps.Config.Audit.MaxQueryLimit
 	raw := r.URL.Query().Get("limit")
 	if raw == "" {
 		return def
@@ -68,8 +69,8 @@ func (s *Server) queryLimit(r *http.Request, def int) int {
 	if err != nil || n <= 0 {
 		return def
 	}
-	if n > max {
-		return max
+	if n > maxLimit {
+		return maxLimit
 	}
 	return n
 }
@@ -1118,15 +1119,49 @@ type createKeyRequest struct {
 	// Role applies to an administrative token only.
 	Role store.Role `json:"role,omitempty"`
 
-	// ExpiresInDays bounds the credential's life. Zero means no expiry, which
-	// the response warns about rather than refuses: a long-lived key is
-	// sometimes the only practical option for an integration that cannot
-	// rotate.
+	// ExpiresInDays bounds the credential's life, up to maxExpiresInDays. Zero
+	// means no expiry, which the response warns about rather than refuses: a
+	// long-lived key is sometimes the only practical option for an integration
+	// that cannot rotate.
 	ExpiresInDays int `json:"expires_in_days,omitempty"`
 
 	// Scopes applies to an API key only and restricts it to the named route
 	// families: subjects, webauthn, totp, recovery, health. Empty means all.
 	Scopes []string `json:"scopes,omitempty"`
+}
+
+// maxExpiresInDays is the longest life a caller may ask a new credential to
+// have.
+//
+// Two years is longer than any rotation schedule an operator plans around and
+// short enough that the credential is still something somebody will look at
+// again. The bound is on the number the caller writes down, and an absent
+// expires_in_days still means no expiry, which reads like an inconsistency and
+// is not one: the two are different decisions. No expiry is stated in the
+// request, reported back in the response as no_expiry and visible in every
+// listing afterwards. A lifetime in the thousands is almost always a typed
+// extra digit, and it produces a credential that looks bounded in every screen
+// an operator will ever read.
+const maxExpiresInDays = 730
+
+// expiryFromDays turns a requested lifetime into the instant to store.
+//
+// A negative value is refused rather than treated as no expiry. Taking it for
+// one would mean the two ways of asking for an unbounded credential are a
+// deliberate omission and a sign error, and only one of them is a decision
+// anybody took.
+func expiryFromDays(now time.Time, days int) (*time.Time, error) {
+	if days == 0 {
+		return nil, nil
+	}
+	if days < 0 || days > maxExpiresInDays {
+		return nil, BadRequest(fmt.Sprintf("expires_in_days must be between 1 and %d, which is two years; "+
+			"a credential asked to last longer than that is one nobody comes back to, and a lifetime in the "+
+			"thousands is usually a digit too many. Leave the field out for a credential with no expiry, "+
+			"which the response reports rather than hides", maxExpiresInDays), nil)
+	}
+	exp := now.AddDate(0, 0, days)
+	return &exp, nil
 }
 
 // handleAdminCreateAPIKey mints a credential for an integrating application.
@@ -1150,20 +1185,21 @@ func (s *Server) handleAdminCreateAPIKey(w http.ResponseWriter, r *http.Request)
 	}
 	req.Scopes = scopes
 
+	now := s.now().UTC()
+	expiresAt, err := expiryFromDays(now, req.ExpiresInDays)
+	if err != nil {
+		return err
+	}
+
 	tok, err := token.Generate(token.KindAPIKey)
 	if err != nil {
 		return Internal(err)
 	}
 
-	now := s.now().UTC()
 	key := &store.APIKey{
 		ID: uuid.NewString(), TenantID: tenantID, Name: req.Name,
 		Selector: tok.Selector, VerifierHash: tok.Hash, Scopes: req.Scopes,
-		CreatedAt: now, CreatedBy: caller.ActorID(),
-	}
-	if req.ExpiresInDays > 0 {
-		exp := now.AddDate(0, 0, req.ExpiresInDays)
-		key.ExpiresAt = &exp
+		CreatedAt: now, CreatedBy: caller.ActorID(), ExpiresAt: expiresAt,
 	}
 
 	if err := s.deps.Store.CreateAPIKey(r.Context(), key); err != nil {
@@ -1210,10 +1246,23 @@ func (s *Server) handleAdminCreateAdminToken(w http.ResponseWriter, r *http.Requ
 		return BadRequest("role must be admin_full, admin_operator or admin_auditor", nil)
 	}
 
+	// The lifetime is checked before the approval gate, so that a request
+	// nobody could redeem is refused now rather than queued for a second
+	// administrator to read and approve.
+	now := s.now().UTC()
+	expiresAt, err := expiryFromDays(now, req.ExpiresInDays)
+	if err != nil {
+		return err
+	}
+
 	// Minting an administrative credential is the operation that grants
 	// authority, so it is a candidate for the approval queue.
+	//
+	// The lifetime is part of what is approved. Left out, it was the one field
+	// the requester could still change at redemption: ask for a token that
+	// lasts a day, have that approved, and redeem it for one that never expires.
 	held, err := s.approvalGate(r, caller, tenantID, "admin_token.create",
-		map[string]any{"name": req.Name, "role": string(req.Role)}, "")
+		map[string]any{"name": req.Name, "role": string(req.Role), "expires_in_days": req.ExpiresInDays}, "")
 	if held {
 		return err
 	}
@@ -1223,15 +1272,10 @@ func (s *Server) handleAdminCreateAdminToken(w http.ResponseWriter, r *http.Requ
 		return Internal(err)
 	}
 
-	now := s.now().UTC()
 	at := &store.AdminToken{
 		ID: uuid.NewString(), TenantID: tenantID, Name: req.Name,
 		Selector: tok.Selector, VerifierHash: tok.Hash, Role: req.Role,
-		CreatedAt: now, CreatedBy: caller.ActorID(),
-	}
-	if req.ExpiresInDays > 0 {
-		exp := now.AddDate(0, 0, req.ExpiresInDays)
-		at.ExpiresAt = &exp
+		CreatedAt: now, CreatedBy: caller.ActorID(), ExpiresAt: expiresAt,
 	}
 
 	if err := s.deps.Store.CreateAdminToken(r.Context(), at); err != nil {
@@ -1341,24 +1385,13 @@ func (s *Server) handleAdminRevokeAdminToken(w http.ResponseWriter, r *http.Requ
 		return NotFound(errors.New("admin token does not exist or is already revoked"))
 	}
 
-	// A token already due to expire inside the horizon is not one of the
-	// administrators the guard protects, so revoking it cannot be what leaves
-	// the deployment without one.
-	outlasts := target.ExpiresAt == nil || target.ExpiresAt.After(s.now().UTC().Add(config.MaxRotationGrace))
-	if target.Role == store.RoleFull && outlasts {
-		// Counted at the far end of the longest possible rotation grace, not at
-		// the present. A rotated predecessor still works today and would
-		// otherwise pass for a second administrator; revoking its successor
-		// would then leave nobody once the grace ran out.
-		horizon := s.now().UTC().Add(config.MaxRotationGrace)
-		count, err := s.deps.Store.CountAdminTokensByRole(r.Context(), tenantID, store.RoleFull, horizon)
-		if err != nil {
-			return Internal(err)
-		}
-		if count <= 1 {
-			return Conflict("this is the last usable full administrator; mint a "+
-				"replacement before revoking it, or the deployment becomes "+
-				"unadministrable", nil)
+	// Held from the count to the write. See adminRevocation.
+	adminRevocation.Lock()
+	defer adminRevocation.Unlock()
+
+	if target.Role == store.RoleFull {
+		if err := s.guardLastFullAdministrator(r, tenantID, target); err != nil {
+			return err
 		}
 	}
 
@@ -1378,6 +1411,84 @@ func (s *Server) handleAdminRevokeAdminToken(w http.ResponseWriter, r *http.Requ
 	})
 	WriteJSON(w, r, http.StatusOK, map[string]any{"admin_token_id": id, "revoked": true})
 	return nil
+}
+
+// adminRevocation serialises the last-administrator guard against itself.
+//
+// Counting the administrators and revoking one are two statements, and between
+// them another request can read the same count. Two administrators revoking
+// each other at the same moment each saw two, and the deployment was left with
+// none. Holding this from the count to the write closes that inside one
+// process, which is what a single-binary deployment is.
+//
+// It does not close it for two processes over one database, and nothing in this
+// package can. The condition belongs in the statement that performs the
+// revocation, so that the database decides it once:
+//
+//	UPDATE admin_tokens SET revoked_at = :now
+//	 WHERE tenant_id = :tenant AND id = :id AND revoked_at IS NULL
+//	   AND EXISTS (SELECT 1 FROM admin_tokens
+//	                WHERE tenant_id = :tenant AND role = 'admin_full' AND id <> :id
+//	                  AND revoked_at IS NULL
+//	                  AND (expires_at IS NULL OR expires_at > :horizon))
+//
+// with no rows changed read as the refusal. That is a store method this
+// package does not have, and adding one is a change to internal/store.
+var adminRevocation sync.Mutex
+
+// guardLastFullAdministrator refuses a revocation that would leave the
+// deployment without a full administrator.
+//
+// Two instants are counted, and neither stands in for the other.
+//
+// The present is what the deployment has to administer itself with the moment
+// this call returns. A token that expires this afternoon is still the
+// administrator until it does, so revoking it now empties the deployment now,
+// and the guard used to be skipped entirely for exactly those tokens.
+//
+// The far end of the longest rotation grace is what the deployment will still
+// have once every rotated predecessor has stopped. A predecessor still works
+// today and would otherwise pass for a second administrator, so revoking the
+// successor would leave nobody once the grace ran out.
+func (s *Server) guardLastFullAdministrator(r *http.Request, tenantID string, target *store.AdminToken) error {
+	now := s.now().UTC()
+
+	// A target that cannot authenticate now is not one of the administrators
+	// the deployment currently has, so revoking it takes nothing away from the
+	// present.
+	if target.Usable(now) {
+		count, err := s.deps.Store.CountAdminTokensByRole(r.Context(), tenantID, store.RoleFull, now)
+		if err != nil {
+			return Internal(err)
+		}
+		if count <= 1 {
+			return lastFullAdministrator()
+		}
+	}
+
+	// A token already due to expire inside the horizon is not one of the
+	// administrators the deployment will have then, so it cannot be what leaves
+	// it without one.
+	horizon := now.Add(config.MaxRotationGrace)
+	if target.ExpiresAt != nil && !target.ExpiresAt.After(horizon) {
+		return nil
+	}
+	count, err := s.deps.Store.CountAdminTokensByRole(r.Context(), tenantID, store.RoleFull, horizon)
+	if err != nil {
+		return Internal(err)
+	}
+	if count <= 1 {
+		return lastFullAdministrator()
+	}
+	return nil
+}
+
+// lastFullAdministrator is the refusal, built fresh each time so that two
+// concurrent refusals never share one response value.
+func lastFullAdministrator() error {
+	return Conflict("this is the last usable full administrator; mint a "+
+		"replacement before revoking it, or the deployment becomes "+
+		"unadministrable", nil)
 }
 
 // slicesContains avoids taking a dependency for one membership test.

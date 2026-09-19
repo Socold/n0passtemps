@@ -70,7 +70,7 @@ key material in memory. Everything else is derived.
 | `internal/totp` | RFC 6238 code generation and verification. Holds no state | `zeroize` |
 | `internal/assertion` | Issues and verifies the signed ceremony result; publishes the JWK Set | `zeroize` |
 | `internal/audit` | The hash chain, the event vocabulary and the recorder | `store` |
-| `internal/auditsink` | Delivers the hash-covered part of each entry to an append-only destination outside the operator's control. The only package that makes an outbound connection, and it exists only when `audit.sink.endpoint` is set | `config`, `store`, `audit`, `version` |
+| `internal/auditsink` | Delivers the hash-covered part of each entry to an append-only destination outside the operator's control. The only package of this repository that makes an outbound connection, and it exists only when `audit.sink.endpoint` is set | `config`, `store`, `audit`, `version` |
 | `internal/alerts` | Turns thirteen detected conditions into rows an operator can act on | `store` |
 | `internal/throttle` | Evaluates and records the rate limits | `config`, `store` |
 | `internal/health` | Builds the two health reports | `config`, `store`, `version` |
@@ -257,9 +257,13 @@ result is exactly the hash input, which is exactly enough for a receiver to
 recompute every hash and detect a gap, and not enough to tell which person an
 entry concerns. See [ADR 0016](adr/0016-ship-the-audit-chain-to-an-external-witness.md).
 
-This is the only outbound connection the service makes, and the only one it can
-make. With `audit.sink.endpoint` unset no shipper exists, so there is no idle
-client and no timer.
+Apart from the database, this is the only outbound connection the service's own
+code makes. With `audit.sink.endpoint` unset no shipper exists, so there is no
+idle client and no timer. One library does reach out on its own: with
+`webauthn.metadata_path` set, the metadata decoder checks the BLOB's signing
+chain for revocation at startup and requests the CRL and OCSP endpoints named in
+those certificates. That check fails soft, so a deployment with egress denied
+loses nothing but the revocation answer.
 
 ## Storage
 
@@ -381,7 +385,7 @@ fails if either declares a schema object the other does not. It runs in CI.
 | Key encryption keyring | A JSON file at `kek.path`, or the variable named by `kek.env_var` | File mode 0600 enforced at load; refused if it resolves inside a data directory; the `env` provider unsets the variable once parsed | The TOTP secrets and the readable form of every subject reference. Nothing else. See [ADR 0005](adr/0005-hash-recovery-codes-do-not-encrypt-them.md) and [ADR 0006](adr/0006-store-webauthn-public-keys-in-clear.md) |
 | Subject pepper | The variable named by `subject.pepper_env` | At least 32 bytes required; the variable is unset once read; zeroized on `Service.Close` | Every existing subject becomes unfindable, because the lookup key cannot be re-derived |
 | Assertion signing key | An Ed25519 PKCS#8 PEM at `assertion.signing_key_path` | File mode 0600 enforced at load; exactly one PEM block, no trailing data | Nothing stored, but every previously issued assertion stops verifying and a new key must be published in the JWK Set |
-| Data encryption keys | Only ever inside a sealed record, wrapped under a KEK version | AES-256-GCM, with the record header as additional authenticated data | Not applicable: they exist only in ciphertext |
+| Data encryption keys | Only ever inside a sealed record, wrapped under a KEK version | AES-256-GCM, with the record header and the record's binding context as additional authenticated data | Not applicable: they exist only in ciphertext |
 | API keys and administrative tokens | Selector in clear and indexed; verifier as a SHA-256 digest over a domain separator, the kind, the selector and the verifier | Shown once at creation and never recoverable; constant-time comparison; the digest is bound to the kind and the selector so it cannot be moved between rows or between tables | Nothing recoverable from the database; the credential must be reminted |
 | Recovery codes | Selector in clear and indexed; verifier as an Argon2id PHC string | 70 bits of verifier entropy; `m=19456` KiB, `t=2`, `p=1`; constant-time comparison | Nothing: hashes are not reversible, and a lost sheet means a fresh batch |
 | TOTP secrets | `totp_secrets.secret_sealed`, envelope-encrypted | AES-256-GCM under a per-record data key, wrapped under the KEK | The secret is unrecoverable and the user re-enrols |
@@ -390,19 +394,40 @@ fails if either declares a schema object the other does not. It runs in CI.
 
 The envelope format is versioned and self-describing: a one-byte format
 version, a big-endian KEK version, the DEK-wrapping nonce, the wrapped DEK, the
-payload nonce, then the payload. The header is additional authenticated data for
-both `Seal` calls, so the KEK version and the wrapped DEK cannot be swapped
-between records. `Rewrap` re-seals the DEK under the current KEK and keeps the
-DEK itself. Because the header is authenticated data of the payload and the
-header changes, the payload is opened and sealed again under the same DEK. It is
-opened even when the record is already on the current version: a rotation pass
-reads the error from `Rewrap` as its integrity report, and a path that returned
-early without authenticating would report a corrupted row as rotated.
-`Sealer.CurrentVersion` tells a caller which version a rewrap will target.
-`POST /admin/v1/kek/rewrap` drives the pass over `totp_secrets.secret_sealed` and
-`subjects.ref_sealed`, a page of 200 at a time, and writes each record back with
-a compare-and-swap on the old sealed value, so a record resealed by another
-request in the meantime is left alone.
+payload nonce, then the payload. Both `Seal` calls take the header followed by
+the serialised binding context as additional authenticated data. The header
+stops the KEK version and the wrapped DEK from being swapped between records;
+the context ties the record to where it is stored, so a ciphertext copied into
+another row, another column or another tenant no longer opens. See
+[ADR 0021](adr/0021-bind-sealed-records-to-the-row-they-live-in.md).
+
+The binding context names the kind of field, the tenant, the identifier of the
+row, and for a TOTP secret the subject the factor authenticates. It is
+mandatory, and an incomplete one is refused rather than sealed under a weaker
+binding. It is never stored beside the ciphertext: the caller rebuilds it from
+the row it has just read, which is what makes the check mean anything. Its
+serialisation is a domain separator and one length-prefixed field each, so no
+two distinct contexts can produce the same bytes.
+
+`Rewrap` re-seals the DEK under the current KEK, keeps the DEK itself, and
+reinjects the same context. Because the header is authenticated data of the
+payload and the header changes, the payload is opened and sealed again under
+the same DEK. It is opened even when the record is already on the current
+version: a rotation pass reads the error from `Rewrap` as its integrity report,
+and a path that returned early without authenticating would report a corrupted
+row as rotated. `Sealer.CurrentVersion` tells a caller which version a rewrap
+will target. `POST /admin/v1/kek/rewrap` drives the pass over
+`totp_secrets.secret_sealed` and `subjects.ref_sealed`, a page of 200 at a
+time, and writes each record back with a compare-and-swap on the old sealed
+value, so a record resealed by another request in the meantime is left alone.
+
+Format version 1, written before the binding existed, is read and never
+written, with the authenticated data it was written with, and is rewritten as
+version 2 by the next rewrap pass whether or not its key version has changed. A
+pass that reports zero rewrapped and zero failed is the signal that no stored
+record is left on an old key or an old format. Until then, the records the pass
+has not reached still open in any row, which is the transitional cost stated in
+ADR 0021.
 
 Key versions in the keyring are canonical decimal starting at 1. `"01"` and
 `"0"` are refused at load.
@@ -417,7 +442,7 @@ needs an HSM or an external KMS, which this service does not provide.
 
 ## Dependency policy
 
-Six direct dependencies, and each one earns its place:
+Eight direct dependencies, and each one earns its place:
 
 | Module | Why it is not written here |
 |---|---|
@@ -427,6 +452,8 @@ Six direct dependencies, and each one earns its place:
 | `github.com/pelletier/go-toml/v2` | TOML with strict unknown-field rejection. |
 | `golang.org/x/crypto` | Argon2id. |
 | `github.com/google/uuid` | Identifier generation. |
+| `github.com/google/go-tpm` | The TPM 2.0 command encoding behind the `tpm` KEK provider, which seals the keyring's file key to the machine's TPM, and behind the wizard command that creates the sealed keyring. The marshalling of those structures is not something to write by hand, and the module was already in the build: `go-webauthn/webauthn` requires it for the TPM attestation format. See [ADR 0019](adr/0019-seal-the-keyring-to-a-tpm.md). |
+| `github.com/fxamacker/cbor/v2` | Imported by test code only: the software authenticator that drives the ceremonies end to end in `internal/webauthn` encodes its attestation objects and COSE keys in CTAP2 canonical CBOR. No production package imports it directly, and it adds nothing to the closure either, since `go-webauthn/webauthn` decodes with the same module. |
 
 Everything else is the standard library. The JWS is assembled and parsed by
 hand in `internal/assertion` rather than through a JWT library: the format is a

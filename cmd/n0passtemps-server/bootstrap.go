@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Socold/n0passtemps/internal/alerts"
 	"github.com/Socold/n0passtemps/internal/audit"
 	"github.com/Socold/n0passtemps/internal/config"
 	"github.com/Socold/n0passtemps/internal/crypto/envelope"
@@ -92,21 +93,39 @@ func mintBootstrapToken(ctx context.Context, cfg *config.Config, st store.Store,
 // Returning nil rather than a handler that refuses every request means the
 // routes are never registered at all, so a disabled interface presents no
 // surface to probe.
-func buildAdminUI(cfg *config.Config, st store.Store, rec *audit.Recorder, subjects *subject.Service,
-	rp *webauthn.Service, limiter *throttle.Limiter, log *slog.Logger) (*adminui.Handler, error) {
+func buildAdminUI(cfg *config.Config, st store.Store, rec *audit.Recorder, al *alerts.Engine,
+	subjects *subject.Service, rp *webauthn.Service, limiter *throttle.Limiter,
+	log *slog.Logger) (*adminui.Handler, error) {
 	if !cfg.Admin.UIEnabled {
 		log.Info("administration interface disabled by configuration")
 		return nil, nil
 	}
-	// The relying party is the one the public surface uses. The identifier and
-	// the acceptable origins are one deployment-wide fact, and a second service
-	// would be a second chance to disagree about them; the credentials stay
-	// apart because they live in different tables, not because the ceremonies
-	// are driven by different objects.
+	// The relying party is the one the public surface uses. The identifier is
+	// one deployment-wide fact, and a second service would be a second chance
+	// to disagree about it; the credentials stay apart because they live in
+	// different tables, not because the ceremonies are driven by different
+	// objects.
+	//
+	// The acceptable origins are not one fact, and the console does not share
+	// the application's. An origin the application is served from can ask an
+	// authenticator for an assertion under this relying party identifier, so
+	// sharing the list would mean any such origin could obtain one for the
+	// console. The service therefore holds the console to webauthn.admin_origins,
+	// or to the single configured origin when a deployment has only one, and it
+	// is worth saying at startup which of them that came out as: this is the
+	// boundary an operator would otherwise discover by being refused.
+	log.Info("administration interface enabled",
+		slog.String("rp_id", rp.RPID()),
+		slog.Any("console_origins", rp.AdminOrigins()))
+
 	return adminui.New(adminui.Deps{
 		Config:   cfg,
 		Store:    st,
 		Recorder: rec,
+		// The same engine the API writes to. An operator acting from the
+		// console raises the alerts an operator acting through the API raises,
+		// or the two surfaces disagree about what is worth noticing.
+		Alerts:   al,
 		Subjects: subjects,
 		WebAuthn: rp,
 		Limiter:  limiter,

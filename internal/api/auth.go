@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/Socold/n0passtemps/internal/alerts"
@@ -26,6 +27,11 @@ type Authenticator struct {
 	recorder *audit.Recorder
 	alerts   *alerts.Engine
 	now      func() time.Time
+
+	// rejections folds the refusals on the credential path, so that being
+	// refused costs the service a bounded number of writes however often it
+	// happens. See recordRejection.
+	rejections rejectionTally
 }
 
 // NewAuthenticator builds an Authenticator.
@@ -112,6 +118,16 @@ func (a *Authenticator) RequireAdmin() Middleware {
 	}
 }
 
+// errNoCredential marks a request that presented nothing at all.
+//
+// It is told apart from every other refusal because the two mean different
+// things. A malformed, unknown or expired credential was presented by somebody
+// who once had one, and a run of them is worth an operator's time. A request
+// with no Authorization header at all names nobody: it is a scanner walking the
+// address space, and there is nothing in it for an operator to read. See
+// recordRejection for what follows from the difference.
+var errNoCredential = errors.New("no bearer credential presented")
+
 // unavailableError marks a failure that is the service's fault rather than the
 // caller's, so the middleware can answer 503 instead of 401.
 type unavailableError struct{ cause error }
@@ -129,7 +145,7 @@ func (e *unavailableError) Unwrap() error { return e.cause }
 func (a *Authenticator) verifyAPIKey(r *http.Request) (*store.APIKey, error) {
 	presented, err := token.FromAuthorizationHeader(r.Header.Get("Authorization"))
 	if err != nil {
-		return nil, errors.New("no bearer credential presented")
+		return nil, errNoCredential
 	}
 
 	parsed, err := token.Parse(presented)
@@ -175,7 +191,7 @@ func (a *Authenticator) verifyAPIKey(r *http.Request) (*store.APIKey, error) {
 func (a *Authenticator) verifyAdminToken(r *http.Request) (*store.AdminToken, error) {
 	presented, err := token.FromAuthorizationHeader(r.Header.Get("Authorization"))
 	if err != nil {
-		return nil, errors.New("no bearer credential presented")
+		return nil, errNoCredential
 	}
 
 	parsed, err := token.Parse(presented)
@@ -210,33 +226,187 @@ func (a *Authenticator) verifyAdminToken(r *http.Request) (*store.AdminToken, er
 	return tok, nil
 }
 
-// recordRejection audits a refused authentication and raises an alert.
+// How a refused authentication is recorded.
 //
-// Failures on the credential path are audited because a run of them is the
-// earliest visible sign of a leaked key being probed, and the audit log is
-// where an operator looks for it afterwards.
+// Every refusal used to write one audit entry and upsert one alert. Both are
+// writes, the audit chain has a single writer by construction, and neither
+// needed a credential to happen: anyone at all could take that writer away from
+// the ceremonies that need it, and fill a table an operator cannot prune
+// freely with entries that carry no subject and are therefore outside the reach
+// of an erasure request. What follows folds the refusals from one source
+// address into one entry and one alert per window, each carrying how many
+// refusals it covers, so a run of them is still visible, with its volume, in
+// both places an operator looks.
+
+const (
+	// rejectionWindow is how long refusals from one source address are folded
+	// together. It is short enough that a run shows up in the history while it
+	// is still going on, and long enough that a caller cannot make the service
+	// write once per request.
+	rejectionWindow = time.Minute
+
+	// maxTrackedSources bounds what the fold may hold at once, so that a
+	// caller rotating through addresses cannot turn the saving in database
+	// writes into unbounded memory.
+	maxTrackedSources = 4096
+)
+
+// rejectionRun is what one source address has accumulated since its last
+// report.
+type rejectionRun struct {
+	openedAt time.Time
+
+	// refusals counts every refusal, and credentials only those that presented
+	// something. A run with no credentials in it is audited as nothing; see
+	// recordRejection.
+	refusals    int
+	credentials int
+}
+
+// rejectionTally folds refusals per source address.
+//
+// The zero value is ready to use, so an Authenticator assembled as a struct
+// literal behaves like one built by NewAuthenticator rather than panicking on
+// the first refusal.
+type rejectionTally struct {
+	mu   sync.Mutex
+	runs map[string]*rejectionRun
+}
+
+// rejectionFold is what one report covers: the refusals since the last report
+// for that address, the one being reported included.
+type rejectionFold struct {
+	Refusals    int
+	Credentials int
+}
+
+// observe records one refusal and reports whether it is to be written now.
+//
+// The first refusal from an address is reported at once, so that a single
+// failure is still on the record and a burst is visible from its first attempt
+// rather than a window later. Every further refusal inside the window is
+// counted and writes nothing, and the next refusal after the window has elapsed
+// reports the whole run. A run that is never followed by another refusal keeps
+// its tail unreported, which is the deliberate trade: the report that opened it
+// already said this address was being refused, and the tail is a refinement of
+// a number, not the only sign of the thing.
+func (t *rejectionTally) observe(now time.Time, key string, presented bool) (rejectionFold, bool) {
+	credential := 0
+	if presented {
+		credential = 1
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.runs == nil {
+		t.runs = make(map[string]*rejectionRun)
+	}
+
+	run, ok := t.runs[key]
+	switch {
+	case ok && now.Sub(run.openedAt) < rejectionWindow:
+		run.refusals++
+		run.credentials += credential
+		return rejectionFold{}, false
+	case ok:
+		// The window has elapsed. This refusal closes the run, reports it, and
+		// opens the next one empty, because everything the next one would have
+		// counted is in the report being returned.
+		reported := rejectionFold{
+			Refusals:    run.refusals + 1,
+			Credentials: run.credentials + credential,
+		}
+		*run = rejectionRun{openedAt: now}
+		return reported, true
+	default:
+		t.evictLocked(now)
+		t.runs[key] = &rejectionRun{openedAt: now}
+		return rejectionFold{Refusals: 1, Credentials: credential}, true
+	}
+}
+
+// evictLocked keeps the map bounded.
+//
+// Runs whose window has elapsed go first, because what they hold is the
+// refinement described in observe rather than a report nobody has written. If
+// the map is still full the oldest open run goes, which costs the same
+// refinement: a run is reported when it is opened, never when it is dropped, so
+// no address can be made invisible by crowding the map from another one.
+func (t *rejectionTally) evictLocked(now time.Time) {
+	if len(t.runs) < maxTrackedSources {
+		return
+	}
+
+	oldest, oldestAt := "", time.Time{}
+	for key, run := range t.runs {
+		if now.Sub(run.openedAt) >= rejectionWindow {
+			delete(t.runs, key)
+			continue
+		}
+		if oldestAt.IsZero() || run.openedAt.Before(oldestAt) {
+			oldest, oldestAt = key, run.openedAt
+		}
+	}
+	if len(t.runs) >= maxTrackedSources && oldest != "" {
+		delete(t.runs, oldest)
+	}
+}
+
+// recordRejection records a refused authentication, folded by source address.
+//
+// Refusals on the credential path are worth recording because a run of them is
+// the earliest visible sign of a leaked credential being probed, and the audit
+// log is where an operator looks for it afterwards. What is not worth recording
+// is one entry per request, for the reasons given above the fold.
+//
+// A fold in which nothing was ever presented is not audited at all. A request
+// with no Authorization header teaches an operator nothing they can act on, and
+// the alert still counts it, so a scan is visible as a number rather than as a
+// thousand entries nobody can delete.
+//
+// The two credential families are folded apart, so that a refused
+// administrative token is never counted into an entry about an API key.
 func (a *Authenticator) recordRejection(r *http.Request, eventType string, cause error) {
 	ctx := r.Context()
+	source := SourceIPFrom(ctx)
+	presented := !errors.Is(cause, errNoCredential)
 
-	ev := audit.Event{
-		// The tenant is unknown at this point, by definition: the credential
-		// that would have named it did not verify. A fixed placeholder keeps
-		// the entry insertable without inventing a tenant.
-		TenantID:  store.SystemTenantID,
-		EventType: eventType,
-		ActorType: store.ActorSystem,
-		Outcome:   store.OutcomeDenied,
-		SourceIP:  SourceIPFrom(ctx),
-		RequestID: RequestIDFrom(ctx),
-		Detail:    map[string]any{"reason": cause.Error(), "route": routePattern(r)},
+	fold, report := a.rejections.observe(a.now().UTC(), eventType+"\x00"+source, presented)
+	if !report {
+		return
 	}
-	if err := a.recorder.Record(ctx, ev); err != nil {
-		logging.FromContext(ctx).ErrorContext(ctx,
-			"authentication failure not audited", slog.Any("error", err))
+
+	if fold.Credentials > 0 {
+		ev := audit.Event{
+			// The tenant is unknown at this point, by definition: the
+			// credential that would have named it did not verify. A fixed
+			// placeholder keeps the entry insertable without inventing a
+			// tenant.
+			TenantID:  store.SystemTenantID,
+			EventType: eventType,
+			ActorType: store.ActorSystem,
+			Outcome:   store.OutcomeDenied,
+			SourceIP:  source,
+			RequestID: RequestIDFrom(ctx),
+			Detail: map[string]any{
+				// The reason and the route are those of the refusal that
+				// produced this entry; the counts cover everything folded into
+				// it since the last one for this address.
+				"reason":    cause.Error(),
+				"route":     routePattern(r),
+				"refusals":  fold.Refusals,
+				"presented": fold.Credentials,
+				"window":    rejectionWindow.String(),
+			},
+		}
+		if err := a.recorder.Record(ctx, ev); err != nil {
+			logging.FromContext(ctx).ErrorContext(ctx,
+				"authentication failure not audited", slog.Any("error", err))
+		}
 	}
 
 	if a.alerts != nil {
-		if _, err := a.alerts.APIKeyRejected(ctx, store.SystemTenantID, SourceIPFrom(ctx), 1); err != nil {
+		if _, err := a.alerts.APIKeyRejected(ctx, store.SystemTenantID, source, fold.Refusals); err != nil {
 			logging.FromContext(ctx).WarnContext(ctx,
 				"alert not raised for rejected credential", slog.Any("error", err))
 		}

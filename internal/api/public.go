@@ -14,10 +14,12 @@ import (
 
 	"github.com/Socold/n0passtemps/internal/assertion"
 	"github.com/Socold/n0passtemps/internal/audit"
+	"github.com/Socold/n0passtemps/internal/crypto/envelope"
 	"github.com/Socold/n0passtemps/internal/crypto/recovery"
 	"github.com/Socold/n0passtemps/internal/crypto/zeroize"
 	"github.com/Socold/n0passtemps/internal/risk"
 	"github.com/Socold/n0passtemps/internal/store"
+	"github.com/Socold/n0passtemps/internal/throttle"
 	"github.com/Socold/n0passtemps/internal/totp"
 	wa "github.com/Socold/n0passtemps/internal/webauthn"
 )
@@ -37,7 +39,7 @@ func decodeJSON(r *http.Request, v any) error {
 	if err := dec.Decode(v); err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			return &APIError{
+			return &Error{
 				Status: http.StatusRequestEntityTooLarge, Type: TypePayloadTooLarge,
 				Title: "the request body is too large", Internal: err,
 			}
@@ -278,8 +280,11 @@ func (s *Server) handleRegisterBegin(w http.ResponseWriter, r *http.Request) err
 		return err
 	}
 
-	dims := s.clientThrottleDims(r, caller, sub.ID)
-	if err = s.checkThrottle(r, tenantID, dims); err != nil {
+	scope, err := s.ceremonyThrottleScope(r, throttle.FactorWebAuthn, sub.ID)
+	if err != nil {
+		return err
+	}
+	if err = s.checkCeremonyThrottle(r, tenantID, scope); err != nil {
 		return err
 	}
 
@@ -314,6 +319,17 @@ type ceremonyCompleteRequest struct {
 	// WebAuthn library rather than through a struct that might drop a field
 	// the library needs to verify.
 	Credential json.RawMessage `json:"credential"`
+
+	// Label names the authenticator that has just been enrolled, and is stored
+	// with it. It is read on the registration route and ignored on the
+	// assertion one, which enrols nothing.
+	//
+	// It is taken here rather than remembered from the begin call because a
+	// challenge is a ceremony and not a draft record: carrying the label
+	// through the store would make every abandoned ceremony hold a value
+	// nothing will ever read. The label the begin call takes is what the
+	// authenticator shows while the user confirms, which is a different job.
+	Label string `json:"label,omitempty"`
 }
 
 func (req *ceremonyCompleteRequest) validate() error {
@@ -359,20 +375,23 @@ func (s *Server) handleRegisterComplete(w http.ResponseWriter, r *http.Request) 
 		return err
 	}
 
-	dims := s.clientThrottleDims(r, caller, sub.ID)
-	if err = s.checkThrottle(r, tenantID, dims); err != nil {
+	scope, err := s.ceremonyThrottleScope(r, throttle.FactorWebAuthn, sub.ID)
+	if err != nil {
+		return err
+	}
+	if err = s.checkCeremonyThrottle(r, tenantID, scope); err != nil {
 		return err
 	}
 
 	cred, err := s.deps.WebAuthn.CompleteRegistration(r.Context(), sub,
-		req.ChallengeID, req.Credential, "")
+		req.ChallengeID, req.Credential, req.Label)
 	if err != nil {
-		s.recordAttempt(r, tenantID, sub.ID, dims, true)
+		s.recordAttempt(r, tenantID, sub.ID, webAuthnFailureScope(scope, err), true)
 		return s.ceremonyError(r, tenantID, sub.ID, caller,
 			audit.EventRegistrationRejected, err)
 	}
 
-	s.recordAttempt(r, tenantID, sub.ID, dims, false)
+	s.recordAttempt(r, tenantID, sub.ID, scope, false)
 	s.audited(r, audit.Event{
 		TenantID:     tenantID,
 		EventType:    audit.EventRegistrationCompleted,
@@ -426,8 +445,11 @@ func (s *Server) handleAssertBegin(w http.ResponseWriter, r *http.Request) error
 		return err
 	}
 
-	dims := s.clientThrottleDims(r, caller, sub.ID)
-	if err = s.checkThrottle(r, tenantID, dims); err != nil {
+	scope, err := s.ceremonyThrottleScope(r, throttle.FactorWebAuthn, sub.ID)
+	if err != nil {
+		return err
+	}
+	if err = s.checkCeremonyThrottle(r, tenantID, scope); err != nil {
 		return err
 	}
 
@@ -526,23 +548,47 @@ func (s *Server) handleAssertComplete(w http.ResponseWriter, r *http.Request) er
 		return err
 	}
 
-	dims := s.clientThrottleDims(r, caller, sub.ID)
-	if err = s.checkThrottle(r, tenantID, dims); err != nil {
+	scope, err := s.ceremonyThrottleScope(r, throttle.FactorWebAuthn, sub.ID)
+	if err != nil {
+		return err
+	}
+	if err = s.checkCeremonyThrottle(r, tenantID, scope); err != nil {
 		return err
 	}
 
 	outcome, err := s.deps.WebAuthn.CompleteAssertion(r.Context(), sub,
 		req.ChallengeID, req.Credential)
 	if err != nil {
-		s.recordAttempt(r, tenantID, sub.ID, dims, true)
+		s.recordAttempt(r, tenantID, sub.ID, webAuthnFailureScope(scope, err), true)
 		return s.ceremonyError(r, tenantID, sub.ID, caller,
 			audit.EventAssertionRejected, err)
 	}
 
-	limits := s.recordAttempt(r, tenantID, sub.ID, dims, false)
+	limits := s.recordAttempt(r, tenantID, sub.ID, scope, false)
 	assessed := s.assessWebAuthn(outcome, limits)
 
 	return s.finishWebAuthnAssertion(w, r, caller, tenantID, sub, outcome, assessed)
+}
+
+// webAuthnFailureScope narrows the scope a failed WebAuthn completion is
+// counted in.
+//
+// A failure is counted against the subject named in the path only when the
+// ceremony got as far as consuming a challenge. When it did not, because the
+// challenge is unknown, expired, already used or of the other ceremony, nothing
+// has tied the request to that subject beyond the caller saying so, and
+// counting it would let anybody who knows a subject reference spend the
+// subject's budget with requests that were never part of a ceremony of theirs.
+// Such a failure still counts against the network it was declared from.
+func webAuthnFailureScope(scope throttleScope, err error) throttleScope {
+	if !errors.Is(err, wa.ErrChallengeNotFound) {
+		return scope
+	}
+	network := throttleScope{factor: scope.factor, dims: make(map[throttle.Dimension]string, 1)}
+	if ip, ok := scope.dims[throttle.DimIP]; ok {
+		network.dims[throttle.DimIP] = ip
+	}
+	return network
 }
 
 // finishWebAuthnAssertion turns a validated WebAuthn outcome into the signed
@@ -624,13 +670,14 @@ func (s *Server) finishWebAuthnAssertion(w http.ResponseWriter, r *http.Request,
 // the named route's, with an empty allow list, which is what makes the browser
 // offer whichever passkeys the authenticator holds for this relying party.
 //
-// Only the network dimension of the rate limit applies here. The subject
-// dimension cannot, because no subject is known until the ceremony completes,
-// and that is a real reduction in protection rather than an oversight: this
-// route can be used to mint challenges without naming anybody. The challenges
-// are single use, short lived and useless without an authenticator that holds a
-// matching credential, so what remains is the cost of issuing them, which is
-// what the per-network and per-key limits bound.
+// Only the network dimension of the rate limit applies here, and only when the
+// caller declared the end user's address. The subject dimension cannot, because
+// no subject is known until the ceremony completes, and that is a real
+// reduction in protection rather than an oversight: this route can be used to
+// mint challenges without naming anybody. The challenges are single use, short
+// lived and useless without an authenticator that holds a matching credential,
+// so what remains is the cost of issuing them, which is what the per-network
+// and per-key limits bound.
 func (s *Server) handleDiscoverableAssertBegin(w http.ResponseWriter, r *http.Request) error {
 	caller, err := requireCaller(r.Context())
 	if err != nil {
@@ -641,8 +688,11 @@ func (s *Server) handleDiscoverableAssertBegin(w http.ResponseWriter, r *http.Re
 		return err
 	}
 
-	dims := s.clientThrottleDims(r, caller, "")
-	if err = s.checkThrottle(r, tenantID, dims); err != nil {
+	scope, err := s.ceremonyThrottleScope(r, throttle.FactorWebAuthn, "")
+	if err != nil {
+		return err
+	}
+	if err = s.checkCeremonyThrottle(r, tenantID, scope); err != nil {
 		return err
 	}
 
@@ -697,21 +747,26 @@ func (s *Server) handleDiscoverableAssertComplete(w http.ResponseWriter, r *http
 		return err
 	}
 
-	networkDims := s.clientThrottleDims(r, caller, "")
-	if err = s.checkThrottle(r, tenantID, networkDims); err != nil {
+	network, err := s.ceremonyThrottleScope(r, throttle.FactorWebAuthn, "")
+	if err != nil {
+		return err
+	}
+	if err = s.checkCeremonyThrottle(r, tenantID, network); err != nil {
 		return err
 	}
 
 	sub, outcome, err := s.deps.WebAuthn.CompleteDiscoverableAssertion(r.Context(),
 		tenantID, req.ChallengeID, req.Credential)
 	if err != nil {
-		s.recordAttempt(r, tenantID, "", networkDims, true)
+		s.recordAttempt(r, tenantID, "", network, true)
 		return s.ceremonyError(r, tenantID, "", caller,
 			audit.EventAssertionRejected, err)
 	}
 
-	dims := s.clientThrottleDims(r, caller, sub.ID)
-	limits := s.recordAttempt(r, tenantID, sub.ID, dims, false)
+	// The header was validated when the network scope was built, so the error
+	// cannot recur here.
+	scope, _ := s.ceremonyThrottleScope(r, throttle.FactorWebAuthn, sub.ID)
+	limits := s.recordAttempt(r, tenantID, sub.ID, scope, false)
 	assessed := s.assessWebAuthn(outcome, limits)
 
 	return s.finishWebAuthnAssertion(w, r, caller, tenantID, sub, outcome, assessed)
@@ -776,7 +831,7 @@ func (s *Server) ceremonyError(r *http.Request, tenantID, subjectID string, call
 		// This one is disclosed, because a user holding an unsupported key
 		// needs to be told to use a different one, and the policy is
 		// configuration the operator publishes anyway.
-		return &APIError{
+		return &Error{
 			Status: http.StatusForbidden, Type: TypeForbidden,
 			Title:    "this authenticator model is not permitted",
 			Internal: err,
@@ -798,7 +853,7 @@ func refErrorToAPI(err error) error {
 	case err == nil:
 		return nil
 	default:
-		var apiErr *APIError
+		var apiErr *Error
 		if errors.As(err, &apiErr) {
 			return apiErr
 		}
@@ -865,7 +920,11 @@ func (s *Server) handleTOTPEnrol(w http.ResponseWriter, r *http.Request) error {
 	}
 	defer zeroize.Bytes(secret)
 
-	sealed, err := s.deps.Sealer.Seal(secret)
+	// The row identifier is drawn before the seal rather than at the insert
+	// below, because the record is bound to the row it will occupy and the
+	// binding has to be decided while the secret is being sealed.
+	secretID := uuid.NewString()
+	sealed, err := s.deps.Sealer.Seal(secret, envelope.TOTPSecret(tenantID, sub.ID, secretID))
 	if err != nil {
 		return Internal(fmt.Errorf("seal totp secret: %w", err))
 	}
@@ -879,7 +938,7 @@ func (s *Server) handleTOTPEnrol(w http.ResponseWriter, r *http.Request) error {
 
 	now := s.now().UTC()
 	rec := &store.TOTPSecret{
-		ID:            uuid.NewString(),
+		ID:            secretID,
 		TenantID:      tenantID,
 		SubjectID:     sub.ID,
 		SecretSealed:  sealed,
@@ -954,8 +1013,11 @@ func (s *Server) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) error
 		return err
 	}
 
-	dims := s.clientThrottleDims(r, caller, sub.ID)
-	if err = s.checkThrottle(r, tenantID, dims); err != nil {
+	scope, err := s.ceremonyThrottleScope(r, throttle.FactorTOTP, sub.ID)
+	if err != nil {
+		return err
+	}
+	if err = s.checkCeremonyThrottle(r, tenantID, scope); err != nil {
 		return err
 	}
 
@@ -977,12 +1039,20 @@ func (s *Server) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) error
 		return Conflict("the enrolment has expired, start again", nil)
 	}
 
+	// Reserved here rather than where the limit was first checked. The two
+	// refusals above are conflicts, not guesses, and an attempt reserved before
+	// them would stay counted as a failure.
+	held, err := s.reserveAttempt(r, tenantID, scope)
+	if err != nil {
+		return err
+	}
+
 	step, ok, err := s.verifyTOTP(r, tenantID, pending, req.Code)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		s.recordAttempt(r, tenantID, sub.ID, dims, true)
+		s.settleAttempt(r, tenantID, sub.ID, scope, held, true)
 		s.audited(r, audit.Event{
 			TenantID: tenantID, EventType: audit.EventTOTPRejected,
 			ActorType: caller.ActorType(), ActorID: caller.ActorID(),
@@ -1000,7 +1070,7 @@ func (s *Server) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) error
 		return Internal(err)
 	}
 
-	s.recordAttempt(r, tenantID, sub.ID, dims, false)
+	s.settleAttempt(r, tenantID, sub.ID, scope, held, false)
 	s.audited(r, audit.Event{
 		TenantID: tenantID, EventType: audit.EventTOTPConfirmed,
 		ActorType: caller.ActorType(), ActorID: caller.ActorID(),
@@ -1044,8 +1114,16 @@ func (s *Server) handleTOTPVerify(w http.ResponseWriter, r *http.Request) error 
 		return err
 	}
 
-	dims := s.clientThrottleDims(r, caller, sub.ID)
-	if err = s.checkThrottle(r, tenantID, dims); err != nil {
+	scope, err := s.ceremonyThrottleScope(r, throttle.FactorTOTP, sub.ID)
+	if err != nil {
+		return err
+	}
+
+	// The attempt is counted before the code is compared, so that a parallel
+	// burst of guesses cannot have more of them evaluated than the budget
+	// allows. See reserveAttempt.
+	held, err := s.reserveAttempt(r, tenantID, scope)
+	if err != nil {
 		return err
 	}
 
@@ -1054,7 +1132,7 @@ func (s *Server) handleTOTPVerify(w http.ResponseWriter, r *http.Request) error 
 		if errors.Is(err, store.ErrNotFound) {
 			// Indistinguishable from a wrong code, so that this route cannot
 			// be used to discover which subjects have TOTP enrolled.
-			s.recordAttempt(r, tenantID, sub.ID, dims, true)
+			s.settleAttempt(r, tenantID, sub.ID, scope, held, true)
 			return CeremonyFailed(errors.New("subject has no confirmed totp secret"))
 		}
 		return Internal(err)
@@ -1065,7 +1143,7 @@ func (s *Server) handleTOTPVerify(w http.ResponseWriter, r *http.Request) error 
 		return err
 	}
 	if !ok {
-		s.recordAttempt(r, tenantID, sub.ID, dims, true)
+		s.settleAttempt(r, tenantID, sub.ID, scope, held, true)
 		s.audited(r, audit.Event{
 			TenantID: tenantID, EventType: audit.EventTOTPRejected,
 			ActorType: caller.ActorType(), ActorID: caller.ActorID(),
@@ -1075,7 +1153,7 @@ func (s *Server) handleTOTPVerify(w http.ResponseWriter, r *http.Request) error 
 		return CeremonyFailed(errors.New("totp code did not verify"))
 	}
 
-	limits := s.recordAttempt(r, tenantID, sub.ID, dims, false)
+	limits := s.settleAttempt(r, tenantID, sub.ID, scope, held, false)
 	assessed := s.assessCodeCeremony(r, tenantID, sub.ID, risk.CeremonyTOTP, limits)
 
 	factors := []assertion.Factor{assertion.FactorTOTP}
@@ -1109,8 +1187,14 @@ func (s *Server) handleTOTPVerify(w http.ResponseWriter, r *http.Request) error 
 // actually single use. A code stays valid for a whole period, so without it two
 // requests presenting the same code inside that window would both read the old
 // counter and both accept.
-func (s *Server) verifyTOTP(r *http.Request, tenantID string, rec *store.TOTPSecret, code string) (int64, bool, error) {
-	secret, err := s.deps.Sealer.Unseal(rec.SecretSealed)
+func (s *Server) verifyTOTP(r *http.Request, tenantID string, rec *store.TOTPSecret,
+	code string) (timestep int64, ok bool, err error) {
+	// The binding is rebuilt from the row that was just read. A seed copied
+	// into this row from another subject, or from the same subject in another
+	// tenant, does not open, so an attacker who can write to the database
+	// cannot install a seed they know over one they do not.
+	secret, err := s.deps.Sealer.Unseal(rec.SecretSealed,
+		envelope.TOTPSecret(rec.TenantID, rec.SubjectID, rec.ID))
 	if err != nil {
 		return 0, false, Internal(fmt.Errorf("unseal totp secret: %w", err))
 	}
@@ -1191,8 +1275,26 @@ func (s *Server) handleRecoveryIssue(w http.ResponseWriter, r *http.Request) err
 		return err
 	}
 
+	// Issuing is not a guess, so nothing is recorded, but it is the most
+	// expensive route the service has: one Argon2id evaluation per code. A
+	// subject whose recovery factor is locked out does not get a batch hashed,
+	// and whoever is locked out of it cannot use the route to keep the
+	// service busy either.
+	scope, err := s.ceremonyThrottleScope(r, throttle.FactorRecovery, sub.ID)
+	if err != nil {
+		return err
+	}
+	if err = s.checkCeremonyThrottle(r, tenantID, scope); err != nil {
+		return err
+	}
+
+	release, err := acquireKDF(r.Context())
+	if err != nil {
+		return err
+	}
 	count := s.deps.Config.Recovery.CodeCount
 	codes, err := recovery.Generate(count)
+	release()
 	if err != nil {
 		return Internal(err)
 	}
@@ -1272,13 +1374,20 @@ func (s *Server) handleRecoveryConsume(w http.ResponseWriter, r *http.Request) e
 		return err
 	}
 
-	dims := s.clientThrottleDims(r, caller, sub.ID)
-	if err = s.checkThrottle(r, tenantID, dims); err != nil {
+	scope, err := s.ceremonyThrottleScope(r, throttle.FactorRecovery, sub.ID)
+	if err != nil {
+		return err
+	}
+
+	// Counted before the code is looked at, for the reason handleTOTPVerify
+	// gives.
+	held, err := s.reserveAttempt(r, tenantID, scope)
+	if err != nil {
 		return err
 	}
 
 	rejected := func(reason string) error {
-		s.recordAttempt(r, tenantID, sub.ID, dims, true)
+		s.settleAttempt(r, tenantID, sub.ID, scope, held, true)
 		s.audited(r, audit.Event{
 			TenantID: tenantID, EventType: audit.EventRecoveryRejected,
 			ActorType: caller.ActorType(), ActorID: caller.ActorID(),
@@ -1311,10 +1420,16 @@ func (s *Server) handleRecoveryConsume(w http.ResponseWriter, r *http.Request) e
 		return rejected("code was already used")
 	}
 
+	release, err := acquireKDF(r.Context())
+	if err != nil {
+		return err
+	}
 	ok, err := recovery.Verify(verifier, rec.VerifierHash)
+	release()
 	if err != nil {
 		// A malformed stored hash is an operational fault, not a failed
-		// attempt, and must not be recorded as one.
+		// attempt, and is not reported as one. The reservation taken above
+		// does stay counted; see reserveAttempt for why that is accepted.
 		return Internal(err)
 	}
 	if !ok {
@@ -1330,7 +1445,7 @@ func (s *Server) handleRecoveryConsume(w http.ResponseWriter, r *http.Request) e
 		return Internal(err)
 	}
 
-	limits := s.recordAttempt(r, tenantID, sub.ID, dims, false)
+	limits := s.settleAttempt(r, tenantID, sub.ID, scope, held, false)
 	assessed := s.assessCodeCeremony(r, tenantID, sub.ID, risk.CeremonyRecoveryCode, limits)
 
 	remaining, err := s.deps.Store.CountUnusedRecoveryCodes(r.Context(), tenantID, sub.ID)

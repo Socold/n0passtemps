@@ -257,7 +257,12 @@ func (s *Server) issueTicket(r *http.Request, caller *Caller, tenantID string, s
 	// authorise and in their lifetime, not in their construction, so a second
 	// implementation of the construction would only be a second place for it to
 	// go wrong.
+	release, err := acquireKDF(ctx)
+	if err != nil {
+		return nil, err
+	}
 	codes, err := recovery.Generate(1)
+	release()
 	if err != nil {
 		return nil, Internal(err)
 	}
@@ -427,6 +432,11 @@ type ticketRegisterCompleteRequest struct {
 	// Credential is the PublicKeyCredential the browser produced, forwarded
 	// verbatim, exactly as on the ordinary completion route.
 	Credential json.RawMessage `json:"credential"`
+
+	// Label names the authenticator, exactly as on the ordinary completion
+	// route. A key enrolled from a helpdesk ticket is the one an operator is
+	// most likely to have to tell apart later.
+	Label string `json:"label,omitempty"`
 }
 
 // handleTicketRegisterBegin starts the one registration a ticket permits.
@@ -458,17 +468,23 @@ func (s *Server) handleTicketRegisterBegin(w http.ResponseWriter, r *http.Reques
 		return err
 	}
 
-	ticket, sub, dims, err := s.resolveTicket(r, caller, tenantID, req.Ticket)
+	ticket, sub, attempt, err := s.resolveTicket(r, caller, tenantID, req.Ticket)
 	if err != nil {
 		return err
 	}
 
 	result, err := s.deps.WebAuthn.BeginRegistration(r.Context(), sub, req.Label)
 	if err != nil {
-		s.recordAttempt(r, tenantID, sub.ID, dims, true)
+		attempt.settle(sub.ID, true)
 		return s.ceremonyError(r, tenantID, sub.ID, caller,
 			audit.EventRegistrationStarted, err)
 	}
+
+	// The ticket verified and the ceremony started, so the reservation is
+	// taken back. That clears the failures counted against this selector, as
+	// any success clears the bucket of the party that succeeded: whoever holds
+	// the real ticket is the party the bucket exists to protect.
+	attempt.settle(sub.ID, false)
 
 	// One entry for this step, in the registration family, with the ticket
 	// named in the detail. A separate enrolment_ticket event here would make
@@ -521,15 +537,15 @@ func (s *Server) handleTicketRegisterComplete(w http.ResponseWriter, r *http.Req
 		return BadRequest("credential is required", nil)
 	}
 
-	ticket, sub, dims, err := s.resolveTicket(r, caller, tenantID, req.Ticket)
+	ticket, sub, attempt, err := s.resolveTicket(r, caller, tenantID, req.Ticket)
 	if err != nil {
 		return err
 	}
 
 	cred, err := s.deps.WebAuthn.CompleteRegistration(r.Context(), sub,
-		req.ChallengeID, req.Credential, "")
+		req.ChallengeID, req.Credential, req.Label)
 	if err != nil {
-		s.recordAttempt(r, tenantID, sub.ID, dims, true)
+		attempt.settle(sub.ID, true)
 		return s.ceremonyError(r, tenantID, sub.ID, caller,
 			audit.EventRegistrationRejected, err)
 	}
@@ -548,13 +564,21 @@ func (s *Server) handleTicketRegisterComplete(w http.ResponseWriter, r *http.Req
 	if err := s.deps.Store.ConsumeEnrolmentTicket(r.Context(), tenantID, ticket.ID, cred.ID, now); err != nil {
 		if errors.Is(err, store.ErrStaleWrite) || errors.Is(err, store.ErrNotFound) {
 			s.undoUnauthorisedEnrolment(r, tenantID, sub.ID, caller, ticket, cred)
-			s.recordAttempt(r, tenantID, sub.ID, dims, true)
+			attempt.settle(sub.ID, true)
 			return CeremonyFailed(errors.New("enrolment ticket was spent concurrently"))
 		}
+		// Any other failure leaves the same credential in place with the same
+		// nothing authorising it: the store did not say the ticket was spent,
+		// so it may or may not be, and a credential that exists on the strength
+		// of a ticket whose fate is unknown is the one outcome single use
+		// cannot tolerate. It is revoked on the same reasoning as above, and
+		// the caller is told the request failed rather than told it succeeded.
+		s.undoUnauthorisedEnrolment(r, tenantID, sub.ID, caller, ticket, cred)
+		attempt.settle(sub.ID, true)
 		return Internal(err)
 	}
 
-	s.recordAttempt(r, tenantID, sub.ID, dims, false)
+	attempt.settle(sub.ID, false)
 
 	s.audited(r, audit.Event{
 		TenantID: tenantID, EventType: audit.EventRegistrationCompleted,
@@ -589,6 +613,10 @@ func (s *Server) handleTicketRegisterComplete(w http.ResponseWriter, r *http.Req
 	return nil
 }
 
+// undoTimeout bounds the revocation that undoes an unauthorised enrolment, now
+// that it no longer ends with the request that caused it.
+const undoTimeout = 5 * time.Second
+
 // undoUnauthorisedEnrolment revokes a credential created against a ticket that
 // turned out to be spent.
 //
@@ -598,7 +626,13 @@ func (s *Server) handleTicketRegisterComplete(w http.ResponseWriter, r *http.Req
 // is why it is logged at error level and audited with the ticket named.
 func (s *Server) undoUnauthorisedEnrolment(r *http.Request, tenantID, subjectID string, caller *Caller,
 	ticket *store.EnrolmentTicket, cred *store.Credential) {
-	ctx := r.Context()
+	// Detached from the request, with a bound of its own. The credential this
+	// removes was created a moment ago on the request's context, so a caller who
+	// hung up in between would otherwise cancel the revocation and keep the
+	// credential: the way to leave an authenticator behind would be to close the
+	// connection at the right moment.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), undoTimeout)
+	defer cancel()
 	reason := "enrolment ticket was already spent"
 
 	if err := s.deps.Store.RevokeCredential(ctx, tenantID, cred.ID, reason, s.now().UTC()); err != nil {
@@ -621,19 +655,27 @@ func (s *Server) undoUnauthorisedEnrolment(r *http.Request, tenantID, subjectID 
 
 // resolveTicket verifies a presented ticket and returns it with its subject.
 //
-// Every failure returns the same coarse refusal, records the attempt against the
-// rate limiter and audits the reason. The order of work matters: the secret is
-// split first, because that is free, then the rate limit is consulted, and only
-// then is the Argon2id evaluation performed. Verifying before checking the limit
-// would hand a locked-out attacker one hash evaluation per request out of the
-// server's own CPU.
+// Every failure returns the same coarse refusal, counts against the rate limiter
+// and audits the reason. The order of work matters: the secret is split first,
+// because that is free, then the attempt is reserved against the rate limit, and
+// only then is the Argon2id evaluation performed. Verifying before consulting
+// the limit would hand a locked-out attacker one hash evaluation per request out
+// of the server's own CPU, and consulting it without counting the attempt would
+// let a parallel burst have every one of its guesses evaluated; see
+// reserveAttempt.
 //
-// The returned dimensions are handed back so the caller records the ceremony's
-// own outcome against the same buckets. Without that, a ceremony that failed
-// after the ticket verified would leave no trace in the limiter, and an attacker
-// holding one valid ticket could hammer the completion route unbounded.
+// The reservation is handed back still open, so the caller settles it with the
+// ceremony's own outcome. Without that, a ceremony that failed after the ticket
+// verified would leave no trace in the limiter. A holder of a valid ticket can
+// still alternate a begin, which succeeds and clears the ticket's bucket, with
+// failing completions; what bounds that is the network dimension, which a
+// success never clears, and the per-key ceiling.
+//
+// The scope carries no factor and no subject. The ticket has a dimension of its
+// own, keyed on the selector, so failures here never spend the budget of any of
+// the subject's factors.
 func (s *Server) resolveTicket(r *http.Request, caller *Caller, tenantID, presented string) (*store.EnrolmentTicket,
-	*store.Subject, map[throttle.Dimension]string, error) {
+	*store.Subject, *ticketAttempt, error) {
 	ctx := r.Context()
 
 	selector, verifier, splitErr := recovery.Split(presented)
@@ -641,23 +683,25 @@ func (s *Server) resolveTicket(r *http.Request, caller *Caller, tenantID, presen
 		defer zeroize.Bytes(verifier)
 	}
 
-	dims := make(map[throttle.Dimension]string, 2)
-	if ip := SourceIPFrom(ctx); ip != "" {
-		dims[throttle.DimIP] = ip
+	scope, err := s.ceremonyThrottleScope(r, "", "")
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	if selector != "" {
 		// Bucketed on what the caller presented, not on the subject the ticket
 		// resolves to, because a guessing campaign consists of selectors that
 		// resolve to nothing at all.
-		dims[throttle.DimEnrolmentTicket] = selector
+		scope.dims[throttle.DimEnrolmentTicket] = selector
 	}
 
-	if err := s.checkThrottle(r, tenantID, dims); err != nil {
-		return nil, nil, dims, err
+	held, err := s.reserveAttempt(r, tenantID, scope)
+	if err != nil {
+		return nil, nil, nil, err
 	}
+	attempt := &ticketAttempt{s: s, r: r, tenantID: tenantID, scope: scope, held: held}
 
 	rejected := func(subjectID, reason string) error {
-		s.recordAttempt(r, tenantID, subjectID, dims, true)
+		attempt.settle(subjectID, true)
 		s.audited(r, audit.Event{
 			TenantID: tenantID, EventType: audit.EventTicketRejected,
 			ActorType: caller.ActorType(), ActorID: caller.ActorID(),
@@ -669,32 +713,38 @@ func (s *Server) resolveTicket(r *http.Request, caller *Caller, tenantID, presen
 	}
 
 	if splitErr != nil {
-		return nil, nil, dims, rejected("", "ticket is malformed")
+		return nil, nil, nil, rejected("", "ticket is malformed")
 	}
 
 	ticket, err := s.deps.Store.GetEnrolmentTicketBySelector(ctx, tenantID, selector)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return nil, nil, dims, rejected("", "selector is unknown")
+			return nil, nil, nil, rejected("", "selector is unknown")
 		}
-		return nil, nil, dims, Internal(err)
+		return nil, nil, nil, Internal(err)
 	}
 
 	// The verifier is compared before the state is examined, so that a spent
 	// ticket and a wrong guess at a live selector cost the same and answer the
 	// same.
+	release, err := acquireKDF(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	ok, err := recovery.Verify(verifier, ticket.VerifierHash)
+	release()
 	if err != nil {
 		// A malformed stored hash is an operational fault, not a failed
-		// attempt, and must not be recorded as one.
-		return nil, nil, dims, Internal(err)
+		// attempt, and is not reported as one. The reservation taken above
+		// does stay counted; see reserveAttempt for why that is accepted.
+		return nil, nil, nil, Internal(err)
 	}
 	if !ok {
-		return nil, nil, dims, rejected("", "verifier did not match")
+		return nil, nil, nil, rejected("", "verifier did not match")
 	}
 
 	if !ticket.Redeemable(s.now().UTC()) {
-		return nil, nil, dims, rejected(ticket.SubjectID,
+		return nil, nil, nil, rejected(ticket.SubjectID,
 			"ticket is expired, already redeemed or revoked")
 	}
 
@@ -703,13 +753,31 @@ func (s *Server) resolveTicket(r *http.Request, caller *Caller, tenantID, presen
 		if errors.Is(err, store.ErrNotFound) {
 			// A subject pending erasure is invisible to every getter, so this
 			// is also the erasure case.
-			return nil, nil, dims, rejected(ticket.SubjectID, "subject is not available")
+			return nil, nil, nil, rejected(ticket.SubjectID, "subject is not available")
 		}
-		return nil, nil, dims, Internal(err)
+		return nil, nil, nil, Internal(err)
 	}
 	if !sub.Active() {
-		return nil, nil, dims, rejected(sub.ID, "subject status is "+string(sub.Status))
+		return nil, nil, nil, rejected(sub.ID, "subject status is "+string(sub.Status))
 	}
 
-	return ticket, sub, dims, nil
+	return ticket, sub, attempt, nil
+}
+
+// ticketAttempt is a redemption attempt whose outcome is not known yet.
+//
+// resolveTicket reserves it and the handler settles it, so it carries what
+// settleAttempt needs from the first to the second.
+type ticketAttempt struct {
+	s        *Server
+	r        *http.Request
+	tenantID string
+	scope    throttleScope
+	held     *throttle.Reservation
+}
+
+// settle reports the outcome. subjectID is empty when the attempt failed before
+// the ticket resolved to anybody.
+func (a *ticketAttempt) settle(subjectID string, failure bool) {
+	a.s.settleAttempt(a.r, a.tenantID, subjectID, a.scope, a.held, failure)
 }

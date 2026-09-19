@@ -27,7 +27,7 @@ func TestAlertFromARequestReachesTheStore(t *testing.T) {
 	h := newHarness(t, func(c *config.Config) {
 		c.Throttle.MaxFailuresPerSubject = 3
 		c.Throttle.MaxFailuresPerIP = 100
-		c.Throttle.LockoutDuration = config.Duration{Duration: 10 * time.Minute}
+		c.Throttle.LockoutDuration = config.Duration{Duration: 15 * time.Minute}
 	})
 
 	subjectID := newSubject(t, h, "user-1")
@@ -68,7 +68,10 @@ func TestRepeatedConditionAccumulatesOnOneRow(t *testing.T) {
 	h := newHarness(t, func(c *config.Config) {
 		c.Throttle.MaxFailuresPerSubject = 3
 		c.Throttle.MaxFailuresPerIP = 100
-		c.Throttle.LockoutDuration = config.Duration{Duration: time.Minute}
+		// Equal to the window. The validator refuses a shorter lockout, which
+		// would be reapplied by the first attempt after it without any new
+		// failure having been evaluated.
+		c.Throttle.LockoutDuration = config.Duration{Duration: 15 * time.Minute}
 	})
 
 	newSubject(t, h, "user-1")
@@ -81,7 +84,7 @@ func TestRepeatedConditionAccumulatesOnOneRow(t *testing.T) {
 			h.do(http.MethodPost, "/v1/recovery/user-1/consume", h.apiKey,
 				map[string]any{"code": "AAAAA-BBBBB-CCCCC-DDDDD"})
 		}
-		h.clock.add(2 * time.Minute)
+		h.clock.add(16 * time.Minute)
 	}
 
 	raised := listAlerts(t, h.store, store.AlertFilter{})

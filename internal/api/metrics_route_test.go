@@ -100,7 +100,7 @@ func TestMetricsSaysSoWhenItIsNotConfigured(t *testing.T) {
 	ts := httptest.NewServer(srv.Routes())
 	defer ts.Close()
 
-	req, err := http.NewRequest(http.MethodGet, ts.URL+"/v1/metrics", nil)
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/v1/metrics", http.NoBody)
 	if err != nil {
 		t.Fatal(err)
 	}
