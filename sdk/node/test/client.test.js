@@ -589,6 +589,42 @@ describe("transport", () => {
   });
 });
 
+describe("the end user's address", () => {
+  it("is declared on every call of the view, and on none of the client it came from", async () => {
+    const client = newClient({ timeoutMs: 2500 });
+    const view = client.forEndUser(" 203.0.113.50 ");
+
+    await view.verifyTotp("u1", "123456");
+    await view.beginDiscoverableAssertion();
+    await client.verifyTotp("u1", "123456");
+
+    assert.equal(seen[0].headers["x-end-user-ip"], "203.0.113.50");
+    assert.equal(seen[1].headers["x-end-user-ip"], "203.0.113.50");
+    assert.equal(seen[2].headers["x-end-user-ip"], undefined);
+    // The view is the same client in every other respect.
+    assert.equal(seen[0].headers.authorization, `Bearer ${API_KEY}`);
+    assert.deepEqual(view.toJSON(), client.toJSON());
+  });
+
+  it("accepts IPv6", async () => {
+    await newClient().forEndUser("2001:db8::1").verifyTotp("u1", "123456");
+    assert.equal(seen[0].headers["x-end-user-ip"], "2001:db8::1");
+  });
+
+  it("refuses what the service would refuse, without quoting it", () => {
+    for (const ip of ["unknown", "203.0.113.50:443", "203.0.113.0/24", "fe80::1%eth0", "", undefined, 42]) {
+      assert.throws(
+        () => newClient().forEndUser(ip),
+        (error) => {
+          assert.ok(error instanceof TypeError);
+          assert.ok(typeof ip !== "string" || ip === "" || !error.message.includes(ip));
+          return true;
+        },
+      );
+    }
+  });
+});
+
 describe("the API key stays private", () => {
   function assertClean(text, where) {
     assert.ok(!text.includes(API_KEY), `${where} leaked the key`);

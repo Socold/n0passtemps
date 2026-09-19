@@ -123,6 +123,21 @@ Responses are capped at 1 MiB, the default timeout is 10 seconds, and nothing
 is retried: several routes consume single-use material (a challenge, a TOTP
 step, a recovery code), so whether a repeat is safe is your decision.
 
+### Say whose browser it is
+
+Every call reaches the service from your backend, so its per-address rate limit
+and network risk signal have nothing to work from unless you declare the end
+user's address. `client.for_end_user(ip)` returns a client that sends it as
+`X-End-User-IP` on every call; create one per incoming request:
+
+```python
+auth = client.for_end_user(request.remote_addr)
+result = auth.verify_totp(subject_ref, code)
+```
+
+Without it the service applies no per-address limit to the call; the limits per
+subject and per key still hold.
+
 ## Verifying the assertion
 
 `result.assertion` is a compact JWS signed with Ed25519. Verifying it means

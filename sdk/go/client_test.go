@@ -596,3 +596,92 @@ func TestBackoff(t *testing.T) {
 		}
 	}
 }
+
+// TestEndUserIPIsDeclaredWhenTheCallerGivesIt checks the header the server's
+// per-address limit works from.
+//
+// Every call reaches the server from the application's backend, so the only
+// way it learns whose browser is on the other end is for the application to
+// say so.
+func TestEndUserIPIsDeclaredWhenTheCallerGivesIt(t *testing.T) {
+	var got atomic.Pointer[[]string]
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		values := r.Header.Values(EndUserIPHeader)
+		got.Store(&values)
+		_, _ = io.WriteString(w, assertionJSON)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(srv.URL, testAPIKey)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		ip   string
+		want []string
+	}{
+		{"an IPv4 address", "203.0.113.50", []string{"203.0.113.50"}},
+		{"an IPv6 address", "2001:db8::1", []string{"2001:db8::1"}},
+		{"what http.Request.RemoteAddr holds", "203.0.113.50:51234", []string{"203.0.113.50"}},
+		{"a bracketed IPv6 host and port", "[2001:db8::1]:51234", []string{"2001:db8::1"}},
+		{"an IPv4-mapped address", "::ffff:203.0.113.50", []string{"203.0.113.50"}},
+		{"nothing", "", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got.Store(nil)
+			ctx := WithEndUserIP(context.Background(), tc.ip)
+			if _, err := c.VerifyTOTP(ctx, "user-1", "123456"); err != nil {
+				t.Fatalf("VerifyTOTP: %v", err)
+			}
+			seen := got.Load()
+			if seen == nil {
+				t.Fatal("the server was not called")
+			}
+			if strings.Join(*seen, "|") != strings.Join(tc.want, "|") {
+				t.Errorf("%s = %q, want %q", EndUserIPHeader, *seen, tc.want)
+			}
+		})
+	}
+
+	t.Run("no address in the context", func(t *testing.T) {
+		got.Store(nil)
+		if _, err := c.VerifyTOTP(context.Background(), "user-1", "123456"); err != nil {
+			t.Fatalf("VerifyTOTP: %v", err)
+		}
+		if seen := got.Load(); seen == nil || len(*seen) != 0 {
+			t.Errorf("%s was sent although nothing was declared", EndUserIPHeader)
+		}
+	})
+
+	t.Run("the anonymous probe never carries it", func(t *testing.T) {
+		got.Store(nil)
+		// The decoded body is irrelevant here; only the request is.
+		_, _ = c.Health(WithEndUserIP(context.Background(), "203.0.113.50"))
+		if seen := got.Load(); seen == nil || len(*seen) != 0 {
+			t.Errorf("%s was sent on a call that carries no API key", EndUserIPHeader)
+		}
+	})
+}
+
+// TestAnUnusableEndUserIPFailsBeforeAnythingIsSent checks that a value the
+// server would refuse never leaves the process, and never reaches an error
+// string either.
+func TestAnUnusableEndUserIPFailsBeforeAnythingIsSent(t *testing.T) {
+	s := &stub{status: http.StatusOK, body: assertionJSON}
+	c := newStubClient(t, s)
+
+	for _, ip := range []string{"unknown", "example.org", "203.0.113.0/24", "fe80::1%eth0", "0.0.0.0"} {
+		_, err := c.VerifyTOTP(WithEndUserIP(context.Background(), ip), "user-1", "123456")
+		if err == nil {
+			t.Errorf("%q was accepted", ip)
+			continue
+		}
+		if strings.Contains(err.Error(), ip) {
+			t.Errorf("the error quotes the value it refused: %v", err)
+		}
+	}
+	if n := s.hits.Load(); n != 0 {
+		t.Errorf("%d requests were sent with an address the server would refuse", n)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -216,6 +217,59 @@ func isLoopback(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// EndUserIPHeader is the header the end user's address is declared in.
+const EndUserIPHeader = "X-End-User-IP"
+
+// endUserIPKey is the context key WithEndUserIP stores the address under.
+type endUserIPKey struct{}
+
+// WithEndUserIP declares the address of the end user a call is made for.
+//
+// The server sees every call arrive from the address of the application's
+// backend, which says nothing about who is signing in, so its per-address rate
+// limit and its network risk signal work from the address declared here. Pass
+// the address the application itself observed for the user's browser, on every
+// ceremony call. Without it the server applies no per-address limit to the
+// call, and the limits per subject and per key still hold.
+//
+// The address travels in the context because it is a property of the incoming
+// request an application is serving, like the deadline, and an application
+// typically sets it once in the middleware that knows the client address:
+//
+//	ctx = n0passtemps.WithEndUserIP(ctx, clientIP)
+//	result, err := client.VerifyTOTP(ctx, subjectRef, code)
+//
+// ip is an IPv4 or IPv6 address. A host:port pair, which is what
+// http.Request.RemoteAddr holds, is accepted and the port dropped. An empty
+// string declares nothing. Anything else makes the call fail before a request
+// is sent, since the server would refuse it with a 400 anyway.
+func WithEndUserIP(ctx context.Context, ip string) context.Context {
+	return context.WithValue(ctx, endUserIPKey{}, ip)
+}
+
+// endUserIP returns the declared address in the form the server accepts, or
+// the empty string when none was declared.
+func endUserIP(ctx context.Context) (string, error) {
+	raw, _ := ctx.Value(endUserIPKey{}).(string)
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	addr, err := netip.ParseAddr(raw)
+	if err != nil {
+		var hostPort netip.AddrPort
+		if hostPort, err = netip.ParseAddrPort(raw); err == nil {
+			addr = hostPort.Addr()
+		}
+	}
+	if err != nil || addr.Zone() != "" || addr.IsUnspecified() {
+		// The value is not quoted. It came from the application's own request
+		// handling and may be the one thing about the user it does not log.
+		return "", errors.New("the end user address given to WithEndUserIP is not an IP address")
+	}
+	return addr.Unmap().String(), nil
+}
+
 // call describes one request.
 type call struct {
 	method string
@@ -347,6 +401,17 @@ func (c *Client) attempt(ctx context.Context, cl call, payload []byte) error {
 	}
 	if !cl.anonymous {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+		// Only next to the key. The header means something because an
+		// authenticated caller states it, and the anonymous probe has no use
+		// for it.
+		endUser, addrErr := endUserIP(ctx)
+		if addrErr != nil {
+			return fmt.Errorf("n0passtemps: %s %s: %w", cl.method, cl.route, addrErr)
+		}
+		if endUser != "" {
+			req.Header.Set(EndUserIPHeader, endUser)
+		}
 	}
 
 	resp, err := c.http.Do(req)

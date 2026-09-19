@@ -596,6 +596,38 @@ class TransportFailureTests(unittest.TestCase):
         self.assertEqual(len(server.requests), 1)
 
 
+class EndUserAddressTests(ServerCase):
+    """The header the service's per-address limit works from."""
+
+    def test_the_view_declares_it_and_the_original_client_does_not(self) -> None:
+        self.server.reply = json_reply(200, ASSERTION)
+        view = self.client.for_end_user(" 203.0.113.50 ")
+
+        view.verify_totp("u1", "123456")
+        self.client.verify_totp("u1", "123456")
+
+        declared, silent = self.server.requests
+        self.assertEqual(declared.headers.get("x-end-user-ip"), "203.0.113.50")
+        self.assertNotIn("x-end-user-ip", silent.headers)
+        # The view is the same client in every other respect.
+        self.assertEqual(declared.headers["authorization"], silent.headers["authorization"])
+        self.assertEqual(view.base_url, self.client.base_url)
+
+    def test_ipv6_is_sent_in_its_canonical_form(self) -> None:
+        self.server.reply = json_reply(200, ASSERTION)
+        self.client.for_end_user("2001:DB8:0:0::1").verify_totp("u1", "123456")
+        self.assertEqual(self.server.requests[0].headers.get("x-end-user-ip"), "2001:db8::1")
+
+    def test_what_the_service_would_refuse_is_refused_without_being_quoted(self) -> None:
+        for ip in ("unknown", "203.0.113.50:443", "203.0.113.0/24", "fe80::1%eth0", "", None, 42):
+            with self.subTest(ip=ip):
+                with self.assertRaises(ConfigurationError) as raised:
+                    self.client.for_end_user(ip)  # type: ignore[arg-type]
+                if isinstance(ip, str) and ip:
+                    self.assertNotIn(ip, str(raised.exception))
+        self.assertEqual(self.server.requests, [])
+
+
 class KeyHygieneTests(ServerCase):
     def test_repr_and_str_show_the_base_url_only(self) -> None:
         for text in (repr(self.client), str(self.client), format(self.client)):

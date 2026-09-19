@@ -156,6 +156,22 @@ An authentication failure and a 429 always go straight back to you.
 Responses are read up to 1 MiB and refused beyond that with
 `ErrResponseTooLarge`.
 
+**Say whose browser it is.** Every call reaches the server from your backend,
+so the server cannot see the end user's address, and its per-address rate limit
+and network risk signal have nothing to work from unless you declare it. Put
+the client address your application observed into the context, once, in the
+middleware that knows it:
+
+```go
+ctx = n0passtemps.WithEndUserIP(ctx, clientIP) // an address, or RemoteAddr's host:port
+result, err := client.VerifyTOTP(ctx, subjectRef, code)
+```
+
+It is sent as `X-End-User-IP` on every call made with that context. Without it
+the server applies no per-address limit to the call; the limits per subject and
+per key still hold. A value that is not an IP address fails the call before
+anything is sent.
+
 ## Verifying an assertion
 
 `VerifyTOTP`, `CompleteAssertion` and `ConsumeRecoveryCode` return an

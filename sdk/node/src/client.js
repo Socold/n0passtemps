@@ -5,6 +5,8 @@
 // would be one more place for a field to be dropped, and the WebAuthn payloads
 // in particular must reach the browser and come back byte for byte.
 
+import { isIP } from "node:net";
+
 import { TransportError, apiErrorFromProblem } from "./errors.js";
 import {
   MAX_RESPONSE_BYTES,
@@ -49,6 +51,8 @@ export class Client {
   #basePath;
   #timeoutMs;
   #fetch;
+  // Set only on the view forEndUser returns.
+  #endUserIp;
 
   /**
    * @param {object} options
@@ -102,6 +106,46 @@ export class Client {
   /** Budget for one call in milliseconds. */
   get timeoutMs() {
     return this.#timeoutMs;
+  }
+
+  /**
+   * A client that declares `ip` as the end user's address on every call, in
+   * the `X-End-User-IP` header.
+   *
+   * The service sees every call arrive from the application's backend, which
+   * says nothing about who is signing in, so its per-address rate limit and its
+   * network risk signal work from the address declared here. Without it the
+   * service applies no per-address limit to the call. Pass the address the
+   * application observed for the user's browser, once per incoming request:
+   *
+   *     const auth = client.forEndUser(req.socket.remoteAddress);
+   *     const result = await auth.verifyTotp(subjectRef, code);
+   *
+   * The view shares the settings of the client it came from and is as cheap to
+   * create as an object. The original client is not changed.
+   *
+   * @param {string} ip An IPv4 or IPv6 address, with no port and no zone.
+   * @returns {Client}
+   */
+  forEndUser(ip) {
+    // Refused here because the service would refuse it with a 400 anyway, and
+    // not quoted: it may be the one thing about the user the application does
+    // not log.
+    // isIP accepts a zone, which the service does not: a zone names an
+    // interface of the host that saw the packet and means nothing elsewhere.
+    if (typeof ip !== "string" || isIP(ip.trim()) === 0 || ip.includes("%")) {
+      throw new TypeError("ip must be an IPv4 or IPv6 address, with no port and no zone");
+    }
+    const view = new Client({
+      baseUrl: this.baseUrl,
+      apiKey: this.#apiKey,
+      timeoutMs: this.#timeoutMs,
+      // The base URL passed the transport rule when this client was built.
+      allowInsecureTransport: true,
+      fetch: this.#fetch,
+    });
+    view.#endUserIp = ip.trim();
+    return view;
   }
 
   /**
@@ -390,6 +434,9 @@ export class Client {
       "Content-Type": "application/json",
       Authorization: `Bearer ${this.#apiKey}`,
     };
+    if (this.#endUserIp !== undefined) {
+      headers["X-End-User-IP"] = this.#endUserIp;
+    }
 
     let response;
     let text;

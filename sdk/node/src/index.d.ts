@@ -173,6 +173,11 @@ export class Client {
   readonly timeoutMs: number;
   /** Omits the API key. */
   toJSON(): { baseUrl: string; timeoutMs: number };
+  /**
+   * A client that declares `ip` as the end user's address on every call, which
+   * is what the service's per-address rate limit works from.
+   */
+  forEndUser(ip: string): Client;
 
   resolveSubject(subjectRef: string, options?: { displayName?: string }): Promise<SubjectSummary>;
   getSubject(subjectRef: string): Promise<SubjectSummary>;

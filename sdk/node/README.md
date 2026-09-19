@@ -270,6 +270,14 @@ What the client does on every call, and why:
   not.
 - **`Content-Type: application/json` always**, because the service answers 415
   to a write without it, even one that takes no body.
+- **Say whose browser it is.** Every call reaches the service from your
+  backend, so its per-address rate limit and network risk signal have nothing
+  to work from unless you declare the end user's address.
+  `client.forEndUser(ip)` returns a client that sends it as `X-End-User-IP` on
+  every call; create one per incoming request, for example
+  `client.forEndUser(req.socket.remoteAddress)`. Without it the service applies
+  no per-address limit to the call; the limits per subject and per key still
+  hold.
 
 The subject reference is percent-encoded into the path, so `/`, `@`, spaces and
 `?` are safe. `"."` and `".."` are refused: no URL can carry them as a path

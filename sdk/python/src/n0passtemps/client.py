@@ -8,6 +8,7 @@ assertion.py.
 
 from __future__ import annotations
 
+import copy
 import datetime as _dt
 import email.utils
 import http.client
@@ -440,10 +441,45 @@ class Client:
         self._timeout = float(timeout)
         self._user_agent = user_agent
         self._opener = _build_opener(ca_file)
+        # Set only on the view for_end_user returns.
+        self._end_user_ip: Optional[str] = None
 
     @property
     def base_url(self) -> str:
         return self._base_url
+
+    def for_end_user(self, ip: str) -> "Client":
+        """Return a client that declares ``ip`` as the end user's address.
+
+        The service sees every call arrive from the application's backend,
+        which says nothing about who is signing in, so its per-address rate
+        limit and its network risk signal work from the address declared here,
+        in the ``X-End-User-IP`` header. Without it the service applies no
+        per-address limit to the call. Pass the address the application
+        observed for the user's browser, once per incoming request::
+
+            auth = client.for_end_user(request.remote_addr)
+            result = auth.verify_totp(subject_ref, code)
+
+        The view shares the connection settings of the client it came from,
+        and the original client is not changed.
+        """
+        # Refused here because the service would refuse it with a 400 anyway,
+        # and not quoted: it may be the one thing about the user the
+        # application does not log. A zone is refused with the rest, since it
+        # names an interface of the host that saw the packet and means nothing
+        # anywhere else.
+        try:
+            if not isinstance(ip, str) or "%" in ip:
+                raise ValueError
+            address = ipaddress.ip_address(ip.strip())
+        except ValueError:
+            raise ConfigurationError(
+                "ip must be an IPv4 or IPv6 address, with no port and no zone"
+            ) from None
+        view = copy.copy(self)
+        view._end_user_ip = str(address)
+        return view
 
     def __repr__(self) -> str:
         # The base URL only. A client object ends up in logs, tracebacks and
@@ -478,6 +514,8 @@ class Client:
             "Content-Type": "application/json",
             "User-Agent": self._user_agent,
         }
+        if self._end_user_ip is not None:
+            headers["X-End-User-IP"] = self._end_user_ip
         request = urllib.request.Request(
             self._base_url + path, data=data, headers=headers, method=method
         )
