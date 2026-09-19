@@ -36,11 +36,33 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    # Port 8080 only, so the probes and the API are reachable and nothing else
-    # is. Narrow this "from" to the namespace running the ingress controller:
-    # namespaceSelector: {} currently admits any pod in the cluster.
+    # Port 8080 only, and only from the namespace the ingress controller runs
+    # in. The server speaks plain HTTP here (see allow_plaintext in
+    # configmap.yaml), so this rule is the whole answer to "who can reach the
+    # port": an empty namespaceSelector would admit every pod in the cluster,
+    # and any compromised workload could then talk to the credential store in
+    # clear text, around the ingress and around its TLS.
+    #
+    # The selector matches a label this project defines, and no namespace
+    # carries it until an operator sets it, so the policy admits nobody as
+    # shipped. Label the namespace of the ingress controller once:
+    #
+    #   kubectl label namespace ingress-nginx n0passtemps/ingress=true
+    #
+    # A label set by hand is preferred to kubernetes.io/metadata.name because
+    # the name of that namespace differs from one cluster to the next, and a
+    # wrong guess here should fail closed rather than match something else.
+    # Anyone allowed to label namespaces can open this path, which is a cluster
+    # administration right already. To narrow further, add a podSelector for
+    # the controller's pods beside the namespaceSelector, in the same list
+    # item; as a separate item it would be a second, wider rule.
+    #
+    # The kubelet probes are not affected: traffic from the node a pod runs on
+    # is allowed whatever the policy says.
     - from:
-        - namespaceSelector: {}
+        - namespaceSelector:
+            matchLabels:
+              n0passtemps/ingress: "true"
       ports:
         - protocol: TCP
           port: 8080

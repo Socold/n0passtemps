@@ -1,11 +1,17 @@
 # syntax=docker/dockerfile:1.7
 
-# Pinned by minor so a patch release of the toolchain is picked up without a
-# repository change. A release pipeline should pin the digest instead
-# (golang:1.27-alpine@sha256:...) so the image cannot change under a fixed tag.
-ARG GO_IMAGE=golang:1.27-alpine
-
-FROM ${GO_IMAGE} AS builder
+# Both base images are pinned by digest. A tag is a moving reference: whoever
+# controls the upstream repository can repoint golang:1.27-alpine at different
+# content, and a build from an unchanged commit would pick it up without a line
+# of this repository changing. The tag is kept beside the digest for the reader;
+# the digest is what the builder resolves. Both digests name the multi-platform
+# index, so linux/amd64 and linux/arm64 resolve from the same line.
+#
+# The references are written out in the FROM lines rather than passed through
+# an ARG because Dependabot reads FROM lines only. It is what moves these pins
+# (the docker entry in .github/dependabot.yml), and with them the patch releases
+# of the toolchain, so a pin it could not see would simply go stale.
+FROM golang:1.27-alpine@sha256:4cb7ac979db5fcc41cae44b2227ba5ab8a51e8807f40d9ba4dee20a0ad960b5b AS builder
 
 WORKDIR /src
 
@@ -58,7 +64,7 @@ RUN mkdir -p /data/lib /data/etc/kek \
  && chown -R 65532:65532 /data
 
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 
 ARG VERSION=dev
 ARG REVISION=unknown
@@ -88,10 +94,23 @@ COPY --from=builder --chown=65532:65532 /data/etc /etc/n0passtemps
 # keyring that resolves inside a configured data directory, because a key stored
 # on the same volume as the ciphertext it protects is no protection at all once
 # that volume is copied. Mount it from a separate volume or secret, mode 0600.
+#
+# The server binds every interface of the container's network namespace, since
+# loopback inside a container is reachable by nothing. It speaks plain HTTP, and
+# the configuration validator refuses plain HTTP on a non-loopback address
+# unless server.allow_plaintext is set. The image deliberately does not set it.
+# The flag is the operator's statement that something outside the process
+# bounds who can reach the port, and an image cannot know that: baked in here it
+# would disarm the check for every "docker run -p 8080:8080", which publishes
+# the port on all host interfaces. It belongs next to the thing that does the
+# bounding, which is where the files under deploy/ put it: beside the loopback
+# publish rule in the compose files, beside the NetworkPolicy in the Kubernetes
+# ConfigMap. A bare "docker run" therefore stops at startup with the
+# validator's message until the operator passes
+# -e N0PASSTEMPS_SERVER_ALLOW_PLAINTEXT=true, which is the point.
 ENV N0PASSTEMPS_DATABASE_DATA_DIR=/var/lib/n0passtemps \
     N0PASSTEMPS_KEK_PATH=/etc/n0passtemps/kek/keyring.json \
-    N0PASSTEMPS_SERVER_ADDR=0.0.0.0:8080 \
-    N0PASSTEMPS_SERVER_ALLOW_PLAINTEXT=true
+    N0PASSTEMPS_SERVER_ADDR=0.0.0.0:8080
 
 # Only the database and its write-ahead log live here. Everything else the
 # process touches is either read-only or a runtime tmpfs, so the root filesystem

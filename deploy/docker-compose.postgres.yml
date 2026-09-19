@@ -141,9 +141,16 @@ services:
     # against GET /v1/health, by the reverse proxy or the monitoring system.
 
   db:
-    # Pinned to a minor release: a major upgrade of PostgreSQL needs a data
-    # directory migration and must never happen on a restart.
-    image: postgres:16-alpine
+    # Pinned to a major release: a major upgrade of PostgreSQL needs a data
+    # directory migration and must never happen on a restart. Pinned by digest
+    # as well, because the tag alone is a moving reference: upstream rebuilds
+    # 16-alpine for every minor and every base refresh, and a "pull" would
+    # otherwise put content nobody here has looked at in front of the credential
+    # store. The digest names the multi-platform index, so it resolves on amd64
+    # and arm64 alike. Dependabot moves it (the docker-compose entry in
+    # .github/dependabot.yml); take a PostgreSQL minor by merging that pull
+    # request, not by editing the tag.
+    image: postgres:16-alpine@sha256:3c5c8892d184f738f4fe282d14ddaa613a38f00f4189d2d94725ebe6f2909ddb
     container_name: n0passtemps-db
 
     # No literal credentials. The required-variable syntax fails the command

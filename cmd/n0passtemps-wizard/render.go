@@ -32,18 +32,30 @@ func renderConfig(a answers) string {
 	fmt.Fprintf(&b, "[tenant]\nid = \"default\"\nname = %q\n\n", a.TenantName)
 
 	fmt.Fprintf(&b, "[server]\naddr = %q\n", a.Addr)
-	if !strings.HasPrefix(a.Addr, "127.0.0.1") && !strings.HasPrefix(a.Addr, "localhost") {
+
+	// The three arrangements askExposure offers. They are written out rather
+	// than left commented, because a commented setting is a file the service
+	// refuses, and this tool used to emit exactly that for any listener the
+	// operator did not put on loopback.
+	switch a.Exposure {
+	case "tls":
+		b.WriteString("\n# This process terminates TLS.\n")
+		fmt.Fprintf(&b, "tls_cert_file = %q\ntls_key_file = %q\n", a.TLSCert, a.TLSKey)
+	case "proxy":
 		b.WriteString("\n" +
-			"# This listener is not loopback, so TLS has to be accounted for. Either set\n" +
-			"# the two paths below, or declare the reverse proxy that terminates it.\n" +
-			"# tls_cert_file = \"/etc/n0passtemps/tls/fullchain.pem\"\n" +
-			"# tls_key_file  = \"/etc/n0passtemps/tls/privkey.pem\"\n" +
-			"#\n" +
-			"# trust_proxy must be accompanied by the networks the proxy speaks from.\n" +
-			"# Accepting a forwarded client address from anywhere lets a caller choose\n" +
-			"# the address rate limiting and audit entries are keyed on.\n" +
-			"# trust_proxy = true\n" +
-			"# trusted_proxy_cidrs = [\"10.0.0.0/8\"]\n")
+			"# A reverse proxy in front terminates TLS. The networks it speaks from are\n" +
+			"# required: accepting a forwarded client address from anywhere lets a caller\n" +
+			"# choose the address rate limiting and audit entries are keyed on.\n" +
+			"trust_proxy = true\n")
+		fmt.Fprintf(&b, "trusted_proxy_cidrs = [%s]\n", quoteList(splitCIDRs(a.ProxyCIDRs)))
+	case "constrained":
+		b.WriteString("\n" +
+			"# Nothing here terminates TLS. This is only correct because something\n" +
+			"# outside the process constrains who can reach the port: the generated\n" +
+			"# compose file publishes it to 127.0.0.1, so the listener is reachable from\n" +
+			"# this host and not from the network. Publishing it more widely without\n" +
+			"# putting TLS in front sends every credential across in clear.\n" +
+			"allow_plaintext = true\n")
 	}
 	b.WriteString("\n")
 
@@ -76,10 +88,10 @@ func renderConfig(a answers) string {
 		a.RPID, a.TenantName, a.Origin)
 
 	fmt.Fprintf(&b, "[admin]\nui_enabled = %t\n", a.AdminUI)
-	if a.AdminUI && !strings.HasPrefix(a.Addr, "127.0.0.1") {
-		b.WriteString("# The interface is reachable from every network that can reach the\n" +
-			"# service unless this list is set.\n" +
-			"# ip_allow_list = [\"10.0.0.0/8\"]\n")
+	if a.AdminAllowList != "" {
+		b.WriteString("# The administrative routes would be reachable from every network that can\n" +
+			"# reach the service without this list, with or without the console.\n")
+		fmt.Fprintf(&b, "ip_allow_list = [%s]\n", quoteList(splitCIDRs(a.AdminAllowList)))
 	}
 	b.WriteString("\n")
 
@@ -92,6 +104,18 @@ func renderConfig(a answers) string {
 	}
 	return b.String()
 }
+
+// postgresImage is the database image the generated compose file runs, tag and
+// digest together.
+//
+// It is the same reference as deploy/docker-compose.postgres.yml, and the two
+// are meant to move together: a wizard that generated a floating tag would hand
+// a new operator a deployment less pinned than the one in the repository, which
+// is the opposite of what a starting point should be. Dependabot moves the copy
+// in deploy/ through the docker-compose entry in .github/dependabot.yml; this
+// one is updated in the same change.
+const postgresImage = "postgres:16-alpine@sha256:" +
+	"3c5c8892d184f738f4fe282d14ddaa613a38f00f4189d2d94725ebe6f2909ddb"
 
 // renderCompose produces docker-compose.yml.
 //
@@ -151,7 +175,13 @@ func renderCompose(a answers) string {
 			"        condition: service_healthy\n" +
 			"\n" +
 			"  postgres:\n" +
-			"    image: postgres:16-alpine\n" +
+			"    # Pinned by digest as well as by tag, as deploy/docker-compose.postgres.yml\n" +
+			"    # is: upstream rebuilds 16-alpine for every minor and every base refresh, so\n" +
+			"    # the tag alone would put content nobody has looked at in front of the\n" +
+			"    # credential store on the next pull. The digest names the multi-platform\n" +
+			"    # index, so it resolves on amd64 and arm64 alike. Take a PostgreSQL minor\n" +
+			"    # deliberately, by replacing both halves together.\n" +
+			"    image: " + postgresImage + "\n" +
 			"    restart: unless-stopped\n" +
 			"    environment:\n" +
 			"      POSTGRES_DB: n0passtemps\n" +
@@ -203,4 +233,13 @@ func renderEnv(a answers) string {
 		"# reverse proxy in front terminates TLS.\n" +
 		"N0PASSTEMPS_PUBLISH=127.0.0.1:8080\n\n")
 	return b.String()
+}
+
+// quoteList renders a TOML array of strings.
+func quoteList(items []string) string {
+	quoted := make([]string, 0, len(items))
+	for _, it := range items {
+		quoted = append(quoted, fmt.Sprintf("%q", it))
+	}
+	return strings.Join(quoted, ", ")
 }

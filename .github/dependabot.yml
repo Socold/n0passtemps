@@ -22,7 +22,7 @@ updates:
       # is what leaves every major update in its own pull request, which it
       # needs: a Go major is a new module path and an API break, so it comes
       # with code changes that cannot ride along with a patch bump.
-      - group-name: go-patch-and-minor
+      go-patch-and-minor:
         applies-to: version-updates
         patterns:
           - "*"
@@ -47,13 +47,51 @@ updates:
       # Same split as above. Every action in the three workflows is pinned to a
       # commit SHA, so these pull requests are what moves the pin and records
       # the new release in the trailing comment.
-      - group-name: actions-patch-and-minor
+      actions-patch-and-minor:
         applies-to: version-updates
         patterns:
           - "*"
         update-types:
           - patch
           - minor
+
+  # The base images in deploy/Dockerfile are pinned by digest, which is only
+  # half of a policy: a digest nobody moves is a toolchain and a base layer that
+  # stop receiving fixes. These pull requests are the other half. Dependabot
+  # reads literal FROM lines only, which is why the Dockerfile does not pass its
+  # base images through an ARG. No group: there are two images, and a toolchain
+  # bump and a runtime base bump are separate decisions.
+  - package-ecosystem: docker
+    directory: "/deploy"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Paris
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: build
+    labels:
+      - dependencies
+      - docker
+
+  # The PostgreSQL image in deploy/docker-compose.postgres.yml, pinned by digest
+  # for the same reason. A major version never arrives this way unreviewed: it
+  # is a pull request like any other, and it needs a data directory migration
+  # before it can be merged.
+  - package-ecosystem: docker-compose
+    directory: "/deploy"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Paris
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: build
+    labels:
+      - dependencies
+      - docker
 
 # Nothing above groups security updates, and nothing should. Dependabot raises
 # them separately from version updates whatever the schedule says, and they

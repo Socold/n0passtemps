@@ -27,6 +27,14 @@ data:
     # constrained by the Service and the NetworkPolicy, not by this address,
     # which the binary cannot see, so allow_plaintext acknowledges that TLS is
     # terminated in front rather than here.
+    #
+    # The container image does not set this flag, on purpose: it is a
+    # statement about the surroundings, and it is only true here because
+    # service.yaml is ClusterIP and networkpolicy.yaml admits the ingress
+    # controller's namespace and nothing else. On a cluster whose CNI does not
+    # enforce NetworkPolicy, or with that policy widened, the statement is
+    # false and the server is serving credentials in clear text to every pod.
+    # Remove the line if TLS is ever terminated in the pod itself.
     addr = "0.0.0.0:8080"
     allow_plaintext = true
 
@@ -72,7 +80,17 @@ data:
     # The administration surface is reachable from every network that can reach
     # the Service unless this is set. The check runs before authentication, so
     # a caller outside the list cannot present a token at all.
-    ip_allow_list = ["10.0.0.0/8"]
+    #
+    # REPLACE THIS VALUE. 192.0.2.0/24 is the documentation range of RFC 5737:
+    # no real host has an address in it, so as shipped the administration
+    # surface answers nobody. That is deliberate. A wide private range such as
+    # 10.0.0.0/8 looks like a restriction and is not one in a cluster, where it
+    # usually covers the whole pod network; and behind an ingress without
+    # trust_proxy every request arrives from the controller's pod address, so
+    # such a range admits the entire internet through the ingress. Set
+    # trust_proxy and trusted_proxy_cidrs above first, then list the networks
+    # the administrators really connect from, as narrowly as they are known.
+    ip_allow_list = ["192.0.2.0/24"]
 
     [logging]
     level = "info"

@@ -34,8 +34,10 @@ spec:
         # The uid baked into gcr.io/distroless/static-debian12:nonroot.
         runAsUser: 65532
         runAsGroup: 65532
-        # Applied to the secret and emptyDir mounts so the process can read the
-        # keyring without any file being world readable.
+        # Applied to the secret and emptyDir mounts. A Secret volume is written
+        # by the kubelet as root, so without fsGroup uid 65532 could not read
+        # the key files at all. With it the kubelet also widens their mode; see
+        # the note on the kek volume below before relying on this.
         fsGroup: 65532
         seccompProfile:
           # Blocks the system calls no ordinary workload needs, which removes a
@@ -160,8 +162,27 @@ spec:
         - name: kek
           secret:
             secretName: n0passtemps-secrets
-            # Read-only for the owning uid and nothing else. The server refuses
-            # a keyring whose mode grants any group or other permission.
+            # KNOWN LIMIT: this mode does not survive the mount. The server
+            # refuses a keyring or a signing key whose mode grants anything to
+            # group or other (mode & 0077 must be 0), and it needs the file
+            # readable by uid 65532. A Secret volume cannot give both. The
+            # kubelet writes the files owned by root, and because fsGroup is
+            # set it then changes their group to 65532 and ORs 0440 into the
+            # mode, so 0400 is mounted as root:65532 0440 and the server stops
+            # at startup with "must not be readable by group or other".
+            # Dropping fsGroup keeps 0400 but leaves the files owned by root,
+            # which uid 65532 cannot read. Kubernetes has no field that sets
+            # the owning uid of a Secret volume.
+            #
+            # The ways out all put the files somewhere the process owns them:
+            # a secrets CSI driver or an agent sidecar that writes files with a
+            # chosen owner and mode, or an init container running as 65532 that
+            # copies the two files from this volume into an emptyDir with
+            # medium: Memory, sets them to 0400, and leaves that emptyDir to be
+            # mounted at /etc/n0passtemps/kek in place of this volume. The
+            # image has no shell, so that init container needs an image of its
+            # own, pinned by digest like any other. None of this is shipped
+            # here because it depends on what the cluster already runs.
             defaultMode: 0400
             items:
               - key: keyring.json
