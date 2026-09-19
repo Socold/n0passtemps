@@ -98,6 +98,15 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
+      - name: Verify the downloaded modules against go.sum
+        # go.sum is checked at download time. This re-hashes what is on disk,
+        # which on this runner may have been restored from the cache rather than
+        # fetched, so a module altered between the two is caught before anything
+        # below reads it. The release workflow runs the same check in its gate.
+        run: |
+          go mod download
+          go mod verify
+
       # The maintained action rather than "go install": govulncheck builds the
       # SSA form of the whole dependency tree, and this one is large enough
       # that doing it inside the job exhausted the runner's memory.
@@ -195,8 +204,8 @@ jobs:
           format: sarif
           output: trivy-fs.sarif
           severity: MEDIUM,HIGH,CRITICAL
-          # The findings are triaged in code scanning; failing the step would
-          # skip the upload.
+          # The full report is triaged in code scanning; failing this step would
+          # skip the upload. The step after the upload is the one that fails.
           exit-code: "0"
 
       - name: Upload the filesystem findings
@@ -204,6 +213,28 @@ jobs:
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
+
+      - name: Fail on a fixable high or critical vulnerability in the dependencies
+        # The same order as the gosec job: report first, then turn the report
+        # into a red check, so a finding is both visible in code scanning and
+        # impossible to merge past. A scan that can only ever pass is a
+        # dashboard, not a control.
+        #
+        # Narrower than the report above on purpose. ignore-unfixed leaves out
+        # what no upgrade can resolve, because a check nobody can turn green
+        # gets switched off. Only the vuln scanner gates: a secret is gitleaks'
+        # job to fail on, and a config finding is a judgement about a manifest
+        # that belongs in triage. The vulnerability database is already on the
+        # runner from the scan above, so this costs seconds.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
 
       - name: Build the image to scan
         # Built locally and never pushed. Scanning the image the Dockerfile
@@ -232,6 +263,21 @@ jobs:
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image
+
+      - name: Fail on a fixable high or critical vulnerability in the image
+        # As above, for what the filesystem scan cannot see: the base layer and
+        # the binaries as built. With a base pinned by digest, a finding here
+        # usually means the pin in deploy/Dockerfile has a newer digest waiting
+        # in a Dependabot pull request.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: n0passtemps:scan
+          scanners: vuln
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
 
   dependency-review:
     name: dependency review

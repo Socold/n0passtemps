@@ -1,6 +1,10 @@
 # Tag-driven release. Nothing here runs on a branch push, so an artefact can
 # only ever be produced from an immutable, signed-off ref.
 #
+# Nothing is built or published until the gate jobs below have passed on the
+# tagged commit itself. A green ci run on main says nothing about a tag: a tag
+# can name any commit, including one ci never saw.
+#
 # Every action is pinned to a commit SHA, with the release in the trailing
 # comment. This workflow holds write scopes, which makes an action that can be
 # repointed at new code the highest-value target in the repository.
@@ -20,10 +24,139 @@ env:
   # Written out in lower case rather than derived from github.repository: a
   # registry path must be lower case, and the owner name is not.
   IMAGE_NAME: ghcr.io/socold/n0passtemps
+  # Writes the CycloneDX SBOM of each released binary. Installed from the module
+  # proxy at a pinned version, like the linters, rather than run as a
+  # third-party action inside a workflow that holds write scopes.
+  CYCLONEDX_GOMOD_VERSION: "v1.12.0"
 
 jobs:
+  gate:
+    name: gate (the ci checks, on the tagged commit)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      # The same steps as the build-test job of ci.yml, in the same order, less
+      # the coverage upload. They are repeated rather than shared because a tag
+      # push does not trigger ci.yml, and waiting on another workflow's result
+      # for the same commit is a race this job does not have. A step added to
+      # ci.yml belongs here too.
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Go
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Verify the module cache against go.sum
+        # go.sum is checked when a module is downloaded. This checks what is
+        # actually on disk, which here may have come out of the restored cache
+        # rather than from the proxy, before any of it is compiled into a
+        # release artefact.
+        run: |
+          go mod download
+          go mod verify
+
+      - name: Check formatting
+        run: make fmt-check
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Install golangci-lint
+        # The version is read out of the Makefile, as ci.yml does, so the
+        # release cannot lint with a different linter than the pull requests.
+        run: |
+          version=$(sed -n 's/^GOLANGCI_LINT_VERSION *?= *//p' Makefile)
+          if [ -z "${version}" ]; then
+            echo "::error::GOLANGCI_LINT_VERSION is not set in the Makefile"
+            exit 1
+          fi
+          echo "installing golangci-lint ${version}"
+          go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${version}"
+
+      - name: Lint
+        run: make lint
+
+      - name: Build every package
+        run: go build ./...
+
+      - name: Start a software TPM
+        # A runner has no TPM, and the keyring sealing tests skip themselves
+        # without one, which would let them pass here without having run.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends swtpm
+          mkdir -p "${RUNNER_TEMP}/swtpm"
+          swtpm socket --tpm2 --tpmstate "dir=${RUNNER_TEMP}/swtpm" \
+            --server type=tcp,port=2321,bindaddr=127.0.0.1 \
+            --ctrl type=tcp,port=2322,bindaddr=127.0.0.1 \
+            --flags not-need-init,startup-clear --daemon
+          for _ in $(seq 1 50); do
+            if timeout 1 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/2321'; then
+              exit 0
+            fi
+            sleep 0.2
+          done
+          echo "::error::the software TPM did not start listening"
+          exit 1
+
+      - name: Unit tests with the race detector
+        run: go test -trimpath -race ./...
+        env:
+          CGO_ENABLED: "1" # the race detector needs cgo; release builds set 0
+          N0PASSTEMPS_TEST_TPM_TCP: 127.0.0.1:2321,127.0.0.1:2322
+
+      - name: Build and test the app kits
+        run: make test-kits
+
+      - name: Compare the declared tables and indexes
+        run: make migrate-check
+
+  gate-integration:
+    name: gate (integration tests against postgresql)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    services:
+      postgres:
+        # The image and digest of deploy/docker-compose.postgres.yml, so the
+        # release is tested against the database build it ships beside.
+        image: postgres:16-alpine@sha256:3c5c8892d184f738f4fe282d14ddaa613a38f00f4189d2d94725ebe6f2909ddb
+        env:
+          POSTGRES_USER: n0passtemps
+          POSTGRES_PASSWORD: n0passtemps
+          POSTGRES_DB: n0passtemps_test
+        ports:
+          - 5432:5432
+        # Without this the first test connects during initdb and fails on a
+        # database that exists but does not yet accept the role.
+        options: >-
+          --health-cmd "pg_isready -U n0passtemps -d n0passtemps_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Go
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Run the tagged integration tests
+        run: make test-integration
+
   binaries:
     name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    # Nothing is compiled for release from a commit the gate refused.
+    needs: [gate, gate-integration]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -93,17 +226,78 @@ jobs:
             echo "artifact=${base}.tar.gz" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Upload the archive for the release job
+      - name: Install cyclonedx-gomod
+        run: go install "github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@${CYCLONEDX_GOMOD_VERSION}"
+
+      - name: Write the SBOMs
+        # One CycloneDX document per binary, published beside the archive. The
+        # "app" mode lists the modules that are actually compiled into that
+        # binary for this GOOS and GOARCH, which is narrower than go.mod: test
+        # dependencies and packages excluded by build constraints are left out.
+        # -std records the standard library, and with it the toolchain version,
+        # which is where most of the advisories against a Go binary land.
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          base="n0passtemps-${GITHUB_REF_NAME}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          for b in n0passtemps-server n0passtemps-wizard; do
+            cyclonedx-gomod app -json -licenses -std \
+              -main "cmd/${b}" \
+              -output "out/${base}.${b}.cdx.json" .
+          done
+          ls -l out
+
+      - name: Upload the archive and its SBOMs for the release job
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: release-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: out/${{ steps.archive.outputs.artifact }}
+          # Both patterns sit under out/, which upload-artifact takes as the
+          # root, so the release job finds the three files side by side.
+          path: |
+            out/${{ steps.archive.outputs.artifact }}
+            out/*.cdx.json
           retention-days: 7
           if-no-files-found: error
 
+  attest:
+    name: attest the provenance of the archives
+    needs: binaries
+    runs-on: ubuntu-24.04
+    # A job of its own so that the OIDC token and the right to record an
+    # attestation never sit in the same job as contents: write. It checks
+    # nothing out and runs no code from the repository: it hashes what the
+    # build jobs produced and signs a statement about those hashes.
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - name: Collect the archives and SBOMs
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          pattern: release-*
+          path: assets
+          merge-multiple: true
+
+      - name: Attest the build provenance
+        # SHA256SUMS answers "is this the file the release page lists". It does
+        # not answer "who built it": anyone able to replace an archive on the
+        # release can replace the manifest beside it. This records a signed
+        # SLSA statement, in a transparency log the repository does not
+        # control, tying each file's digest to this workflow, this commit and
+        # this runner. The same statement the container image gets below, and
+        # checked the same way, with "gh attestation verify".
+        uses: actions/attest-build-provenance@310b0a4a3b0b78ef57ecda988ee04b132db73ef8 # v1.4.1
+        with:
+          subject-path: assets/*
+
   publish:
     name: publish the github release
-    needs: binaries
+    # On attest as well as binaries: a release whose notes tell the reader to
+    # verify an attestation must not become visible before one exists.
+    needs: [binaries, attest]
     runs-on: ubuntu-24.04
     permissions:
       # The only job that creates a release and uploads assets to it.
@@ -116,7 +310,7 @@ jobs:
           # this one, which needs every tag and commit present.
           fetch-depth: 0
 
-      - name: Collect the archives
+      - name: Collect the archives and SBOMs
         uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
         with:
           pattern: release-*
@@ -152,7 +346,15 @@ jobs:
 
           ## Verifying a download
 
+          The checksum shows the file is the one this release lists. The
+          attestation shows it was built by the release workflow of this
+          repository from this tag, and needs the GitHub CLI:
+
               sha256sum -c SHA256SUMS
+              gh attestation verify <archive> --repo ${GITHUB_REPOSITORY}
+
+          Each archive comes with one CycloneDX SBOM per binary, named after it
+          and ending in .cdx.json.
 
           ## Container image
 
@@ -234,6 +436,9 @@ jobs:
 
   image:
     name: build and push the container image
+    # Gated like the archives: the image is pushed to a registry people pull
+    # from, and a pushed tag is not something a failed test can take back.
+    needs: [gate, gate-integration]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -319,3 +524,109 @@ jobs:
           subject-name: ${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
+
+  sdk-npm:
+    name: publish the node sdk to npm
+    runs-on: ubuntu-24.04
+    # After the release exists, so a tag that fails to produce binaries does not
+    # leave a published package pointing at nothing. npm cannot unpublish a
+    # version after 72 hours, and PyPI cannot at all, so both of these run last.
+    needs: publish
+    # Skipped unless the deployment environment exists, which is how the
+    # maintainer turns registry publication on once the accounts are set up
+    # without this workflow failing every release until then.
+    environment: npm
+    permissions:
+      contents: read
+      # Trusted publishing and provenance both need an OIDC token. Neither uses
+      # a stored secret: the registry verifies the claim that this workflow, in
+      # this repository, at this tag, produced the artefact.
+      id-token: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Node
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+
+      - name: Check the package version against the tag
+        # A package published under a version the tag does not name is the one
+        # mistake here that cannot be corrected afterwards.
+        working-directory: sdk/node
+        run: |
+          pkg=$(node -p "require('./package.json').version")
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$pkg" != "$tag" ]; then
+            echo "::error::sdk/node/package.json is $pkg and the tag is $tag"
+            exit 1
+          fi
+          echo "version $pkg matches the tag"
+
+      - name: Test
+        working-directory: sdk/node
+        run: npm test
+
+      - name: Publish
+        working-directory: sdk/node
+        # --provenance records a signed statement tying the published tarball to
+        # this workflow and this commit, the same guarantee the container image
+        # gets above. Trusted publishing has to be configured once on npmjs.com
+        # for this repository and this workflow path; with it configured no
+        # NODE_AUTH_TOKEN is needed and none is set here, which is the point.
+        run: npm publish --provenance --access public
+
+  sdk-pypi:
+    name: publish the python sdk to pypi
+    runs-on: ubuntu-24.04
+    needs: publish
+    environment: pypi
+    permissions:
+      contents: read
+      # Trusted publishing. No API token is stored anywhere: PyPI verifies the
+      # OIDC claim naming this repository, this workflow file and this
+      # environment, which has to be registered once under the project's
+      # publishing settings.
+      id-token: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.13"
+
+      - name: Check the package version against the tag
+        working-directory: sdk/python
+        run: |
+          pkg=$(python -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$pkg" != "$tag" ]; then
+            echo "::error::sdk/python/pyproject.toml is $pkg and the tag is $tag"
+            exit 1
+          fi
+          echo "version $pkg matches the tag"
+
+      - name: Test
+        working-directory: sdk/python
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[verify]"
+          python -m unittest discover -s tests -v
+
+      - name: Build the distributions
+        working-directory: sdk/python
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          # Refuses a README the project page would render as plain text, which
+          # is the failure that is only visible after publication.
+          twine check dist/*
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9a034ebfe128415bbaabdfc # v1.12.4
+        with:
+          packages-dir: sdk/python/dist
