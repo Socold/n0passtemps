@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -179,7 +180,10 @@ func TestLabelValuesAreEscaped(t *testing.T) {
 
 // TestANilRegistryIsInert lets a caller hold one without checking, which is
 // what keeps the request path free of a branch per metric.
-func TestANilRegistryIsInert(t *testing.T) {
+//
+// It has no assertion because a nil dereference is what fails it, which is why
+// the parameter is unused.
+func TestANilRegistryIsInert(_ *testing.T) {
 	var r *Registry
 	r.SetBuildInfo("1", "2", "3")
 	r.ObserveRequest("GET /v1/health", "GET", 200, time.Millisecond)
@@ -193,5 +197,25 @@ func TestIncDropsAnOddLabel(t *testing.T) {
 	doc := render(t, r)
 	if !strings.Contains(doc, `n0passtemps_test_total{a="1"} 1`) {
 		t.Errorf("odd trailing label was not dropped cleanly:\n%s", doc)
+	}
+}
+
+// TestAnInventedMethodDoesNotBecomeASeries holds the cardinality bound on the
+// one label a caller writes. net/http accepts any token as a method and the
+// catch-all route answers all of them without a credential, so a method used
+// as a label unchanged is a series per request for whoever wants one.
+func TestAnInventedMethodDoesNotBecomeASeries(t *testing.T) {
+	r := New()
+	for i := range 500 {
+		r.ObserveRequest("/", "M"+strconv.Itoa(i), 404, time.Millisecond)
+	}
+
+	doc := render(t, r)
+	if strings.Contains(doc, `method="M`) {
+		t.Fatalf("an invented method became a label:\n%s", doc)
+	}
+	want := `n0passtemps_http_requests_total{route="/",method="other",status="404"} 500`
+	if !strings.Contains(doc, want) {
+		t.Errorf("missing %q in:\n%s", want, doc)
 	}
 }

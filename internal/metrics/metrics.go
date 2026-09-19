@@ -27,14 +27,16 @@
 //
 // So: the route label is the matched pattern and never the path, the status is
 // a code and never a message, and nothing here takes a value from a request
-// body, a query string or a path segment. ObserveRequest is the only entry
-// point that a request reaches, and its arguments are the three the access log
-// already treats as safe.
+// body, a query string or a path segment. The method is the one argument a
+// caller writes, since net/http accepts any token, so it is folded onto the
+// standard set before it becomes a label; see methodLabel. ObserveRequest is
+// the only entry point that a request reaches.
 package metrics
 
 import (
 	"fmt"
 	"io"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -116,6 +118,26 @@ func (r *Registry) SetBuildInfo(version, commit, goVersion string) {
 	}
 }
 
+// otherMethod is the label every method outside the standard set is folded
+// into.
+const otherMethod = "other"
+
+// methodLabel maps a request method onto a closed set.
+//
+// net/http accepts any token as a method and the catch-all route answers all of
+// them, so the method is a value a caller chooses. Used as a label unchanged it
+// is a series per invented method, kept for the life of the process, from
+// requests that need no credential.
+func methodLabel(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
+		http.MethodDelete, http.MethodOptions:
+		return method
+	default:
+		return otherMethod
+	}
+}
+
 // ObserveRequest records one served request.
 //
 // route must be the matched pattern. Passing a concrete path here creates a
@@ -125,6 +147,7 @@ func (r *Registry) ObserveRequest(route, method string, status int, d time.Durat
 	if r == nil {
 		return
 	}
+	method = methodLabel(method)
 	labels := labelSet{
 		{"route", route},
 		{"method", method},
