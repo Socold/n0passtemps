@@ -28,6 +28,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/Socold/n0passtemps/internal/store"
 )
 
@@ -296,6 +298,11 @@ func (e *Engine) Raise(ctx context.Context, in Input) (*store.Alert, error) {
 	}
 
 	alert := &store.Alert{
+		// Minted here rather than by the store. Both backends refuse an alert
+		// with no identifier, and the row that wins the fingerprint conflict
+		// keeps the one it already had, so this value is used only when this
+		// call is the first occurrence.
+		ID:          uuid.NewString(),
 		TenantID:    in.TenantID,
 		AlertType:   in.Type.String(),
 		Severity:    in.Type.Severity(),

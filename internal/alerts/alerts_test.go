@@ -30,6 +30,20 @@ func (f *fakeStore) RaiseAlert(_ context.Context, a *store.Alert) (*store.Alert,
 	if f.err != nil {
 		return nil, f.err
 	}
+
+	// The same preconditions both real backends check, refused the same way.
+	// An earlier version of this double minted the identifier itself, and that
+	// one convenience hid a defect in every test that used it: the engine built
+	// its row without an identifier, so sqlite and postgresql refused every
+	// alert the service ever raised, while these tests went green. A double
+	// that supplies what the real thing demands does not stand in for it.
+	if a.ID == "" || a.TenantID == "" {
+		return nil, errors.New("fakeStore: alert requires an id and a tenant")
+	}
+	if a.AlertType == "" || a.Fingerprint == "" {
+		return nil, errors.New("fakeStore: alert requires a type and a fingerprint")
+	}
+
 	f.raised = append(f.raised, a)
 	if existing, ok := f.byFP[a.Fingerprint]; ok && existing.AcknowledgedAt == nil {
 		existing.Occurrences++
@@ -38,7 +52,6 @@ func (f *fakeStore) RaiseAlert(_ context.Context, a *store.Alert) (*store.Alert,
 		return &cp, nil
 	}
 	stored := *a
-	stored.ID = "alert-" + a.Fingerprint
 	f.byFP[a.Fingerprint] = &stored
 	cp := stored
 	return &cp, nil
