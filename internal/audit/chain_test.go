@@ -194,7 +194,7 @@ func TestComputeHashCoversEveryField(t *testing.T) {
 		{"outcome", func(e *store.AuditEntry) { e.Outcome = store.OutcomeDenied }, nil},
 		{"request id", func(e *store.AuditEntry) { e.RequestID = "req-2" }, nil},
 		{"pii digest", func(e *store.AuditEntry) { e.PIIDigest[0] ^= 0x01 }, nil},
-		{"prev hash", func(e *store.AuditEntry) {}, otherPrev},
+		{"prev hash", func(*store.AuditEntry) {}, otherPrev},
 	}
 
 	for _, tc := range tests {
@@ -418,6 +418,51 @@ func TestErasure(t *testing.T) {
 		e.Outcome = store.OutcomeFailure
 		if VerifyEntry(e, Genesis()) {
 			t.Error("erasure removed tamper evidence from fields it was never meant to touch")
+		}
+	})
+
+	t.Run("an erased entry read back with the empty document still verifies", func(t *testing.T) {
+		// Both stores write "{}" into the detail column of an erased row, since
+		// the column does not take NULL.
+		e := mustPrepare(t, sampleEntry(), 1, Genesis())
+		Erase(e)
+		e.Detail = json.RawMessage(`{}`)
+		if !VerifyEntry(e, Genesis()) {
+			t.Error("the form erasure leaves in the database does not verify")
+		}
+	})
+
+	refilled := []struct {
+		name   string
+		mutate func(e *store.AuditEntry)
+	}{
+		{"subject", func(e *store.AuditEntry) { e.SubjectID = "subject-2" }},
+		{"source ip", func(e *store.AuditEntry) { e.SourceIP = "198.51.100.1" }},
+		{"detail", func(e *store.AuditEntry) { e.Detail = json.RawMessage(`{"reason":"planted"}`) }},
+		{"null detail", func(e *store.AuditEntry) { e.Detail = json.RawMessage(`null`) }},
+	}
+	for _, tc := range refilled {
+		t.Run("refuses an entry with no salt and a "+tc.name, func(t *testing.T) {
+			// Nothing covers the personal fields once the salt is gone, so the
+			// only safe reading of a missing salt is that they are gone too.
+			// Otherwise nulling the salt would be a way to pin an entry on
+			// somebody else without breaking the chain.
+			e := mustPrepare(t, sampleEntry(), 1, Genesis())
+			Erase(e)
+			tc.mutate(e)
+			if VerifyEntry(e, Genesis()) {
+				t.Errorf("an entry with no salt and a %s still verifies: the field is covered by nothing", tc.name)
+			}
+		})
+	}
+
+	t.Run("refuses a salt of the wrong length", func(t *testing.T) {
+		// A salt is sixteen bytes or absent. Five bytes would skip the digest
+		// check without the entry counting as erased.
+		e := mustPrepare(t, sampleEntry(), 1, Genesis())
+		e.PIISalt = e.PIISalt[:5]
+		if VerifyEntry(e, Genesis()) {
+			t.Error("an entry with a five byte salt still verifies: its personal fields were checked against nothing")
 		}
 	})
 

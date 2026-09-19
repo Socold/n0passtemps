@@ -171,10 +171,23 @@ func Prepare(e *store.AuditEntry, seq int64, prevHash []byte) error {
 // was stored and chains onto prevHash.
 //
 // An entry that still holds its salt is checked fully, including that its
-// personal fields reproduce the stored digest. An erased entry has no salt, so
-// its digest is taken as given and only the chain link is checked. That is the
-// intended limitation: erasure trades the ability to re-derive one entry's
-// personal fields for the ability to erase them at all.
+// personal fields reproduce the stored digest.
+//
+// An entry with no salt is an erased one, and nothing can be recomputed for it:
+// the digest is taken as given and only the chain link is checked. What can
+// still be checked is that the entry is erased in full, so its personal fields
+// have to be empty. Without that, whoever can write to the database could null
+// the salt of an entry and then name somebody else as its subject, and the
+// chain would verify, and the external witness would not notice either, since
+// it only ever holds the digest. A salt of any other length is neither state
+// and is refused.
+//
+// What stays out of reach is telling a lawful erasure from a salt destroyed by
+// someone with write access. Both leave the same row, and the second loses the
+// personal fields without putting anything in their place. Erasure trades the
+// ability to re-derive one entry's personal fields for the ability to erase
+// them at all, and the tombstone the store appends is what records that an
+// erasure was asked for.
 func VerifyEntry(e *store.AuditEntry, prevHash []byte) bool {
 	if len(e.EntryHash) != HashSize || len(e.PrevHash) != HashSize || len(e.PIIDigest) != HashSize {
 		return false
@@ -182,10 +195,35 @@ func VerifyEntry(e *store.AuditEntry, prevHash []byte) bool {
 	if !equal(e.PrevHash, prevHash) {
 		return false
 	}
-	if len(e.PIISalt) == SaltSize && !equal(PIIDigest(e), e.PIIDigest) {
+	if !personalFieldsVerify(e) {
 		return false
 	}
 	return equal(ComputeHash(e, prevHash), e.EntryHash)
+}
+
+// personalFieldsVerify reports whether the personal fields of an entry are
+// consistent with its salt: matching the digest when the salt is present, and
+// absent when it is not.
+func personalFieldsVerify(e *store.AuditEntry) bool {
+	switch len(e.PIISalt) {
+	case SaltSize:
+		return equal(PIIDigest(e), e.PIIDigest)
+	case 0:
+		return e.SubjectID == "" && e.SourceIP == "" && erasedDetail(e.Detail)
+	default:
+		return false
+	}
+}
+
+// erasedDetail reports whether detail is one of the forms erasure leaves.
+//
+// There are exactly two. Erase leaves nil in memory. Both stores write the
+// empty document "{}" into the column, because it does not take NULL, and hand
+// it back as nil when the salt is gone; the literal is accepted as well so that
+// a reader which does not normalise it sees the same verdict. Anything else,
+// "null" and an empty array included, is content the erasure did not write.
+func erasedDetail(detail []byte) bool {
+	return len(detail) == 0 || string(detail) == "{}"
 }
 
 // VerifySequence walks a contiguous run of entries and returns the sequence

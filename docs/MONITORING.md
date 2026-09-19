@@ -82,6 +82,7 @@ Field by field, and what to do with each:
 | `audit_sink.pending_entries` | A rising floor, not a value | `audit.head_seq` minus `delivered_through_seq`. A handful is normal, because a batch waits up to `audit.sink.flush_interval` for company. A number that only grows is a receiver that is slower than the deployment writes |
 | `audit_sink.dropped_offers` | Climbing steadily | Hand-offs the delivery buffer could not take since this process started. Not lost entries: each is recovered from the audit log. It means `buffer_size` is too small for the write rate, or the receiver is too slow for it |
 | `audit_sink.delivered_through_seq` | Flat while `audit.head_seq` moves | Delivery has stopped even though the service has not. This is the same condition as the alert below, seen from the scrape side |
+| The difference between those two numbers | Not a count of entries | On PostgreSQL `seq` comes from a sequence, which spends a value on an append that rolls back, so part of the difference is numbers no entry ever carried. Trend it rather than reading it as a backlog depth |
 | `open_alerts.critical` | Above 0, at once | There is exactly one critical alert type and it is the audit chain |
 | `open_alerts.warning` | Trend it, and page on a jump | A jump is the shape of an attack in progress |
 | `features` | A change you did not make | Confirms which mode the deployment is actually in, which is the fastest way to catch a `lite_mode` that was left on |
@@ -185,6 +186,14 @@ sink is how a copy that cannot be quietly rewritten does. See
 [the `audit.sink` section of CONFIGURATION.md](CONFIGURATION.md#auditsink) and
 [ADR 0016](adr/0016-ship-the-audit-chain-to-an-external-witness.md).
 
+The sink also speaks when it has nothing to say: every five minutes without a
+delivery it POSTs the head of the chain instead, so that hearing nothing means
+something at the other end. Without it a receiver cannot tell a deployment where
+nothing happened from one whose outbound path was cut for the duration of an
+intrusion, and the alert that matters is the one the receiver raises on that
+silence. [SIEM.md](SIEM.md#receiving-the-audit-sink) has the receiver's side of
+the contract.
+
 Event families worth a saved query:
 
 | Query | Watches for |
@@ -214,6 +223,17 @@ curl -sS -o /tmp/verify.json -w '%{http_code}' \
 does not miss it. The result is recorded as `audit.chain_verified` or
 `audit.chain_broken`, and a broken chain raises the critical alert, so a
 verification cannot be performed quietly.
+
+A verification that starts at the beginning checks one thing besides the
+hashes. Retention pruning removes a prefix of the log and records a checkpoint
+saying where it stopped, and that checkpoint is where the walk resumes, so it
+decides how much of the log is never looked at. It is only worth what the chain
+says it is: the trim also appends an entry naming the boundary and its hash, and
+verification refuses a checkpoint no such entry backs up. A break reported at
+the boundary of a trim means either that the marker is not there, which is what
+inserting a checkpoint and deleting a prefix by hand looks like, or that the
+checkpoint predates the release that bound the two together. The second case
+clears at the next retention pass and the first does not.
 
 Verification is linear in the number of entries and gets slower for the lifetime
 of the deployment. Measure it before scheduling it. On a large log, verify in

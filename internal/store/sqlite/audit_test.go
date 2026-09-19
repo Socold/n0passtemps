@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"path/filepath"
 	"sync"
@@ -53,11 +54,11 @@ func TestChainVerifies(t *testing.T) {
 	entries := appendN(t, s, "tenant-1", 25)
 
 	// The first entry must chain onto the genesis value, not onto zero bytes.
-	if got, want := entries[0].PrevHash, audit.Genesis(); string(got) != string(want) {
+	if got, want := entries[0].PrevHash, audit.Genesis(); !bytes.Equal(got, want) {
 		t.Errorf("first PrevHash = %x, want genesis %x", got, want)
 	}
 	for i := 1; i < len(entries); i++ {
-		if string(entries[i].PrevHash) != string(entries[i-1].EntryHash) {
+		if !bytes.Equal(entries[i].PrevHash, entries[i-1].EntryHash) {
 			t.Fatalf("entry %d does not chain onto %d", i, i-1)
 		}
 	}
@@ -178,6 +179,161 @@ func TestPruneKeepsRemainderVerifiable(t *testing.T) {
 	}
 }
 
+// TestAPruneIsAttestedByTheChain covers what a checkpoint is worth.
+//
+// The marker the trim appends carries the hash of the entry it stopped at, and
+// the chain covers the marker, so the boundary a checkpoint claims is a
+// boundary the chain agrees with. Verification asks for exactly that, so the
+// two have to be written to match.
+func TestAPruneIsAttestedByTheChain(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	entries := appendN(t, s, "tenant-1", 20)
+	boundary := entries[9]
+
+	cut := time.Date(2026, 1, 1, 0, 0, 10, 0, time.UTC)
+	if _, err := s.PruneAuditLog(ctx, "tenant-1", cut, time.Now()); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+
+	var (
+		prunedSeq  int64
+		prunedHash []byte
+		markerSeq  int64
+	)
+	if err := s.read.QueryRowContext(ctx, `
+		SELECT pruned_through_seq, pruned_through_hash, audit_seq
+		FROM audit_checkpoints ORDER BY pruned_through_seq DESC LIMIT 1`).
+		Scan(&prunedSeq, &prunedHash, &markerSeq); err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	if prunedSeq != boundary.Seq || !bytes.Equal(prunedHash, boundary.EntryHash) {
+		t.Fatalf("checkpoint names (%d, %x), want the tenth entry (%d, %x)",
+			prunedSeq, prunedHash, boundary.Seq, boundary.EntryHash)
+	}
+
+	var detail string
+	if err := s.read.QueryRowContext(ctx,
+		`SELECT detail FROM audit_log WHERE seq = ?`, markerSeq).Scan(&detail); err != nil {
+		t.Fatalf("read the retention marker: %v", err)
+	}
+	if !audit.MarkerAttestsCheckpoint([]byte(detail), prunedSeq, prunedHash) {
+		t.Errorf("the marker at seq %d does not attest the checkpoint: %s", markerSeq, detail)
+	}
+
+	_, broken, err := s.VerifyChain(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if broken != 0 {
+		t.Fatalf("an attested trim reported a break at %d", broken)
+	}
+}
+
+// TestAForgedCheckpointAndATrimmedPrefixAreDetected is the attack the binding
+// exists for.
+//
+// Whoever can write to the database inserts a checkpoint naming entry ten and
+// its real hash, and then deletes entries one to ten, which the delete guard
+// allows because a checkpoint now exists. Nothing in the chain ever said the
+// log had been trimmed, and verification used to resume from the checkpoint and
+// report a log in perfect order.
+func TestAForgedCheckpointAndATrimmedPrefixAreDetected(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	entries := appendN(t, s, "tenant-1", 20)
+	boundary := entries[9]
+
+	forge := func() error {
+		_, err := s.write.ExecContext(ctx, `
+			INSERT INTO audit_checkpoints (
+				id, tenant_id, pruned_through_seq, pruned_through_hash,
+				entries_removed, audit_seq, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			"forged-checkpoint", "tenant-1", boundary.Seq, boundary.EntryHash,
+			10, entries[10].Seq, formatTime(time.Now()))
+		return err
+	}
+
+	// The insert guard refuses it outright: the entry the row names is an
+	// ordinary one and not the marker of a trim.
+	if err := forge(); err == nil {
+		t.Fatal("expected the insert guard to refuse a checkpoint no marker attests")
+	}
+
+	// A guard is a trigger and the attacker owns the database file, so the
+	// interesting question is what verification says once the trigger is gone.
+	if _, err := s.write.ExecContext(ctx, `DROP TRIGGER audit_checkpoints_marker_guard`); err != nil {
+		t.Fatal(err)
+	}
+	if err := forge(); err != nil {
+		t.Fatalf("insert the forged checkpoint: %v", err)
+	}
+	if _, err := s.write.ExecContext(ctx, `DELETE FROM audit_log WHERE seq <= ?`, boundary.Seq); err != nil {
+		t.Fatalf("the delete guard let the prefix go, as it does once a checkpoint exists: %v", err)
+	}
+
+	_, broken, err := s.VerifyChain(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if broken != boundary.Seq {
+		t.Fatalf("a forged checkpoint and a deleted prefix reported a break at %d, want %d",
+			broken, boundary.Seq)
+	}
+}
+
+func TestPruneStopsAtTheFirstRecentEntry(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Three old entries, a recent one, and then one written by a clock that had
+	// fallen behind: old by its timestamp, newest by its position.
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	recent := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	stamps := []time.Time{old, old.Add(time.Second), old.Add(2 * time.Second), recent, old.Add(3 * time.Second)}
+	for i, at := range stamps {
+		if _, err := s.Append(ctx, &store.AuditEntry{
+			TenantID:   "tenant-1",
+			EventType:  audit.EventAssertionCompleted,
+			ActorType:  store.ActorSubject,
+			SubjectID:  "subject-1",
+			Outcome:    store.OutcomeSuccess,
+			OccurredAt: at,
+		}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+
+	// Timestamps come from the process clock and are not monotonic in the
+	// sequence number. Cutting at the newest entry that looks old would take
+	// the recent one with it, and the checkpoint would make the loss verify.
+	cut := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	removed, err := s.PruneAuditLog(ctx, "tenant-1", cut, time.Now())
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if removed != 3 {
+		t.Fatalf("removed %d entries, want only the 3 that precede the first recent one", removed)
+	}
+
+	left, err := s.ReadAuditRange(ctx, 1, 100)
+	if err != nil {
+		t.Fatalf("read what is left: %v", err)
+	}
+	if len(left) == 0 || left[0].Seq != 4 || !left[0].OccurredAt.Equal(recent) {
+		t.Fatalf("the log no longer starts at the recent entry, seq 4: a backdated entry pruned it")
+	}
+
+	_, broken, err := s.VerifyChain(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if broken != 0 {
+		t.Fatalf("chain broke at %d after pruning", broken)
+	}
+}
+
 func TestPruneRefusedWithoutCheckpoint(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -206,7 +362,7 @@ func TestConcurrentAppendsChainCleanly(t *testing.T) {
 
 	for w := 0; w < writers; w++ {
 		wg.Add(1)
-		go func(w int) {
+		go func(int) {
 			defer wg.Done()
 			for i := 0; i < each; i++ {
 				_, err := s.Append(ctx, &store.AuditEntry{

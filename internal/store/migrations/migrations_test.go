@@ -335,6 +335,8 @@ func TestLoadKeepsGuardBodiesWhole(t *testing.T) {
 			prefix: "CREATE TRIGGER",
 			suffix: "END",
 			want: []string{
+				"audit_checkpoints_boundary_guard",
+				"audit_checkpoints_marker_guard",
 				"audit_checkpoints_no_change",
 				"audit_checkpoints_no_delete",
 				"audit_log_delete_guard",
@@ -346,6 +348,7 @@ func TestLoadKeepsGuardBodiesWhole(t *testing.T) {
 			prefix: "CREATE FUNCTION",
 			suffix: "LANGUAGE plpgsql",
 			want: []string{
+				"audit_checkpoints_insert_guard",
 				"audit_checkpoints_reject_write",
 				"audit_log_delete_guard",
 				"audit_log_update_guard",

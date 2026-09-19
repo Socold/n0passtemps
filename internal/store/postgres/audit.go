@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -163,10 +164,8 @@ func insertAuditEntry(ctx context.Context, tx pgx.Tx, e *store.AuditEntry) error
 }
 
 // ChainHead implements store.AuditStore.
-func (s *Store) ChainHead(ctx context.Context) (int64, []byte, error) {
-	var seq int64
-	var hash []byte
-	err := s.pool.QueryRow(ctx,
+func (s *Store) ChainHead(ctx context.Context) (seq int64, hash []byte, err error) {
+	err = s.pool.QueryRow(ctx,
 		`SELECT seq, entry_hash FROM audit_log ORDER BY seq DESC LIMIT 1`).Scan(&seq, &hash)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -183,10 +182,8 @@ func (s *Store) ChainHead(ctx context.Context) (int64, []byte, error) {
 //
 // Without this, trimming every entry would make the log look brand new and a
 // verifier would accept a chain that started from nothing.
-func (s *Store) checkpointHead(ctx context.Context) (int64, []byte, error) {
-	var seq int64
-	var hash []byte
-	err := s.pool.QueryRow(ctx, `
+func (s *Store) checkpointHead(ctx context.Context) (seq int64, hash []byte, err error) {
+	err = s.pool.QueryRow(ctx, `
 		SELECT pruned_through_seq, pruned_through_hash
 		FROM audit_checkpoints ORDER BY pruned_through_seq DESC LIMIT 1`).Scan(&seq, &hash)
 	switch {
@@ -200,10 +197,8 @@ func (s *Store) checkpointHead(ctx context.Context) (int64, []byte, error) {
 
 // chainHeadTx is the in-transaction form, reading through the transaction that
 // holds the append lock.
-func chainHeadTx(ctx context.Context, tx pgx.Tx) (int64, []byte, error) {
-	var seq int64
-	var hash []byte
-	err := tx.QueryRow(ctx,
+func chainHeadTx(ctx context.Context, tx pgx.Tx) (seq int64, hash []byte, err error) {
+	err = tx.QueryRow(ctx,
 		`SELECT seq, entry_hash FROM audit_log ORDER BY seq DESC LIMIT 1`).Scan(&seq, &hash)
 	if err == nil {
 		return seq, hash, nil
@@ -333,17 +328,34 @@ func (s *Store) ReadAuditRange(ctx context.Context, fromSeq int64, limit int) ([
 // The walk spans every tenant, because the chain does: an entry recorded
 // against the reserved system tenant sits between two ordinary ones, and
 // verifying one tenant's entries alone would report a break at every such gap.
-func (s *Store) VerifyChain(ctx context.Context, fromSeq int64) (int64, int64, error) {
+//
+// It does not expect the sequence numbers to be contiguous either. seq comes
+// from a sequence, which hands out a value outside the transaction, so a rolled
+// back insert leaves a gap that is nobody's doing. The chain order is the one
+// in prev_hash, and that is what is walked.
+//
+// A walk that starts at the beginning starts at whatever the newest checkpoint
+// says was trimmed, so the checkpoint is checked before anything is read: see
+// unattestedCheckpoint. A walk that starts further in does not consult a
+// checkpoint and does not check one.
+func (s *Store) VerifyChain(ctx context.Context, fromSeq int64) (checked, brokenAt int64, err error) {
+	if fromSeq <= 1 {
+		unattested, cpErr := s.unattestedCheckpoint(ctx)
+		if cpErr != nil {
+			return 0, 0, cpErr
+		}
+		if unattested != 0 {
+			return 0, unattested, nil
+		}
+	}
+
 	prevHash, err := s.hashBefore(ctx, fromSeq)
 	if err != nil {
 		return 0, 0, err
 	}
 
 	const page = 1000
-	var (
-		checked int64
-		cursor  = fromSeq - 1
-	)
+	cursor := fromSeq - 1
 	if cursor < 0 {
 		cursor = 0
 	}
@@ -420,6 +432,65 @@ func (s *Store) hashBefore(ctx context.Context, fromSeq int64) ([]byte, error) {
 	return hash, nil
 }
 
+// unattestedCheckpoint reports the boundary of a checkpoint the chain does not
+// back up, or zero when there is nothing to object to.
+//
+// Resuming from a checkpoint means taking a row's word for a stretch of the log
+// that is no longer there to be checked, and nothing in the chain used to say
+// that stretch had ever been trimmed. So the row is held against the entry it
+// names: that entry has to be the marker of this trim, and it has to name the
+// same boundary and the same hash. Both are covered by the entry's own hash, so
+// a checkpoint somebody inserted has nothing in the chain agreeing with it
+// unless they also appended a marker, which is an entry every reader sees and
+// the external witness receives.
+//
+// Only the newest checkpoint is checked, because it is the only one the walk
+// resumes from. Its marker is always still in the log: a marker is appended
+// above the boundary it names, so the trim that wrote it cannot remove it, and
+// a later trim writes a newer checkpoint along with a newer marker.
+//
+// The limit this does not cross is the one the whole chain has. Whoever owns
+// the cluster can write a marker, chain it onto the head and delete the prefix
+// it names, and that is indistinguishable from an honest trim because it is the
+// same thing. What is ruled out is a prefix disappearing with nothing in the
+// log to say so.
+func (s *Store) unattestedCheckpoint(ctx context.Context) (brokenAt int64, err error) {
+	var (
+		prunedSeq  int64
+		prunedHash []byte
+		markerSeq  int64
+	)
+	err = s.pool.QueryRow(ctx, `
+		SELECT pruned_through_seq, pruned_through_hash, audit_seq
+		FROM audit_checkpoints ORDER BY pruned_through_seq DESC LIMIT 1`).
+		Scan(&prunedSeq, &prunedHash, &markerSeq)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return 0, nil
+	case err != nil:
+		return 0, fmt.Errorf("postgres: read audit checkpoint: %w", err)
+	}
+
+	var detail []byte
+	err = s.pool.QueryRow(ctx,
+		`SELECT detail FROM audit_log WHERE seq = $1`, markerSeq).Scan(&detail)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// The checkpoint names an entry the log does not have. The break is
+		// reported at the boundary rather than at the missing marker, because
+		// the boundary is what the checkpoint claims and what a reader goes
+		// looking for.
+		return prunedSeq, nil
+	case err != nil:
+		return 0, fmt.Errorf("postgres: read retention marker: %w", err)
+	}
+
+	if !audit.MarkerAttestsCheckpoint(detail, prunedSeq, prunedHash) {
+		return prunedSeq, nil
+	}
+	return 0, nil
+}
+
 // EraseSubjectAuditEntries implements store.AuditStore.
 //
 // It clears the personal fields from every entry naming a subject and appends a
@@ -481,20 +552,42 @@ func (s *Store) EraseSubjectAuditEntries(ctx context.Context, tenantID, subjectI
 // The order matters and is enforced by the delete guard: the checkpoint has to
 // exist before any row can be deleted. The checkpoint commits to the hash of
 // the last entry removed, which is what a verifier resumes from.
-func (s *Store) PruneAuditLog(ctx context.Context, tenantID string, before time.Time, now time.Time) (int64, error) {
+func (s *Store) PruneAuditLog(ctx context.Context, tenantID string, before, now time.Time) (int64, error) {
 	var removed int64
 
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
-		// Find the newest entry that falls inside the retention cut. Pruning
-		// is by sequence number rather than by timestamp so that the chain is
-		// trimmed as a contiguous prefix; deleting a scattered set of entries
-		// would break verification for everything after each gap.
+		// Find the longest prefix of the log in which every entry falls inside
+		// the retention cut. Pruning is by sequence number rather than by
+		// timestamp so that the chain is trimmed as a contiguous prefix; deleting
+		// a scattered set of entries would break verification for everything
+		// after each gap.
+		//
+		// The boundary is the entry before the oldest one still to be kept, and
+		// not the newest one that is old enough. The two differ whenever the
+		// timestamps are not in sequence order, and they come from the process
+		// clock, so nothing guarantees that they are: a real-time clock that
+		// lost its battery, a step from NTP or a restored virtual machine writes
+		// one entry dated in the past. Cutting at that entry would delete every
+		// recent entry before it, through a checkpoint that verifies.
+		var keepFrom int64
+		err := tx.QueryRow(ctx, `
+			SELECT seq FROM audit_log
+			WHERE occurred_at >= $1 ORDER BY seq ASC LIMIT 1`,
+			before).Scan(&keepFrom)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			// Nothing is recent enough to keep, so the prefix is the whole log.
+			keepFrom = math.MaxInt64
+		case err != nil:
+			return fmt.Errorf("postgres: find first retained entry: %w", err)
+		}
+
 		var lastSeq int64
 		var lastHash []byte
-		err := tx.QueryRow(ctx, `
+		err = tx.QueryRow(ctx, `
 			SELECT seq, entry_hash FROM audit_log
-			WHERE occurred_at < $1 ORDER BY seq DESC LIMIT 1`,
-			before).Scan(&lastSeq, &lastHash)
+			WHERE seq < $1 ORDER BY seq DESC LIMIT 1`,
+			keepFrom).Scan(&lastSeq, &lastHash)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil // nothing old enough
 		}
@@ -510,6 +603,11 @@ func (s *Store) PruneAuditLog(ctx context.Context, tenantID string, before time.
 
 		// Record the trim as an audited event before it happens, so a log that
 		// is trimmed always carries the evidence of having been trimmed.
+		//
+		// The detail names the boundary hash as well as its sequence number,
+		// and the chain covers the detail, so the entry commits to exactly
+		// where the trim stopped. The checkpoint written below is then held
+		// against this entry, both by the insert guard and by verification.
 		marker := &store.AuditEntry{
 			TenantID:     tenantID,
 			OccurredAt:   now.UTC(),
@@ -517,9 +615,7 @@ func (s *Store) PruneAuditLog(ctx context.Context, tenantID string, before time.
 			ActorType:    store.ActorSystem,
 			ResourceType: "audit_log",
 			Outcome:      store.OutcomeSuccess,
-			Detail: []byte(fmt.Sprintf(
-				`{"action":"retention_prune","pruned_through_seq":%d,"entries":%d}`,
-				lastSeq, count)),
+			Detail:       audit.PruneMarkerDetail(lastSeq, lastHash, count),
 		}
 		if err = prepareAppend(ctx, tx, marker); err != nil {
 			return err

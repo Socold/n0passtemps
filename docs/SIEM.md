@@ -205,19 +205,48 @@ has to do is short, and the details are in
 [ADR 0016](adr/0016-ship-the-audit-chain-to-an-external-witness.md) and the
 package documentation of `internal/auditsink`:
 
+- **Branch on `kind` first.** A body is either a `batch`, which carries
+  `entries`, or a `heartbeat`, which carries the head of the chain and no
+  entries. A heartbeat stored as a batch is an empty delivery filed as though it
+  were one; a batch read as a heartbeat drops entries. A body with no `kind` is
+  a batch, which is what the field's absence meant before it existed.
 - **De-duplicate on `seq`.** Delivery is at least once by design. The watermark
   moves only after an acknowledgement, so a process that dies in between resends
   the batch. The opposite order would give at most once, which is a silent hole
   in the witness.
-- **Acknowledge only what is stored.** A 2xx is taken as durable.
-- **Watch for gaps.** `seq` is contiguous and each entry chains onto the
-  previous one, so 41, 42, 44 is detectable twice over. `auditsink.CheckSequence`
-  is that check written once, so it can be quoted rather than described.
+- **Acknowledge only what is stored.** A 2xx is taken as durable, for a
+  heartbeat as much as for a batch.
+- **Follow `prev_hash`, not the numbering.** Each entry names the hash of the
+  one before it, and that is what says the run is whole. `seq` increases and is
+  **not** contiguous: on PostgreSQL it comes from a sequence, which spends a
+  number even when the transaction that drew it rolls back, so an ordinary log
+  has holes no entry will ever fill. Given 41, 42, 44 the question is whether 44
+  chains onto 42. If it does, 43 was never written and nothing is missing. If it
+  does not, something between them has gone. A receiver that alerts on the
+  numbering alone will report every cancelled request as tampering.
+  `auditsink.CheckSequence` is that check written once, so it can be quoted
+  rather than described.
+- **Alert on silence.** The sender POSTs a heartbeat when nothing has reached
+  the receiver for five minutes, so a receiver that has heard nothing for longer
+  than that is looking at a path somebody cut and not at a quiet weekend. The
+  two are the ends of one attack: stop the deliveries, act, remove the tail of
+  the local log, let the deliveries resume. The heartbeat carries `head_seq` and
+  `head_hash`, so keeping them lets a receiver say later that the chain it is
+  now offered does not continue the one it was told about.
 - **Expect no personal data.** The projection is exactly the fields the chain
   hash commits to. `subject_id`, `source_ip` and `detail` are not among them; a
   salted digest of all three travels instead, and the salt never leaves the
   database. A receiver cannot widen what a deployment exposes, which is what
   makes shipping to a third party defensible in the first place.
+- **A trim announces itself in the chain.** Retention pruning appends an entry
+  before it removes anything, and that entry commits to the sequence number and
+  the entry hash it stopped at. The receiver sees it as an
+  `event_type=audit.chain_verified` entry from the `system` actor; what the
+  marker names is in `detail`, which stays in the database and is read at
+  `GET /admin/v1/audit`. It is the only thing that makes a run starting above
+  the boundary legitimate, so a receiver holding entries below a boundary the
+  deployment later announces should keep them: they are the part the deployment
+  no longer has.
 
 A receiver that verifies the chain rather than merely storing it is the
 arrangement that actually detects a rewrite. Storing alone still helps, since a
@@ -234,7 +263,8 @@ response each one warrants are in
 | Rule | Shape |
 |---|---|
 | Authority granted | `event_type=admin_token.created`. Every one deserves a question, and `detail.forced: true` deserves two |
-| The chain stopped holding | `event_type=audit.chain_broken`, or the sink falling behind, or gaps in `seq` at the receiver |
+| The chain stopped holding | `event_type=audit.chain_broken`, or the sink falling behind, or an entry at the receiver that does not chain onto the one before it |
+| The witness stopped hearing | Nothing from a deployment for more than five minutes, neither a batch nor a heartbeat. It is the shape of an outbound path cut for the duration of an intrusion |
 | Someone looked up who has an account | `event_type=admin.subject_ref_revealed`, grouped by `actor_id`. Volume is the signal, not any single entry |
 | A credential being probed | `event_type=api_key.rejected` grouped by `source_ip` |
 | An administrator reaching past their role | `event_type=admin.denied` grouped by `actor_id` |

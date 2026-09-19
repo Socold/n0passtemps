@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/Socold/n0passtemps/internal/audit"
 )
 
 // watermark records how far delivery has got, so that a restart resumes instead
@@ -27,8 +29,9 @@ import (
 type watermark struct {
 	path string
 
-	mu  sync.RWMutex
-	seq int64
+	mu   sync.RWMutex
+	seq  int64
+	hash []byte
 }
 
 // watermarkFile is the on-disk form.
@@ -38,8 +41,24 @@ type watermark struct {
 // the old format becoming ambiguous. UpdatedAt is for that reader too: nothing
 // in the code consults it.
 type watermarkFile struct {
-	DeliveredThroughSeq int64     `json:"delivered_through_seq"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	DeliveredThroughSeq int64 `json:"delivered_through_seq"`
+
+	// DeliveredThroughHash is the chain hash of that entry, and it is what the
+	// next thing delivered has to chain onto.
+	//
+	// The sequence number alone cannot say that: on PostgreSQL the numbers have
+	// gaps that no entry ever filled, so "one past the watermark" names nothing
+	// in particular, and a shipper that insisted on it resynchronised for ever.
+	// The hash is exact on both engines and is what tells an entry legitimately
+	// missing from the numbering from one that was taken out of the log.
+	//
+	// It is absent in a file written before this field existed, and absent is
+	// not zero: it means the join cannot be checked, so the next flush reads
+	// from the audit log rather than trusting the queue, and the value is
+	// recorded from the first delivery onwards.
+	DeliveredThroughHash []byte `json:"delivered_through_hash,omitempty"`
+
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // loadWatermark reads the file, or starts from zero when there is none.
@@ -80,10 +99,17 @@ func loadWatermark(path string, log *slog.Logger) (*watermark, error) {
 				slog.String("path", path), slog.Any("error", err))
 		} else if f.DeliveredThroughSeq > 0 {
 			w.seq = f.DeliveredThroughSeq
+			// A hash of the wrong length is treated as absent rather than
+			// trusted, for the same reason a corrupt file restarts from zero:
+			// the safe direction is to check less and read the log, never to
+			// compare against something that is not a chain hash.
+			if len(f.DeliveredThroughHash) == audit.HashSize {
+				w.hash = f.DeliveredThroughHash
+			}
 		}
 	}
 
-	if err := w.set(time.Now().UTC(), w.seq); err != nil {
+	if err := w.set(time.Now().UTC(), w.seq, w.hash); err != nil {
 		return nil, err
 	}
 	return w, nil
@@ -94,6 +120,23 @@ func (w *watermark) get() int64 {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return w.seq
+}
+
+// head returns how far delivery has got: the last acknowledged sequence number,
+// and the hash whatever comes next has to chain onto.
+//
+// The hash is the genesis value when nothing has been delivered, because that
+// is what the first entry of a log chains onto. It is nil when the watermark
+// was written by a version that did not record it, which means the join cannot
+// be checked and the caller has to fall back on reading the audit log.
+func (w *watermark) head() (seq int64, prevHash []byte) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	if w.seq == 0 {
+		return 0, audit.Genesis()
+	}
+	return w.seq, w.hash
 }
 
 // set records seq durably and only then moves the in-memory value.
@@ -108,7 +151,10 @@ func (w *watermark) get() int64 {
 // ignored rather than obeyed, because the only way that can happen is a stale
 // in-flight batch, and honouring it would resend entries the receiver has
 // already acknowledged for no benefit.
-func (w *watermark) set(now time.Time, seq int64) error {
+//
+// hash is the chain hash of the entry at seq, so that a restart knows what the
+// next delivery has to chain onto and not merely where to resume counting.
+func (w *watermark) set(now time.Time, seq int64, hash []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -116,7 +162,11 @@ func (w *watermark) set(now time.Time, seq int64) error {
 		return nil
 	}
 
-	body, err := json.Marshal(watermarkFile{DeliveredThroughSeq: seq, UpdatedAt: now})
+	body, err := json.Marshal(watermarkFile{
+		DeliveredThroughSeq:  seq,
+		DeliveredThroughHash: hash,
+		UpdatedAt:            now,
+	})
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrWatermark, err)
 	}
@@ -151,5 +201,6 @@ func (w *watermark) set(now time.Time, seq int64) error {
 	}
 
 	w.seq = seq
+	w.hash = hash
 	return nil
 }

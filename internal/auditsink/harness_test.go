@@ -29,6 +29,11 @@ type fakeLog struct {
 	mu      sync.Mutex
 	entries []*store.AuditEntry
 	err     error
+
+	// spent is the highest sequence number handed out, which is not the same
+	// as the number of entries: skipSeq spends one without writing an entry,
+	// the way a PostgreSQL append whose transaction rolls back does.
+	spent int64
 }
 
 // append writes one entry and returns it, as a store would.
@@ -41,6 +46,7 @@ func (l *fakeLog) append(t *testing.T, eventType string) *store.AuditEntry {
 	if n := len(l.entries); n > 0 {
 		prev = l.entries[n-1].EntryHash
 	}
+	l.spent++
 	e := &store.AuditEntry{
 		TenantID:   testTenant,
 		OccurredAt: time.Date(2026, 9, 20, 11, 0, 0, 0, time.UTC),
@@ -53,11 +59,23 @@ func (l *fakeLog) append(t *testing.T, eventType string) *store.AuditEntry {
 		SourceIP:   "192.0.2.10",
 		Detail:     json.RawMessage(`{"reason":"lost device"}`),
 	}
-	if err := audit.Prepare(e, int64(len(l.entries)+1), prev); err != nil {
+	if err := audit.Prepare(e, l.spent, prev); err != nil {
 		t.Fatalf("prepare entry: %v", err)
 	}
 	l.entries = append(l.entries, e)
 	return e
+}
+
+// skipSeq spends a sequence number without writing an entry.
+//
+// It is what PostgreSQL does whenever an append is rolled back: nextval has
+// already handed the number out, and no entry will ever carry it. The entries
+// on either side still chain onto each other, so this is a hole in the
+// numbering and not in the log.
+func (l *fakeLog) skipSeq() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.spent++
 }
 
 // appendMany writes n entries and returns them.
@@ -97,18 +115,32 @@ func (l *fakeLog) ReadAuditRange(_ context.Context, fromSeq int64, limit int) ([
 	return out, nil
 }
 
+func (l *fakeLog) ChainHead(context.Context) (seq int64, hash []byte, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.err != nil {
+		return 0, nil, l.err
+	}
+	if n := len(l.entries); n > 0 {
+		return l.entries[n-1].Seq, l.entries[n-1].EntryHash, nil
+	}
+	return 0, audit.Genesis(), nil
+}
+
 // receiver is a witness. It records what it is given and can be told to refuse
 // or to hang, which are the two ways a real one fails.
 type receiver struct {
 	srv *httptest.Server
 
-	mu       sync.Mutex
-	batches  []Batch
-	requests int
-	refuse   int
-	status   int
-	hold     chan struct{}
-	tokens   []string
+	mu         sync.Mutex
+	batches    []Batch
+	heartbeats []Heartbeat
+	requests   int
+	refuse     int
+	status     int
+	hold       chan struct{}
+	tokens     []string
 }
 
 func newReceiver(t *testing.T) *receiver {
@@ -145,6 +177,33 @@ func (r *receiver) handle(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// A real receiver branches on the kind before it reads anything else, so
+	// that a heartbeat is never filed as an empty delivery.
+	var kind struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal(body, &kind); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	if kind.Kind == KindHeartbeat {
+		var beat Heartbeat
+		if err := json.Unmarshal(body, &beat); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if err := beat.Verify(); err != nil {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			return
+		}
+		r.mu.Lock()
+		r.heartbeats = append(r.heartbeats, beat)
+		r.mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+
 	var batch Batch
 	if err := json.Unmarshal(body, &batch); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -162,6 +221,13 @@ func (r *receiver) handle(w http.ResponseWriter, req *http.Request) {
 	r.batches = append(r.batches, batch)
 	r.mu.Unlock()
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// beats returns the heartbeats the receiver accepted, in arrival order.
+func (r *receiver) beats() []Heartbeat {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]Heartbeat(nil), r.heartbeats...)
 }
 
 // refuseNext makes the next n requests fail with status.

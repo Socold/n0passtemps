@@ -108,6 +108,56 @@ func TestCheckSequenceDetectsAGap(t *testing.T) {
 	})
 }
 
+// TestASkippedSequenceNumberIsNotAGap is the difference between the two
+// engines, seen from the receiver.
+//
+// On PostgreSQL seq comes from a sequence, which hands a number out before the
+// transaction commits and does not take it back when the transaction rolls
+// back. An append cut short by a cancelled request therefore spends a number no
+// entry will ever carry. A receiver requiring consecutive numbers reported that
+// as tampering on every deployment that had ever had a failed insert, which is
+// all of them.
+func TestASkippedSequenceNumberIsNotAGap(t *testing.T) {
+	lg := &fakeLog{}
+	entries := lg.appendMany(t, 2)
+	lg.skipSeq()
+	entries = append(entries, lg.appendMany(t, 2)...)
+
+	var records []Record
+	for _, e := range entries {
+		records = append(records, roundTrip(t, Project(e)))
+	}
+	if records[2].Seq != 4 {
+		t.Fatalf("the entry after the skip has seq %d, want 4: the fixture must leave a hole in the numbering",
+			records[2].Seq)
+	}
+
+	// The entries on either side of the skipped number chain onto each other,
+	// so nothing is missing and there is nothing to report.
+	if broken := CheckSequence(records, audit.Genesis()); broken != 0 {
+		t.Errorf("a number the engine spent on a rolled back append was reported as a break at %d", broken)
+	}
+
+	t.Run("an entry removed from the middle is still reported", func(t *testing.T) {
+		// The case the numbering could never tell from the one above, and the
+		// reason the check is on the chain: seq 5 says which hash it follows,
+		// and it is not the one seq 2 carries.
+		withHole := []Record{records[0], records[1], records[3]}
+		if got := CheckSequence(withHole, audit.Genesis()); got != records[3].Seq {
+			t.Errorf("an entry taken out before seq %d was reported at %d", records[3].Seq, got)
+		}
+	})
+
+	t.Run("a sequence number that goes backwards is reported", func(t *testing.T) {
+		// Nothing the local chain produces repeats a number or lowers one, so a
+		// run that does was assembled by something else.
+		backwards := []Record{records[0], records[1], records[1]}
+		if got := CheckSequence(backwards, audit.Genesis()); got != records[1].Seq {
+			t.Errorf("a repeated sequence number was reported at %d, want %d", got, records[1].Seq)
+		}
+	})
+}
+
 func TestBatchVerify(t *testing.T) {
 	lg := &fakeLog{}
 	entries := lg.appendMany(t, 3)

@@ -17,6 +17,19 @@ import (
 // its own without colliding.
 const Format = "n0passtemps.audit.v1"
 
+// The two bodies a receiver is sent, named in the kind field.
+//
+// A batch carries entries. A heartbeat carries the head of the chain and no
+// entries, and is what says the path to the receiver is still open while there
+// is nothing to deliver. A receiver has to be able to tell them apart without
+// inspecting the payload, because storing a heartbeat as though it were a batch
+// would file an empty delivery, and reading a batch as a heartbeat would drop
+// entries.
+const (
+	KindBatch     = "batch"
+	KindHeartbeat = "heartbeat"
+)
+
 // Record is the part of an audit entry that is delivered to the sink.
 //
 // It is exactly the set of fields the chain hash commits to, and therefore
@@ -81,6 +94,9 @@ type Record struct {
 type Batch struct {
 	Format string `json:"format"`
 
+	// Kind is KindBatch, and says this body carries entries. See the constant.
+	Kind string `json:"kind"`
+
 	// Source labels the deployment, so a receiver collecting from several can
 	// keep them apart in storage. It is not evidence of anything: the bearer
 	// credential the receiver issued is what identifies the sender, and this
@@ -92,6 +108,45 @@ type Batch struct {
 	ToSeq   int64     `json:"to_seq"`
 	Count   int       `json:"count"`
 	Entries []Record  `json:"entries"`
+}
+
+// Heartbeat is the body sent when there is nothing to deliver.
+//
+// Without it, a receiver cannot tell a deployment where nothing happened from
+// one whose outbound path has been cut, and those are the two ends of the same
+// attack: stop the deliveries, act, remove the tail of the local log, let the
+// deliveries resume. Silence is the only thing the receiver sees in both cases,
+// so silence has to mean something. A receiver that is told to expect a body at
+// least every few minutes can raise the absence itself.
+//
+// It carries the head of the chain rather than a bare liveness ping, because
+// the head is what makes the absence actionable afterwards: a receiver holding
+// (seq, entry_hash) pairs over time can say that the log it is now offered does
+// not continue the one it was told about, which is the rewrite the external
+// witness exists to catch. DeliveredThroughSeq comes along so the receiver can
+// see how far behind delivery is by the sender's own reckoning, and compare it
+// with what it holds.
+//
+// A heartbeat never moves the delivery watermark. It acknowledges nothing and
+// carries no entry, so treating it as progress would skip the entries between.
+type Heartbeat struct {
+	Format string `json:"format"`
+
+	// Kind is KindHeartbeat. See the constant.
+	Kind string `json:"kind"`
+
+	Source string    `json:"source"`
+	SentAt time.Time `json:"sent_at"`
+
+	// HeadSeq and HeadHash are the newest entry of the local chain at the
+	// moment the heartbeat was built, or the genesis value when the log is
+	// empty.
+	HeadSeq  int64  `json:"head_seq"`
+	HeadHash []byte `json:"head_hash"`
+
+	// DeliveredThroughSeq is the last sequence number this sender believes the
+	// receiver acknowledged.
+	DeliveredThroughSeq int64 `json:"delivered_through_seq"`
 }
 
 // Project reduces an entry to what is delivered.
@@ -154,13 +209,28 @@ func (r Record) entry() *store.AuditEntry {
 // the start of a deployment's history, or the EntryHash of the record
 // immediately before records[0].
 //
-// Three things are checked, and each catches a different attack or accident.
-// The sequence numbers must be consecutive, which catches a batch that was
-// dropped in transit or a receiver that stored one and not the next: given 41,
-// 42 and 44, this reports 44. Each record's PrevHash must equal the previous
-// EntryHash, which catches a substitution that kept the numbering intact. And
-// each EntryHash must be the hash of the record's own fields, which catches an
-// edited record whose links were left alone.
+// What makes a run whole is the chaining, not the numbering. Each record's
+// PrevHash must equal the EntryHash of the record before it, which is what
+// catches an entry removed from the middle, a substitution that kept the
+// numbering intact, and a run that does not continue the history the receiver
+// already holds. Each EntryHash must in turn be the hash of the record's own
+// fields, which catches an edited record whose links were left alone.
+//
+// The sequence numbers are only required to increase. They are not required to
+// be consecutive, and a receiver that requires it will report tampering on an
+// ordinary PostgreSQL deployment: seq is drawn from a sequence, which hands out
+// a value outside the transaction, so an append whose transaction is rolled
+// back, by a cancelled request or a failed insert, spends a number that no
+// entry will ever carry. The gap is the engine's, the entries on either side of
+// it chain onto each other, and nothing has been lost. On SQLite the numbers do
+// come out consecutive, and checking for that here would have made the two
+// engines disagree about what a valid log looks like.
+//
+// So 41, 42 and 44 is no longer reported by itself. If 43 existed and was
+// removed, 44 does not chain onto 42 and the break is reported at 44 as before;
+// if 43 was never written, 44 chains onto 42 and there is nothing to report. A
+// number that repeats or goes backwards is neither of those and is reported,
+// because the local chain never produces one.
 //
 // Delivery is at least once, so a receiver may legitimately be offered a
 // sequence number it already holds. That is a duplicate, not a gap, and is
@@ -169,17 +239,17 @@ func (r Record) entry() *store.AuditEntry {
 // by something other than the deployment's chain.
 func CheckSequence(records []Record, prevHash []byte) (brokenAt int64) {
 	cur := prevHash
-	expect := int64(0)
+	last := int64(0)
 
 	for i, r := range records {
-		if i > 0 && r.Seq != expect {
+		if i > 0 && r.Seq <= last {
 			return r.Seq
 		}
 		if !audit.VerifyEntry(r.entry(), cur) {
 			return r.Seq
 		}
 		cur = r.EntryHash
-		expect = r.Seq + 1
+		last = r.Seq
 	}
 	return 0
 }
@@ -194,6 +264,13 @@ func (b Batch) Verify() error {
 	if b.Format != Format {
 		return fmt.Errorf("%w: format %q is not %q", ErrMalformedBatch, b.Format, Format)
 	}
+	// An empty kind is accepted because a body carrying entries was a batch
+	// before the field existed. Any other value is refused rather than
+	// interpreted: a heartbeat read as a batch would be stored as a delivery
+	// that acknowledged nothing.
+	if b.Kind != "" && b.Kind != KindBatch {
+		return fmt.Errorf("%w: kind %q is not %q", ErrMalformedBatch, b.Kind, KindBatch)
+	}
 	if b.Count != len(b.Entries) {
 		return fmt.Errorf("%w: count says %d and the body carries %d entries",
 			ErrMalformedBatch, b.Count, len(b.Entries))
@@ -205,6 +282,25 @@ func (b Batch) Verify() error {
 		return fmt.Errorf("%w: declared range %d..%d does not match the entries %d..%d",
 			ErrMalformedBatch, b.FromSeq, b.ToSeq,
 			b.Entries[0].Seq, b.Entries[len(b.Entries)-1].Seq)
+	}
+	return nil
+}
+
+// Verify reports whether a heartbeat is the body it claims to be.
+//
+// The head hash is the one field worth checking here: a heartbeat with nothing
+// in it says the sender is alive and says nothing about which chain it is
+// alive on, and the head is the whole content of the message.
+func (h Heartbeat) Verify() error {
+	if h.Format != Format {
+		return fmt.Errorf("%w: format %q is not %q", ErrMalformedBatch, h.Format, Format)
+	}
+	if h.Kind != KindHeartbeat {
+		return fmt.Errorf("%w: kind %q is not %q", ErrMalformedBatch, h.Kind, KindHeartbeat)
+	}
+	if len(h.HeadHash) != audit.HashSize {
+		return fmt.Errorf("%w: the head hash is %d bytes and not %d",
+			ErrMalformedBatch, len(h.HeadHash), audit.HashSize)
 	}
 	return nil
 }

@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -73,12 +74,58 @@ type Event struct {
 	Detail       map[string]any
 }
 
+// appendTimeout bounds one append once it no longer ends with the request.
+const appendTimeout = 5 * time.Second
+
+// scrubNUL replaces an escaped U+0000 in a serialised detail with the escape
+// for U+FFFD.
+//
+// PostgreSQL refuses U+0000 in a JSONB document and SQLite stores it, so a
+// free-text field holding one, a reason or a note, made the append fail on one
+// engine only, after the change it described had committed: an administrator
+// could choose which of their actions were recorded. The character carries
+// nothing worth keeping, and the replacement keeps the entry.
+//
+// raw is what json.Marshal produced, so a NUL can only appear as the six
+// characters of its escape, and a backslash inside a value is itself escaped.
+// Stepping over the character after every backslash is what tells the escape
+// from the text of a value that happens to spell it.
+func scrubNUL(raw []byte) []byte {
+	const nul, replacement = `\u0000`, `\ufffd`
+	if !bytes.Contains(raw, []byte(nul)) {
+		return raw
+	}
+	out := make([]byte, 0, len(raw))
+	for i := 0; i < len(raw); i++ {
+		if raw[i] != '\\' || i+1 >= len(raw) {
+			out = append(out, raw[i])
+			continue
+		}
+		if bytes.HasPrefix(raw[i:], []byte(nul)) {
+			out = append(out, replacement...)
+			i += len(nul) - 1
+			continue
+		}
+		out = append(out, raw[i], raw[i+1])
+		i++
+	}
+	return out
+}
+
 // Record appends the event.
 //
 // A failure to append is returned so a caller inside a transaction can roll
 // back, and is also logged at error level, because an audit log that has
 // started silently dropping entries is itself a security incident.
 func (r *Recorder) Record(ctx context.Context, ev Event) error {
+	// The append outlives the request that caused it. Most events are recorded
+	// after the change they describe has committed, on the request's context,
+	// and a caller who hung up at that moment cancelled the context and with it
+	// the record of what they had just done. The timeout is what bounds the
+	// append now that the caller leaving does not.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), appendTimeout)
+	defer cancel()
+
 	entry := &store.AuditEntry{
 		TenantID:     ev.TenantID,
 		OccurredAt:   r.now().UTC(),
@@ -102,7 +149,7 @@ func (r *Recorder) Record(ctx context.Context, ev Event) error {
 				slog.String("event_type", ev.EventType), slog.Any("error", err))
 			raw = []byte(`{"detail_error":"not serialisable"}`)
 		}
-		entry.Detail = raw
+		entry.Detail = scrubNUL(raw)
 	}
 
 	stored, err := r.store.Append(ctx, entry)

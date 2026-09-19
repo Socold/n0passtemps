@@ -37,7 +37,7 @@
 // receiver acknowledged. That is why the queue can be small and why a full one
 // costs latency and a database read rather than a gap in the witness.
 //
-// # At least once, and gaps are the receiver's to notice
+// # At least once, and a break in the chain is the receiver's to notice
 //
 // The watermark is written only after the receiver has acknowledged a batch. A
 // process that dies between the acknowledgement and that write comes back and
@@ -47,10 +47,23 @@
 // would know. Duplicates are a receiver's inconvenience; a silent hole in the
 // witness defeats the purpose of having one.
 //
-// A receiver detects a gap from the sequence numbers and from the chain itself,
-// and CheckSequence is that check, written once here so it can be quoted rather
-// than described. Given 41, 42 and 44 it reports 44, both because the numbering
-// skips and because 44 does not chain onto 42.
+// A receiver detects a missing entry from the chain, and CheckSequence is that
+// check, written once here so it can be quoted rather than described. It is the
+// chain and not the numbering: on PostgreSQL seq comes from a sequence, which
+// spends a value even when the transaction that drew it rolls back, so an
+// ordinary log has gaps that no entry ever filled. Given 41, 42 and 44 the
+// question is whether 44 chains onto 42. If it does, 43 was never written. If
+// it does not, something between them has gone, which is what a witness is for.
+//
+// # Silence has to mean something
+//
+// Delivering only when there is something to deliver leaves a receiver unable
+// to tell a quiet weekend from an outbound path somebody cut, and those are the
+// two ends of one attack: stop the deliveries, act, remove the tail of the
+// local log, let them resume. So the shipper also says the head of the chain
+// out loud every heartbeatInterval when nothing else has reached the receiver,
+// and the receiver is told to expect it. A heartbeat is marked as one, carries
+// no entry and never moves the watermark. See Heartbeat and docs/SIEM.md.
 //
 // # What is delivered
 //
@@ -108,8 +121,20 @@ var (
 	// it again.
 	ErrWatermark = errors.New("auditsink: the delivery watermark could not be written")
 
-	// ErrMalformedBatch is what Batch.Verify reports. It is here for a receiver
-	// written in Go, which can then use the same check the sender does.
+	// ErrWatermarkAhead is returned when the watermark names a sequence number
+	// the audit log has not reached.
+	//
+	// Delivery only ever moves the watermark up to an entry it has just read, so
+	// this is never the shipper's own doing: either the file was edited, or the
+	// database was restored from a backup older than the watermark. It is not
+	// repaired here. Rewriting the file to match the log would erase the one
+	// trace of the first cause, and after the second the receiver holds entries
+	// this log no longer has, which is for an operator to reconcile.
+	ErrWatermarkAhead = errors.New("auditsink: the delivery watermark is ahead of the audit log")
+
+	// ErrMalformedBatch is what Batch.Verify and Heartbeat.Verify report. It is
+	// here for a receiver written in Go, which can then use the same checks the
+	// sender does.
 	ErrMalformedBatch = errors.New("auditsink: malformed batch")
 )
 
@@ -130,15 +155,35 @@ const (
 	// maxReasonLen bounds the failure text carried into the alert and the
 	// health report. Both are read by people.
 	maxReasonLen = 200
+
+	// heartbeatInterval is how long the receiver may hear nothing before the
+	// shipper says the head of the chain out loud.
+	//
+	// It is a constant and not a setting. The section already has a flush
+	// interval, a timeout and two backoffs, and none of them is the right
+	// cadence for this: the flush interval is seconds, because it bounds how
+	// far behind the witness runs, and a POST every few seconds from a
+	// deployment where nothing is happening is noise the receiver has to store.
+	// Five minutes is short enough that an outbound path cut during an intrusion
+	// shows up while the intrusion is still going on, and long enough that a
+	// quiet deployment costs the receiver twelve requests an hour. A setting
+	// would be one more thing to get wrong for a value nobody has a reason to
+	// choose differently, and adding one is a change to internal/config.
+	heartbeatInterval = 5 * time.Minute
 )
 
 // Backlog is the part of the audit store the shipper reads to catch up.
 //
 // It is an interface, and a narrow one, so that the shipper can be tested
-// against a log built in memory and so that this package depends on the one
-// store method it actually needs.
+// against a log built in memory and so that this package depends on the two
+// store methods it actually needs.
 type Backlog interface {
 	ReadAuditRange(ctx context.Context, fromSeq int64, limit int) ([]*store.AuditEntry, error)
+
+	// ChainHead is what the watermark is checked against. Reading past the
+	// watermark cannot do that: a watermark beyond the end of the log and a
+	// receiver that is level with it both come back as an empty range.
+	ChainHead(ctx context.Context) (seq int64, hash []byte, err error)
 }
 
 // Raiser is the part of the alert engine the shipper needs.
@@ -201,11 +246,20 @@ type Shipper struct {
 	// behind the receiver is measured against.
 	highest atomic.Int64
 
+	// heartbeatEvery is heartbeatInterval. It is a field only so that the tests
+	// do not have to wait five minutes for one.
+	heartbeatEvery time.Duration
+
 	// The fields below belong to the worker goroutine, except lastErr, which
 	// the health probe reads.
 	backoff     time.Duration
 	nextAttempt time.Time
 	lastAlert   time.Time
+
+	// lastContact is when the receiver last answered, and is what the heartbeat
+	// measures its silence against. A deployment busy enough to be delivering
+	// says the same thing more often and does not need one.
+	lastContact time.Time
 
 	errMu   sync.RWMutex
 	lastErr string
@@ -253,20 +307,22 @@ func New(opts Options) (*Shipper, error) {
 		// would be a second place to keep up with the defaults.
 		client = &http.Client{Timeout: cfg.Timeout.Duration}
 	}
+	client = withoutRedirects(client)
 
 	s := &Shipper{
-		cfg:      cfg,
-		tenantID: opts.TenantID,
-		endpoint: strings.TrimSpace(cfg.Endpoint),
-		token:    token,
-		client:   client,
-		backlog:  opts.Backlog,
-		alerts:   opts.Alerts,
-		log:      logger,
-		now:      clock,
-		mark:     mark,
-		queue:    make(chan *store.AuditEntry, cfg.BufferSize),
-		backoff:  cfg.RetryBackoff.Duration,
+		cfg:            cfg,
+		tenantID:       opts.TenantID,
+		endpoint:       strings.TrimSpace(cfg.Endpoint),
+		token:          token,
+		client:         client,
+		backlog:        opts.Backlog,
+		alerts:         opts.Alerts,
+		log:            logger,
+		now:            clock,
+		mark:           mark,
+		queue:          make(chan *store.AuditEntry, cfg.BufferSize),
+		backoff:        cfg.RetryBackoff.Duration,
+		heartbeatEvery: heartbeatInterval,
 	}
 
 	// The first flush reads from the audit log rather than from the queue.
@@ -278,13 +334,36 @@ func New(opts Options) (*Shipper, error) {
 	return s, nil
 }
 
+// withoutRedirects returns a copy of client that hands a redirect back as the
+// response instead of following it.
+//
+// The receiver is a third party, and following its redirects would let it, or
+// anything able to answer in its place, decide where the batch goes. A 307 or
+// 308 repeats the POST against the new address, bearer credential included,
+// and nothing stops that address being plain http. A 301 or 302 is worse in a
+// quieter way: the request is repeated as a GET with no body, and a 2xx from
+// wherever it lands would be read as an acknowledgement, moving the watermark
+// past entries nobody received. An endpoint that has moved is fixed in the
+// configuration, where the operator can see the new address.
+//
+// It is a copy so that a client supplied by the caller is not altered.
+func withoutRedirects(client *http.Client) *http.Client {
+	c := *client
+	c.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &c
+}
+
 // readCredential takes the bearer token out of the environment.
 //
-// The variable is unset once read, as the env keyring provider does, so it does
-// not remain visible to a child process or through /proc/self/environ. That
-// shortens the window rather than closing it: the Go runtime has already copied
-// the value into an immutable string, and whatever injected the variable still
-// holds it.
+// The variable is unset once read, as the env keyring provider does, so a child
+// process started later does not inherit it. That narrows the exposure rather
+// than closing it: the Go runtime has already copied the value into an
+// immutable string, whatever injected the variable still holds it, and the
+// environment block the kernel recorded at startup stays readable through
+// /proc/<pid>/environ, by the same uid and by root, because os.Unsetenv edits
+// only the runtime's copy.
 func readCredential(name string) (string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -351,8 +430,19 @@ func (s *Shipper) Run(ctx context.Context) {
 		slog.Int64("delivered_through_seq", s.mark.get()),
 		slog.Int("batch_size", s.cfg.BatchSize))
 
+	// A watermark the log has not reached is reported now rather than at the
+	// first flush, so that it sits next to the start in the log.
+	if err := s.checkWatermark(ctx); err != nil {
+		s.fail(ctx, err)
+	}
+
 	ticker := time.NewTicker(s.cfg.FlushInterval.Duration)
 	defer ticker.Stop()
+
+	// The second ticker is what a receiver hears from a deployment where
+	// nothing is happening. See heartbeat.
+	beat := time.NewTicker(s.heartbeatEvery)
+	defer beat.Stop()
 
 	pending := make([]*store.AuditEntry, 0, s.cfg.BatchSize)
 
@@ -373,8 +463,71 @@ func (s *Shipper) Run(ctx context.Context) {
 
 		case <-ticker.C:
 			pending = s.flush(ctx, pending)
+
+		case <-beat.C:
+			s.heartbeat(ctx)
 		}
 	}
+}
+
+// heartbeat tells the receiver where the chain has got to, when nothing has
+// been delivered for a while.
+//
+// The attack it exists for is the one the external witness is there to catch,
+// carried out patiently: cut the outbound path, do whatever was worth doing,
+// remove the tail of the local log, let the path recover. A receiver that only
+// ever hears about entries cannot tell that from a weekend, so the sender says
+// something on its own account and the receiver is told to expect it. What it
+// says is the head of the chain, because a liveness ping proves the process is
+// running and proves nothing about the log it is running on.
+//
+// It is skipped while a delivery has got through recently, so a busy deployment
+// does not send both, and it is skipped inside the retry backoff, because a
+// receiver that has just refused a batch does not need a second request now. A
+// heartbeat that fails is reported like any other failed attempt: not reaching
+// the witness is the condition being reported, whichever body was being sent.
+//
+// The watermark is not touched. A heartbeat acknowledges nothing.
+func (s *Shipper) heartbeat(ctx context.Context) {
+	now := s.now()
+	if !s.nextAttempt.IsZero() && now.Before(s.nextAttempt) {
+		return
+	}
+	if !s.lastContact.IsZero() && now.Sub(s.lastContact) < s.heartbeatEvery {
+		return
+	}
+
+	headSeq, headHash, err := s.backlog.ChainHead(ctx)
+	if err != nil {
+		s.fail(ctx, fmt.Errorf("%w: %v", ErrBacklog, err))
+		return
+	}
+
+	delivered := s.mark.get()
+	body, err := json.Marshal(Heartbeat{
+		Format:              Format,
+		Kind:                KindHeartbeat,
+		Source:              s.tenantID,
+		SentAt:              now.UTC(),
+		HeadSeq:             headSeq,
+		HeadHash:            headHash,
+		DeliveredThroughSeq: delivered,
+	})
+	if err != nil {
+		// Nothing in a Heartbeat is unmarshalable, so this cannot happen
+		// without the type having changed.
+		s.fail(ctx, fmt.Errorf("%w: the heartbeat could not be encoded: %v", ErrDelivery, err))
+		return
+	}
+
+	if err := s.post(ctx, body); err != nil {
+		s.fail(ctx, err)
+		return
+	}
+	s.log.Debug("audit sink heartbeat sent",
+		slog.Int64("head_seq", headSeq),
+		slog.Int64("delivered_through_seq", delivered))
+	s.succeed()
 }
 
 // finalFlush makes one last attempt as the process shuts down.
@@ -419,7 +572,8 @@ drain:
 		return pending[:0]
 	}
 
-	batch, ok := usableBatch(pending, s.mark.get())
+	delivered, deliveredHash := s.mark.head()
+	batch, ok := usableBatch(pending, delivered, deliveredHash)
 	pending = pending[:0]
 
 	switch {
@@ -442,21 +596,33 @@ drain:
 // receiver's history exactly, or reports that it cannot.
 //
 // Entries at or below the watermark are duplicates of what has already been
-// acknowledged and are skipped. What remains has to start one past the
-// watermark and be consecutive; anything else means an offer was dropped or two
-// concurrent appends reached the queue out of order, and the audit log is then
-// the only thing that can say what belongs in between.
-func usableBatch(pending []*store.AuditEntry, delivered int64) (batch []Record, ok bool) {
-	expect := delivered + 1
+// acknowledged and are skipped. What remains has to chain onto the last
+// delivered entry and onto each other; anything else means an offer was dropped
+// or two concurrent appends reached the queue out of order, and the audit log
+// is then the only thing that can say what belongs in between.
+//
+// The join is checked by hash rather than by the sequence number being one
+// higher. On PostgreSQL the numbers are not consecutive: seq is drawn from a
+// sequence, which spends a value even when the transaction that drew it is
+// rolled back, so an entry legitimately follows one three numbers below it. A
+// shipper counting numbers treated every such gap as a dropped offer and fell
+// back to reading the audit log for ever after. The hash says exactly what the
+// counting was trying to approximate, and says it identically on both engines.
+//
+// prevHash is nil when the watermark was written before it recorded one. There
+// is then nothing to check the join against, so the queue is refused and the
+// catch-up read settles it; the first delivery after that records the hash.
+func usableBatch(pending []*store.AuditEntry, delivered int64, prevHash []byte) (batch []Record, ok bool) {
+	expect := prevHash
 	for _, e := range pending {
 		if e == nil || e.Seq <= delivered {
 			continue
 		}
-		if e.Seq != expect {
+		if len(expect) == 0 || !bytes.Equal(e.PrevHash, expect) {
 			return nil, false
 		}
 		batch = append(batch, Project(e))
-		expect++
+		expect = e.EntryHash
 	}
 	return batch, true
 }
@@ -468,13 +634,21 @@ func usableBatch(pending []*store.AuditEntry, delivered int64) (batch []Record, 
 // offer and a failed POST, and it is the reason none of those four can leave a
 // hole in the witness.
 func (s *Shipper) catchUp(ctx context.Context) {
+	// Checked before anything is read, because the read cannot tell: past a
+	// watermark that is ahead of the log there is nothing, which is also what
+	// being level looks like.
+	if err := s.checkWatermark(ctx); err != nil {
+		s.fail(ctx, err)
+		return
+	}
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return
 		}
 
-		from := s.mark.get() + 1
-		entries, err := s.backlog.ReadAuditRange(ctx, from, s.cfg.BatchSize)
+		delivered, prevHash := s.mark.head()
+		entries, err := s.backlog.ReadAuditRange(ctx, delivered+1, s.cfg.BatchSize)
 		if err != nil {
 			s.fail(ctx, fmt.Errorf("%w: %v", ErrBacklog, err))
 			return
@@ -482,20 +656,26 @@ func (s *Shipper) catchUp(ctx context.Context) {
 		if len(entries) == 0 {
 			// Level with the log. Anything queued while this ran is either
 			// below the watermark, and so skipped next time, or the start of the
-			// next contiguous run.
+			// next run.
 			s.resync.Store(false)
 			s.succeed()
 			return
 		}
 
-		if entries[0].Seq != from {
+		if len(prevHash) != 0 && !bytes.Equal(entries[0].PrevHash, prevHash) {
 			// The log no longer holds what the receiver is owed. Retention
 			// trimming is the usual cause, and it is worth a line at error
-			// level, because the receiver will see the same gap and cannot tell
-			// it from tampering. Delivery continues: an incomplete witness is
-			// still better than one that stopped.
+			// level, because the receiver will see the same break and cannot
+			// tell it from tampering. Delivery continues: an incomplete witness
+			// is still better than one that stopped.
+			//
+			// The test is on the chain and not on the numbering, because a
+			// number the log skipped is not an entry the log lost: PostgreSQL
+			// spends a sequence value on an append that rolls back. What says
+			// something is really gone is the first entry available failing to
+			// chain onto the last one delivered.
 			s.log.ErrorContext(ctx, "audit entries are missing from the local log and cannot be delivered",
-				slog.Int64("expected_seq", from),
+				slog.Int64("expected_seq", delivered+1),
 				slog.Int64("first_available_seq", entries[0].Seq))
 		}
 
@@ -517,6 +697,36 @@ func (s *Shipper) catchUp(ctx context.Context) {
 	}
 }
 
+// checkWatermark compares the watermark with the head of the audit log.
+//
+// Without it a watermark beyond the head stops delivery for good and in
+// silence: the catch-up reads an empty range and reports success, and every
+// entry offered afterwards is at or below the watermark and so is skipped as
+// already delivered, until the log happens to grow past it.
+//
+// The failure is reported like any other, so it reaches the log, the alert and
+// the health report, and it is retried, so it clears by itself once an operator
+// has dealt with the cause. The watermark is left as it was found.
+func (s *Shipper) checkWatermark(ctx context.Context) error {
+	head, _, err := s.backlog.ChainHead(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrBacklog, err)
+	}
+	delivered := s.mark.get()
+	if delivered <= head {
+		return nil
+	}
+
+	s.log.ErrorContext(ctx, "the audit sink watermark is ahead of the audit log and nothing can be delivered: "+
+		"either the watermark file was edited, or the database was restored from a backup older than it",
+		slog.Int64("delivered_through_seq", delivered),
+		slog.Int64("head_seq", head),
+		slog.String("path", s.mark.path))
+	return fmt.Errorf("%w: it says %d was delivered and the log ends at %d, "+
+		"so the file was edited or the database was restored from an older backup",
+		ErrWatermarkAhead, delivered, head)
+}
+
 // deliver POSTs one batch and, only once the receiver has acknowledged it,
 // records how far delivery has got.
 //
@@ -532,6 +742,7 @@ func (s *Shipper) deliver(ctx context.Context, batch []Record) error {
 
 	payload := Batch{
 		Format:  Format,
+		Kind:    KindBatch,
 		Source:  s.tenantID,
 		SentAt:  s.now().UTC(),
 		FromSeq: batch[0].Seq,
@@ -547,6 +758,30 @@ func (s *Shipper) deliver(ctx context.Context, batch []Record) error {
 		return fmt.Errorf("%w: the batch could not be encoded: %v", ErrDelivery, err)
 	}
 
+	if err := s.post(ctx, body); err != nil {
+		return err
+	}
+
+	// The hash travels with the sequence number, because it is what the next
+	// batch has to chain onto and the numbering cannot say that on its own.
+	if err := s.mark.set(s.now().UTC(), payload.ToSeq, batch[len(batch)-1].EntryHash); err != nil {
+		return err
+	}
+
+	s.log.Debug("audit batch delivered",
+		slog.Int64("from_seq", payload.FromSeq),
+		slog.Int64("to_seq", payload.ToSeq),
+		slog.Int("count", payload.Count))
+	return nil
+}
+
+// post sends one body to the receiver and reports whether it was accepted.
+//
+// It is shared by the batch and the heartbeat so that the credential, the
+// timeout, the bounded drain and the reading of the status code are written
+// once. What is deliberately not here is the watermark: only a delivery moves
+// it, and only after this has returned.
+func (s *Shipper) post(ctx context.Context, body []byte) error {
 	reqCtx, cancel := context.WithTimeout(ctx, s.cfg.Timeout.Duration)
 	defer cancel()
 
@@ -571,6 +806,10 @@ func (s *Shipper) deliver(ctx context.Context, batch []Record) error {
 	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		// A 3xx ends up here as well: redirects are not followed, see
+		// withoutRedirects, and a receiver that answers with one has not taken
+		// the body.
+		//
 		// A 4xx is treated the same as a 5xx, which means it is retried. A
 		// rejected credential will not fix itself, but it is fixed by an
 		// operator rotating what the receiver expects, and the retry is what
@@ -580,14 +819,10 @@ func (s *Shipper) deliver(ctx context.Context, batch []Record) error {
 		return fmt.Errorf("%w: the receiver answered %s", ErrDelivery, resp.Status)
 	}
 
-	if err := s.mark.set(s.now().UTC(), payload.ToSeq); err != nil {
-		return err
-	}
-
-	s.log.Debug("audit batch delivered",
-		slog.Int64("from_seq", payload.FromSeq),
-		slog.Int64("to_seq", payload.ToSeq),
-		slog.Int("count", payload.Count))
+	// The receiver answered, which is what the heartbeat measures its silence
+	// against. It is recorded here rather than in succeed, because a catch-up
+	// that finds nothing to send also succeeds and speaks to nobody.
+	s.lastContact = s.now()
 	return nil
 }
 
@@ -688,11 +923,11 @@ func (s *Shipper) setLastError(reason string) {
 
 // truncate bounds text that ends up in an alert row or a health response, both
 // of which are read by people.
-func truncate(s string, max int) string {
-	if len(s) <= max {
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
 		return s
 	}
-	return s[:max] + "..."
+	return s[:maxLen] + "..."
 }
 
 // Runner runs a Shipper in a goroutine and waits for it on shutdown.
