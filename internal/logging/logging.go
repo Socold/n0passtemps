@@ -15,9 +15,12 @@
 // The reference an integrating application uses for its own user is treated as
 // personal data. The documentation asks for an opaque identifier, and
 // applications supply email addresses anyway, so redaction is on by default and
-// the reference is replaced by a short prefix of its HMAC. That prefix is enough
-// to correlate two log lines about the same person without disclosing who they
-// are.
+// the reference is replaced by a short prefix of its SHA-256, computed under a
+// domain separator and without a key. That prefix is enough to correlate two
+// log lines about the same person without printing who they are. It is not a
+// secret-keyed value: anyone who holds the logs and guesses a reference can
+// hash the guess and confirm it, so the fingerprint hides a reference from a
+// reader, not from someone testing a list of candidates.
 package logging
 
 import (
@@ -85,7 +88,7 @@ func parseLevel(s string) slog.Level {
 // Putting it here means a new call site cannot forget it. Relying on every
 // caller to remember to redact is how personal data ends up in logs.
 func replacer(cfg config.Logging) func([]string, slog.Attr) slog.Attr {
-	return func(groups []string, a slog.Attr) slog.Attr {
+	return func(_ []string, a slog.Attr) slog.Attr {
 		switch a.Key {
 		case KeySubjectRef:
 			if cfg.RedactSubjectRefs {

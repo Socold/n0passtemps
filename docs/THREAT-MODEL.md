@@ -93,8 +93,8 @@ Six boundaries, and the honest characterisation of each:
 | Authentication on every other route | An unauthenticated registration route would let anyone enrol an authenticator against any subject and then assert as them, with the attacker supplying both halves of the ceremony. That is a complete bypass, not a missing hardening measure; see [ADR 0002](adr/0002-authenticate-every-call-to-the-public-api-surface.md) |
 | The liveness report carries one field | No version, no keyring state, no rotation status, no certificate expiry. Each of those is reconnaissance before it is diagnostics; see [ADR 0008](adr/0008-split-the-health-endpoint.md) |
 | `admin.ip_allow_list` returning 404 | The administrative surface does not announce its existence |
-| Per-address throttle | `throttle.max_failures_per_ip`, default 50 per 15 minutes, IPv6 bucketed by `/64` |
-| Per-key volume limit | `throttle.max_requests_per_key`, default 6000 per window |
+| Per-address throttle | `throttle.max_failures_per_ip`, default 50 per 15 minutes, IPv6 bucketed by `/64`. For this attacker it counts the peer address, on the guesses at API keys and administrative tokens. On the ceremony routes it counts the address the application declares instead; see attacker 11 |
+| Per-key volume limit | `throttle.max_requests_per_key`, default 6000 per window. A rate limit: past it the key is refused until the window rolls, and no lockout is added on top |
 | `server.read_header_timeout`, default 5s | Slow-header denial of service |
 | `server.max_body_bytes`, default 256 KiB, through `http.MaxBytesReader` | An oversized body is refused as it is read, never buffered |
 | `Recover` middleware | A panic on one request returns 500 rather than dropping the process, so every other user's ability to log in does not depend on one malformed input |
@@ -431,7 +431,7 @@ sufficiently convincing phishing page.
 
 ### 7. A malicious dependency
 
-**Starts with** commit access to one of the six direct dependencies, or to
+**Starts with** commit access to one of the eight direct dependencies, or to
 anything in their transitive closure, or to a GitHub Action used by the
 workflows.
 
@@ -451,10 +451,12 @@ workflows.
 
 | Control | Effect |
 |---|---|
-| Six direct dependencies | Each argued for in [ARCHITECTURE.md](ARCHITECTURE.md). The JWS is hand-written rather than taken from a JWT library, and the administration interface is `html/template` rather than React, which keeps Node.js and its transitive closure out of the build and out of CI entirely; see [ADR 0012](adr/0012-server-rendered-administration-interface.md) |
-| `go.sum` and `go mod verify` | A published version cannot change under a fixed hash |
+| Eight direct dependencies | Each argued for in [ARCHITECTURE.md](ARCHITECTURE.md). The JWS is hand-written rather than taken from a JWT library, and the administration interface is `html/template` rather than React, which keeps Node.js and its transitive closure out of the build and out of CI entirely; see [ADR 0012](adr/0012-server-rendered-administration-interface.md) |
+| `go.sum` and `go mod verify` | A published version cannot change under a fixed hash: the Go command checks every download against `go.sum`. `go mod verify` re-hashes the module cache on disk, which on a runner may have been restored rather than downloaded. It runs in the `security` workflow, in the gate job of the `release` workflow before anything is built, and in `make tidy`; the `ci` workflow does not run it |
 | `govulncheck`, weekly and on every push | A new advisory turns the security workflow red without a commit |
-| `gosec`, CodeQL, `gitleaks`, Trivy, dependency review | The `security` workflow |
+| `gosec`, CodeQL, `gitleaks`, Trivy, dependency review | The `security` workflow. Trivy fails the run on a high or critical vulnerability that has a fix, in the dependencies or in the built image; everything else it finds is reported to code scanning |
+| Base images pinned by digest | `deploy/Dockerfile` and the PostgreSQL image of the compose file name a digest beside the tag, and Dependabot moves them |
+| The release gate | A tag publishes nothing until the checks of the `ci` workflow have passed on the tagged commit, inside the `release` workflow itself |
 | Every Action pinned to a commit SHA | A tag is a moving reference the upstream owner can repoint, which is the shape of the `tj-actions` compromise |
 | Tool versions pinned in the `Makefile` | A lint or scan result is reproducible across machines and across time |
 | `CGO_ENABLED=0`, `-trimpath`, distroless static base | No C toolchain in the build, no shell in the image |
@@ -468,8 +470,11 @@ workflows.
   nobody has reported yet.
 - **No reproducible build verification.** `-trimpath` and the pinned toolchain
   make the build deterministic in principle, and nothing in the release pipeline
-  proves that the published binary corresponds to the published source. There
-  is no SLSA provenance attestation and no signed artefact in this release.
+  proves that the published binary corresponds to the published source. The
+  archives and the container image carry a signed SLSA provenance attestation,
+  which says which workflow run built them and from which commit; it is a
+  statement by the build system, not an independent rebuild, so a compromised
+  runner or Action signs a compromised artefact just as readily.
 - **No vendored dependencies.** The module cache is fetched from the proxy at
   build time. A verified hash is not the same thing as a reviewed diff.
 - **The upgrade treadmill.** A dependency that is not upgraded for long enough
@@ -645,7 +650,7 @@ disappear, and this section is what the transfer costs.
 | `tickets.require_existing_factor_default`, default on | A subject who still holds an authenticator or a confirmed TOTP secret cannot be issued a ticket without an explicit `require_existing_factor: false`. This is the control that stops the channel from being a general account-takeover route rather than a recovery one |
 | The `enrolment_ticket.factor_override` alert | Every override is a warning-level row an operator sees in `GET /admin/v1/alerts`, collapsed by fingerprint so a campaign is one row with a rising count |
 | Full audit trail | `enrolment_ticket.issued` names who issued it and what factors the subject held at the time; `webauthn.registration.started` and `.completed` carry `via: enrolment_ticket` and the ticket identifier; `enrolment_ticket.redeemed` records which credential the redemption produced. An enrolment through a ticket is therefore distinguishable from an ordinary one, after the fact |
-| Rate limiting per source address and per ticket selector | Guessing a ticket costs the per-subject failure budget per selector, and spraying across selectors costs the per-address budget. A wrong ticket is indistinguishable from an expired or consumed one, so nothing tells an attacker which selectors exist |
+| Rate limiting per declared end-user address and per ticket selector | Guessing a ticket costs the per-subject failure budget per selector, counted before the verifier is compared so that a parallel burst cannot overshoot it, and spraying across selectors costs the per-address budget when the application declares the address. A wrong ticket is indistinguishable from an expired or consumed one, so nothing tells an attacker which selectors exist |
 | Revocation | `POST /admin/v1/enrolment-tickets/{ticket_id}/revoke` kills a ticket believed intercepted, and `POST /admin/v1/subjects/{subject_id}/credentials/{credential_id}/revoke` kills whatever it enrolled |
 
 **Not mitigated**
@@ -685,6 +690,60 @@ honest narrowing is operational rather than technical: set `tickets.ttl` as low
 as the delivery channel tolerates, issue on a live call rather than in a batch,
 and read `enrolment_ticket.` in the audit log as a routine review rather than
 during an incident.
+
+### 11. An anonymous visitor of the application's sign-in page
+
+**Starts with** a browser and the integrating application's public sign-in
+page. No API key, no credential, and no reach to this service: every request
+they cause is sent by the application's backend, with the application's key.
+They know, or can guess, the references of some of the application's users.
+
+**Can do**
+
+- Submit wrong TOTP codes and wrong recovery codes for any user whose reference
+  they know, as fast as the application lets them, in parallel.
+- Start WebAuthn ceremonies for any such user and complete them with rubbish.
+- Aim at one user, to keep them out, or at everybody, to take the application's
+  sign-in down.
+
+**Stopped by**
+
+| Control | Effect |
+|---|---|
+| The per-subject budget is held per factor | Ten wrong TOTP codes lock the victim out of TOTP for `throttle.lockout_duration`. Their passkey and their recovery codes keep working, and the reverse. A factor that can be guessed at cannot be used to switch off the one that cannot |
+| Attempts are counted before the secret is compared | The count is one atomic statement in the store, taken before the code is looked at and given back on success. Sixty parallel guesses get ten evaluated, not the thirty a check-then-record sequence let through |
+| A success clears the factor's count, and never applies a lockout | The victim's own successful sign-in resets what the attacker accumulated, and cannot be the request that trips the limit |
+| The per-address limit counts the end user's address, declared in `X-End-User-IP` | The attacker's failures land in the attacker's bucket. The address of the application's backend is never a bucket, so the failures of all users do not add up to a lockout of all users |
+| No per-address limit without the header | An application that does not send it loses the per-address limit, and does not gain a global one: fifty failures spread over its users lock nobody out |
+| The per-key ceiling is a rate limit | A burst that reaches `throttle.max_requests_per_key` costs the application the rest of the window, not a further `lockout_duration` |
+| A bound on concurrent Argon2id evaluations | Issuing recovery codes and tickets, and verifying either, take a slot from a fixed pool of between two and eight. A request that waits three seconds for one is answered 503 with `Retry-After`. Memory for hashing is bounded by the pool, not by the number of requests in flight |
+| A WebAuthn failure with no challenge behind it is not counted against the subject | A completion naming a challenge that is unknown, expired, already used or of the other ceremony has not been tied to the subject by anything but the caller's say-so. It counts against the declared address only |
+
+**Not mitigated**
+
+- **One factor of one user can still be locked.** Knowing a reference is enough
+  to spend that user's TOTP budget, or their recovery budget, every window. The
+  user is left with their other factors, and an operator can reset the throttle,
+  but a user whose only factor is TOTP can be kept out for as long as the
+  attacker keeps at it. The per-address limit is what makes that cost the
+  attacker addresses, and it exists only if the application sends the header.
+- **The same holds for WebAuthn, through real ceremonies.** The application
+  will start a ceremony for whoever's name is typed into it, and ten
+  completions with a bad signature against those challenges are ten genuine
+  failures of that subject's WebAuthn factor. Nothing is guessed by them, so
+  the lockout protects only the cost of the verification.
+- **The declared address is the application's word.** A backend that sends a
+  constant, or the address of its own load balancer, rebuilds the single
+  shared bucket this design removed. A backend that forwards a header the
+  browser controls lets the attacker choose a fresh bucket per request.
+- **The per-address budget can be overshot by a burst.** It is checked before
+  the attempt and recorded after, because a success must not clear a bucket
+  that other people share, and the store cannot take a single failure back.
+  The overshoot is bounded by the requests in flight, and the per-subject
+  budget, which is the one that bounds guessing, is not affected.
+- **A fault after the count is a failure counted.** A request that dies on a
+  database error between the reservation and the verdict leaves one failure in
+  the subject's bucket for the factor.
 
 ## Cross-cutting limits
 
@@ -756,10 +815,14 @@ Zeroizing shortens the window in which key material sits in reachable memory. It
 does not eliminate it. A deployment that needs a hard guarantee needs key
 material in an HSM or an external KMS, which this service does not provide.
 
-The same applies to the `env` KEK provider. It unsets the variable once parsed,
-which removes it from the process environment block and from `/proc/self/environ`
-for anything reading afterwards, but the Go runtime has already copied the value
-into an immutable string and the orchestrator still holds it in its own state.
+The same applies to the `env` KEK provider, to the subject pepper and to the
+audit sink token. Each variable is unset once read, which keeps it from a child
+process started later and nothing more: `os.Unsetenv` edits the Go runtime's
+copy of the environment, while the block the kernel recorded at startup stays
+readable in `/proc/<pid>/environ`, by the same uid and by root, for the life of
+the process. The Go runtime has also copied the value into an immutable string,
+and the orchestrator still holds it in its own state. The keyring has a `file`
+provider for that reason, and every deployment under `deploy/` uses it.
 
 ### The signing key is a single point of forgery
 
@@ -868,9 +931,18 @@ its own mitigations can be applied in proportion.
 Attestation verification, when it is turned on, trusts a FIDO MDS3 BLOB read
 from `webauthn.metadata_path`. The file's JWT signature is verified against the
 FIDO root, so an attacker who can write to the disk cannot substitute their own
-trust anchors, and the file is never fetched, so there is no network path to
-tamper with. Entries that do not parse are dropped, which fails safe, because an
+trust anchors, and the file is never fetched, so there is no download to tamper
+with. Entries that do not parse are dropped, which fails safe, because an
 unknown model is refused when attestation is required.
+
+Verifying that signature is not silent on the network. The library's decoder
+checks each certificate of the BLOB's chain for revocation, and that check
+requests the CRL distribution points and OCSP responders named in the
+certificates, through Go's default HTTP client, when the BLOB is loaded at
+startup. It fails soft: where egress is denied, as in the Kubernetes
+NetworkPolicy shipped here, the requests fail, the chain is treated as not
+revoked and the BLOB loads. A revoked FIDO signing certificate is therefore
+noticed only by a deployment that lets those requests out.
 
 Staleness fails safe in one direction only. A model certified after the download
 is unknown and refused. A model whose status report turned to revoked or

@@ -53,7 +53,17 @@ Out of scope:
   states so. A report that the chain can be rewritten wholesale by someone with
   write access to the file is describing a documented limitation.
 - findings that depend on running the service without TLS on a public interface.
-  The configuration validator refuses that combination.
+  The configuration validator refuses to serve plain HTTP on any address that
+  is not loopback, unless TLS is configured in process, `server.trust_proxy`
+  declares the proxy that terminates it, or `server.allow_plaintext` is set.
+  That last setting is the operator's explicit statement that something outside
+  the process bounds who can reach the port, such as a loopback publish rule or
+  a NetworkPolicy. Neither the binary nor the container image sets it; the
+  compose files and the Kubernetes ConfigMap under `deploy/` do, each beside
+  the rule that makes it true. A deployment that sets it with nothing bounding
+  access has been configured to be exposed, and a finding that starts there is
+  out of scope. A way to get plain HTTP served on a non-loopback address
+  without one of those three settings is in scope.
 - missing hardening that has no exploit path, reported from a scanner without
   analysis.
 

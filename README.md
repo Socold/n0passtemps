@@ -8,7 +8,8 @@ An on-premise passwordless authentication server. It runs WebAuthn and FIDO2
 ceremonies, time-based one-time passwords per RFC 6238, and single-use recovery
 codes, behind an HTTP API that an application delegates its login to. It is one
 static Go binary with no runtime dependencies, stores its data in SQLite or
-PostgreSQL, makes no outbound network connection other than to that database,
+PostgreSQL, makes no outbound network connection other than to that database
+unless an audit sink or a FIDO metadata BLOB is configured,
 and is MIT-licensed. It is built for organisations that want to keep
 authentication data on infrastructure they control, and for the operator who
 will run it without a support contract: the configuration validator refuses the
@@ -52,7 +53,7 @@ What `features.lite_mode = true` actually changes, and nothing else does:
 | `recovery.code_count` | 16 | 8 |
 
 WebAuthn, TOTP, recovery codes, the hash-chained audit log, the throttle and the
-ten alert types are identical in both. Lite is a shorthand applied after the
+thirteen alert types are identical in both. Lite is a shorthand applied after the
 file and the environment are read, and only to settings the file did not name,
 so "lite plus RBAC" is a valid configuration. Details in
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md#what-lite-mode-actually-changes).
@@ -373,7 +374,7 @@ an orthography choice. Recovery codes are
 | Platform and roaming authenticators | Yes | Windows Hello, Touch ID, Face ID, Android, USB, NFC and BLE security keys |
 | User verification required by default | Yes | `webauthn.user_verification = "required"`, which is what makes a single WebAuthn factor sufficient. `discouraged` is refused by the validator |
 | AAGUID allow and block lists | Yes | The offline alternative to attestation verification |
-| Attestation verification | Optional, off by default | Needs a FIDO MDS3 BLOB on disk (`webauthn.metadata_path`) or an allow list. The BLOB's signature is verified against the FIDO root and it is never fetched over the network, so refreshing it is an operator duty |
+| Attestation verification | Optional, off by default | Needs a FIDO MDS3 BLOB on disk (`webauthn.metadata_path`) or an allow list. The BLOB's signature is verified against the FIDO root and it is never fetched over the network, so refreshing it is an operator duty. Loading it makes the library attempt CRL and OCSP requests for the BLOB's signing chain; they fail soft where egress is denied |
 | Signature counter clone detection | Reported, never refused | Many authenticators legitimately report a constant zero. It raises an alert and a signal in the response |
 | TOTP, RFC 6238 | Yes | SHA1, SHA256 or SHA512; 6 or 8 digits; a replay high-water mark enforced by compare-and-swap |
 | HOTP, RFC 4226 | No | Deliberately. [ADR 0011](docs/adr/0011-drop-hotp.md) |
@@ -388,7 +389,7 @@ an orthography choice. Recovery codes are
 | Revoke every authenticator of a subject | Yes | One transaction covering all WebAuthn credentials and the TOTP secret. Recovery codes are left, and the response reports how many remain |
 | Keyring rewrap | Yes | `POST /admin/v1/kek/rewrap` moves sealed records onto the current key version and reports which versions are still in use, so an old version can be retired |
 | Rate limiting on three dimensions at once | Yes | Per subject, per source network, per API key, plus a per-administrator revocation burst |
-| Ten alert types | Yes | Deduplicated by fingerprint, so a brute-force attempt is one row with a rising count |
+| Thirteen alert types | Yes | Deduplicated by fingerprint, so a brute-force attempt is one row with a rising count |
 | SQLite and PostgreSQL | Yes | Identical schema, enforced by `make migrate-check` in CI |
 | Server-rendered administration interface | Yes | `html/template`, embedded, no Node.js anywhere. [ADR 0012](docs/adr/0012-server-rendered-administration-interface.md) |
 | Multi-tenancy | Not yet | Every table carries a tenant identifier; the tenant comes from configuration, not from the credential |
@@ -413,7 +414,7 @@ an orthography choice. Recovery codes are
 | An approval runs what was approved, for the person who asked | Approvals are redeemed by the original requester, bound to the operation, the requester and the payload, and spent once | [ADR 0013](docs/adr/0013-approvals-are-redeemed-not-executed.md) |
 | No administrative token in a log stream | The first token is created by a one-shot command that writes to the operator's terminal | [ADR 0014](docs/adr/0014-bootstrap-by-explicit-command.md) |
 | One anti-replay surface, not two | TOTP only, with a single high-water mark advanced by compare-and-swap | [ADR 0011](docs/adr/0011-drop-hotp.md) |
-| The build has no Node.js in it | Server-rendered interface, embedded templates, six direct Go dependencies | [ADR 0012](docs/adr/0012-server-rendered-administration-interface.md) |
+| The build has no Node.js in it | Server-rendered interface, embedded templates, eight direct Go dependencies | [ADR 0012](docs/adr/0012-server-rendered-administration-interface.md) |
 | Personal data pseudonymised at rest | Subject references stored as an HMAC under a separate pepper, plus an envelope-encrypted copy. No substring search, because that would undo the encryption | [docs/GDPR.md](docs/GDPR.md) |
 | Secrets never in a log line | Redaction enforced in the log handler, not at the call site | [docs/MONITORING.md](docs/MONITORING.md) |
 
@@ -445,8 +446,8 @@ Security Top 10 2023, and GDPR Articles 15, 17 and 32.
 | [docs/RBAC.md](docs/RBAC.md) | The 27 permissions against the three roles, and which are dual-approval candidates |
 | [docs/WEBAUTHN.md](docs/WEBAUTHN.md) | The ceremony here specifically, the challenge store, the user handle, attestation, the counter, platform notes |
 | [docs/GDPR.md](docs/GDPR.md) | Lawful basis, the personal data inventory, the Article 15 and 17 paths, how the chain survives erasure |
-| [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) | Assets, trust boundaries, ten attackers, and what is not mitigated |
-| [docs/MONITORING.md](docs/MONITORING.md) | What to scrape, the Prometheus endpoint, the ten alert types and their responses, log fields, database tuning |
+| [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) | Assets, trust boundaries, eleven attackers, and what is not mitigated |
+| [docs/MONITORING.md](docs/MONITORING.md) | What to scrape, the Prometheus endpoint, the thirteen alert types and their responses, log fields, database tuning |
 | [docs/EXTENSIONS.md](docs/EXTENSIONS.md) | What sits around the core and what never goes in it: the trust-path test, the adapters that exist, the ones that are candidates, and the ones that would be a different product |
 | [docs/SIEM.md](docs/SIEM.md) | Getting the two log streams into a SIEM: why there is no syslog client, the field mapping to ECS and OCSF, the closed audit event vocabulary, and what a sink receiver has to do |
 | [docs/adr/README.md](docs/adr/README.md) | Eighteen architecture decision records: the deliberate deviations from the original specification, and the convention itself |

@@ -65,6 +65,8 @@ var (
 // implements: an unreadable QR code is a worse outcome than a theoretical one.
 type Algorithm string
 
+// The three algorithms RFC 6238 defines. See the type's comment for why SHA1
+// remains the default.
 const (
 	SHA1   Algorithm = "SHA1"
 	SHA256 Algorithm = "SHA256"

@@ -520,7 +520,7 @@ func NewVerifier(keys map[string]ed25519.PublicKey, expectedIssuer string, skew 
 // comment on that variable. The order of the checks is deliberate: nothing in
 // the payload is parsed, let alone trusted, until the signature has been
 // verified.
-func (v *Verifier) Verify(token string, expectedAudience string) (*Claims, error) {
+func (v *Verifier) Verify(token, expectedAudience string) (*Claims, error) {
 	// Fail closed. An empty expected audience would otherwise accept a token
 	// minted for any other API key, which is the whole point of pinning it.
 	if expectedAudience == "" || v.expectedIssuer == "" {

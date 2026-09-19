@@ -387,7 +387,7 @@ func (c *Checker) checkKEK(now time.Time) KEKHealth {
 // and whether that exceeds the configured interval. The janitor polls it so
 // that an overdue rotation becomes an alert an operator sees, instead of a
 // field in a report nobody happens to request.
-func (c *Checker) KEKRotation() (version uint32, age time.Duration, overdue bool) {
+func (c *Checker) KEKRotation() (keyVersion uint32, age time.Duration, overdue bool) {
 	h := c.checkKEK(c.now().UTC())
 	if !c.kekRotatedAt.IsZero() {
 		age = c.now().UTC().Sub(c.kekRotatedAt)

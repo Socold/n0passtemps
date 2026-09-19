@@ -1,6 +1,7 @@
 package totp
 
 import (
+	"bytes"
 	"encoding/base32"
 	"errors"
 	"net/url"
@@ -272,7 +273,7 @@ func TestProvisioningURIRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode secret: %v", err)
 	}
-	if string(decoded) != string(secret) {
+	if !bytes.Equal(decoded, secret) {
 		t.Errorf("decoded secret = %q, want %q", decoded, secret)
 	}
 }
@@ -316,7 +317,7 @@ func TestGenerateSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateSecret: %v", err)
 	}
-	if string(a) == string(b) {
+	if bytes.Equal(a, b) {
 		t.Fatal("two generated secrets are identical")
 	}
 }

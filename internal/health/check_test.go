@@ -53,7 +53,7 @@ type fakeStore struct {
 func (f *fakeStore) Ping(context.Context) error { return f.pingErr }
 func (f *fakeStore) Engine() string             { return f.engine }
 
-func (f *fakeStore) ChainHead(context.Context) (int64, []byte, error) {
+func (f *fakeStore) ChainHead(context.Context) (seq int64, hash []byte, err error) {
 	return f.headSeq, nil, f.headErr
 }
 
@@ -69,8 +69,10 @@ type fakeKeyring struct {
 	versions []uint32
 }
 
-func (k *fakeKeyring) Current() (uint32, []byte, error) { return k.version, k.key, k.err }
-func (k *fakeKeyring) Versions() []uint32               { return k.versions }
+func (k *fakeKeyring) Current() (version uint32, key []byte, err error) {
+	return k.version, k.key, k.err
+}
+func (k *fakeKeyring) Versions() []uint32 { return k.versions }
 
 func healthyStore() *fakeStore {
 	return &fakeStore{engine: "sqlite", headSeq: 42}
@@ -491,7 +493,10 @@ func TestNoteError(t *testing.T) {
 	}
 }
 
-func TestNoteErrorConcurrent(t *testing.T) {
+// TestNoteErrorConcurrent has no assertion because it is not what fails it:
+// the race detector is, which is why the parameter is unused. Adding a check
+// here would look like coverage and test nothing this does not already test.
+func TestNoteErrorConcurrent(_ *testing.T) {
 	// NoteError is called from request handlers and the janitor while the
 	// report is being built. Run under -race.
 	c := New(baseConfig(), healthyStore(), healthyKeyring(), testNow, fixedClock)

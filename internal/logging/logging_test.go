@@ -23,16 +23,15 @@ const (
 // logLine runs fn against a JSON logger and returns the single record it
 // produced, both parsed and raw. The raw form matters: a value can be absent
 // from the key it belongs to and still present elsewhere on the line.
-func logLine(t *testing.T, cfg config.Logging, fn func(l *slog.Logger)) (map[string]any, string) {
+func logLine(t *testing.T, cfg config.Logging, fn func(l *slog.Logger)) (rec map[string]any, raw string) {
 	t.Helper()
 	var buf bytes.Buffer
 	fn(New(cfg, &buf))
 
-	raw := buf.String()
+	raw = buf.String()
 	if strings.Count(raw, "\n") != 1 {
 		t.Fatalf("expected one log line, got %q", raw)
 	}
-	var rec map[string]any
 	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
 		t.Fatalf("log line is not JSON: %v\n%s", err, raw)
 	}
