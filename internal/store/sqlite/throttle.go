@@ -190,6 +190,9 @@ func (s *Store) ResetSubjectThrottles(ctx context.Context, tenantID, subjectID s
 	}
 
 	clause, args := subjectBucketPredicate(tenantID, subjectID)
+
+	// #nosec G202 -- subjectBucketPredicate returns a fixed predicate string; the tenant and subject travel as ?
+	// parameters
 	res, err := s.write.ExecContext(ctx,
 		`DELETE FROM throttle_buckets WHERE `+clause, args...)
 	if err != nil {

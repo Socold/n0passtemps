@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/Socold/n0passtemps/internal/store"
@@ -384,6 +385,12 @@ func scanCredential(sc rowScanner) (*store.Credential, error) {
 	}
 	if c.Transports, err = decodeJSONArray(transports); err != nil {
 		return nil, err
+	}
+
+	// sign_count is a BIGINT column, so the database can hand back a value the
+	// WebAuthn signature counter cannot hold. See store.ErrCorruptRow.
+	if signCount < 0 || signCount > math.MaxUint32 {
+		return nil, fmt.Errorf("%w: credential %s has sign_count %d", store.ErrCorruptRow, c.ID, signCount)
 	}
 
 	c.AttestationType = store.AttestationType(attestationType)

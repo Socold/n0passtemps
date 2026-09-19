@@ -2,6 +2,7 @@ package totp
 
 import (
 	"encoding/base32"
+	"errors"
 	"net/url"
 	"strconv"
 	"strings"
@@ -127,7 +128,7 @@ func TestVerifySkewWindow(t *testing.T) {
 	// Codes for the five steps centred on now.
 	codes := map[int64]string{}
 	for _, offset := range []int64{-2, -1, 0, 1, 2} {
-		codes[offset] = codeForStep(secret, base, now+offset)
+		codes[offset] = codeForStep(secret, base, uint64(now+offset))
 	}
 
 	cases := []struct {
@@ -380,6 +381,43 @@ func TestTimestepBeforeEpoch(t *testing.T) {
 	// A caller that skipped Validate gets 0 rather than a division by zero.
 	if got := Timestep(Params{}, time.Unix(1234567890, 0)); got != 0 {
 		t.Errorf("Timestep with zero period = %d, want 0", got)
+	}
+}
+
+// A negative timestep is not a valid RFC 4226 counter. Code must report it,
+// and Verify must refuse, rather than wrapping the step into a counter near
+// 2^64 and computing an HMAC no authenticator would ever produce.
+func TestCodeBeforeEpoch(t *testing.T) {
+	secret := rfcSeed(20)
+	p := Params{Algorithm: SHA1, Digits: 6, Period: 30 * time.Second}
+
+	for _, unix := range []int64{-1, -30, -1234567890} {
+		at := time.Unix(unix, 0).UTC()
+		if _, err := Code(secret, p, at); !errors.Is(err, ErrTimeBeforeEpoch) {
+			t.Errorf("Code at unix %d: err = %v, want ErrTimeBeforeEpoch", unix, err)
+		}
+		// The wrapped counter for this instant, had the conversion been left
+		// to wrap, would have produced this code. No instant may accept it.
+		wrapped := codeForStep(secret, p, uint64(Timestep(p, at)))
+		if _, ok := Verify(secret, p, wrapped, at, 0); ok {
+			t.Errorf("Verify accepted the wrapped-counter code at unix %d", unix)
+		}
+	}
+
+	// The first valid instant is unaffected, and so is a step inside Skew of
+	// the epoch, where the low end of the window is negative.
+	if _, err := Code(secret, p, time.Unix(0, 0).UTC()); err != nil {
+		t.Errorf("Code at the epoch: %v", err)
+	}
+	skewed := Params{Algorithm: SHA1, Digits: 6, Period: 30 * time.Second, Skew: 1}
+	at := time.Unix(0, 0).UTC()
+	code, err := Code(secret, skewed, at)
+	if err != nil {
+		t.Fatalf("Code at the epoch with skew: %v", err)
+	}
+	// lastStep is -1 so that step 0 counts as fresh.
+	if step, ok := Verify(secret, skewed, code, at, -1); !ok || step != 0 {
+		t.Errorf("Verify at the epoch = (%d, %v), want (0, true)", step, ok)
 	}
 }
 

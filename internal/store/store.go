@@ -40,6 +40,16 @@ var (
 	// alone is not a control, so this is a refusal on its own terms rather
 	// than a lost race, and a handler maps it to a different response.
 	ErrSelfApproval = errors.New("store: an approval requires a second administrator")
+
+	// ErrCorruptRow is returned when a stored value cannot be represented in
+	// the field it is read into, such as a WebAuthn signature counter outside
+	// the uint32 that the specification gives it.
+	//
+	// Such a row has been damaged or tampered with, so it is reported rather
+	// than narrowed to fit. A narrowed counter is still a plausible counter,
+	// and the clone check compares counters: a value that wrapped into the
+	// valid range can only make that check pass where it should have failed.
+	ErrCorruptRow = errors.New("store: stored value out of range")
 )
 
 // AuditFilter narrows an audit log query. Zero values mean "no constraint".

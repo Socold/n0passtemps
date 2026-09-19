@@ -820,6 +820,9 @@ func (h *Handler) setSubjectStatus(w http.ResponseWriter, r *http.Request, p rba
 
 	// Answer with a redirect so that a reload does not repeat the action and the
 	// back button does not show a form waiting to be resubmitted.
+	//
+	// #nosec G710 -- the target is a fixed path, an identifier pathID accepted only because it parses as a UUID, and
+	// a notice string passed by handleSubjectLock and handleSubjectUnlock as a literal
 	http.Redirect(w, r, "/admin/subjects/"+id+"?notice="+notice, http.StatusSeeOther)
 }
 
@@ -855,6 +858,8 @@ func (h *Handler) handleSubjectClearLimit(w http.ResponseWriter, r *http.Request
 		Detail:  map[string]any{"surface": "administration interface"},
 	})
 
+	// #nosec G710 -- the target is a fixed path and query, with an identifier pathID accepted only because it parses
+	// as a UUID
 	http.Redirect(w, r, "/admin/subjects/"+id+"?notice=limit-cleared", http.StatusSeeOther)
 }
 
@@ -1096,6 +1101,8 @@ func (h *Handler) handleCredentialWithdraw(w http.ResponseWriter, r *http.Reques
 		},
 	})
 
+	// #nosec G710 -- the target is a fixed path and query, with an identifier pathID accepted only because it parses
+	// as a UUID
 	http.Redirect(w, r, "/admin/subjects/"+subjectID+"?notice=authenticator-removed", http.StatusSeeOther)
 }
 

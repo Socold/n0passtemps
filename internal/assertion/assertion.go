@@ -508,6 +508,8 @@ func LoadPrivateKeyPEM(path string) (ed25519.PrivateKey, error) {
 		return nil, fmt.Errorf("%w: %q is mode %#o, must not be readable by group or other (chmod 600)", ErrInsecureKeyMode, abs, mode)
 	}
 
+	// #nosec G304 -- the signing key path comes from the operator's configuration, and its mode is checked above
+	// before the contents are read
 	raw, err := os.ReadFile(abs)
 	if err != nil {
 		return nil, fmt.Errorf("assertion: read %q: %w", abs, err)

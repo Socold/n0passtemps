@@ -56,6 +56,13 @@ const (
 	argonThreads = 1
 	argonKeyLen  = 32
 	saltLen      = 16
+
+	// maxStoredHashLen bounds the digest a stored PHC string may carry. Verify
+	// recomputes at the stored length, so that length is the one value from
+	// the row that reaches argon2 as an output size. 64 bytes covers every
+	// digest width this package has written or would write, and refusing more
+	// keeps a damaged or crafted row from asking argon2 for a huge output.
+	maxStoredHashLen = 64
 )
 
 var (
@@ -164,6 +171,11 @@ func Verify(verifier []byte, storedHash string) (bool, error) {
 	defer zeroize.Bytes(salt)
 	defer zeroize.Bytes(want)
 
+	// The recomputation uses the stored digest length, so a row written under
+	// a different argonKeyLen still verifies. decodeHash bounds that length by
+	// maxStoredHashLen, which is what keeps the conversion in range and stops
+	// a crafted row from asking argon2 for an absurd output.
+	// #nosec G115 -- decodeHash rejects a stored hash longer than maxStoredHashLen (64 bytes)
 	got := argon2.IDKey(verifier, salt, argonTime, argonMemory, argonThreads, uint32(len(want)))
 	defer zeroize.Bytes(got)
 
@@ -219,6 +231,11 @@ func decodeHash(s string) (salt, sum []byte, err error) {
 	if len(sum) == 0 {
 		zeroize.Bytes(salt)
 		return nil, nil, fmt.Errorf("%w: empty hash", ErrBadHash)
+	}
+	if len(sum) > maxStoredHashLen {
+		zeroize.Bytes(salt)
+		zeroize.Bytes(sum)
+		return nil, nil, fmt.Errorf("%w: hash of %d bytes exceeds %d", ErrBadHash, len(sum), maxStoredHashLen)
 	}
 	return salt, sum, nil
 }

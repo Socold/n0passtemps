@@ -251,7 +251,10 @@ func openStore(ctx context.Context, cfg *config.Config, log *slog.Logger) (store
 		return st, nil
 	case "postgres":
 		st, err := postgres.Open(postgres.Options{
-			DSN:             cfg.Database.DSN,
+			DSN: cfg.Database.DSN,
+			// Validate refuses a pool outside 1..config.MaxDatabaseConns, so
+			// the pool size is known to fit an int32 by the time it is read.
+			// #nosec G115 -- config.Validate bounds max_open_conns by config.MaxDatabaseConns (4096)
 			MaxConns:        int32(cfg.Database.MaxOpenConns),
 			ConnMaxLifetime: cfg.Database.ConnMaxLifetime.Duration,
 			Logger:          log,
@@ -353,7 +356,6 @@ func serve(ctx context.Context, cfg *config.Config, handler http.Handler, rec *a
 			// The cipher list is left to the Go standard library. It tracks
 			// the current recommendations, and a hand-written list in an
 			// application is a list nobody updates.
-			PreferServerCipherSuites: false,
 		}
 	}
 

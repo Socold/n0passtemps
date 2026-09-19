@@ -136,6 +136,8 @@ func (s *Store) ListSubjects(ctx context.Context, tenantID string, f store.Subje
 
 	args = append(args, clampLimit(f.Limit, 50, 500))
 
+	// #nosec G202 -- subjectColumns is a package constant and every where entry is a literal above; each filter value
+	// travels as a ? parameter
 	query := `SELECT ` + subjectColumns + ` FROM subjects WHERE ` +
 		strings.Join(where, " AND ") + ` ORDER BY id ASC LIMIT ?`
 
@@ -328,6 +330,9 @@ func (s *Store) PurgeSubject(ctx context.Context, tenantID, id string) error {
 		}
 
 		clause, args := subjectBucketPredicate(tenantID, id)
+
+		// #nosec G202 -- subjectBucketPredicate returns a fixed predicate string; the tenant and subject travel as ?
+		// parameters
 		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM throttle_buckets WHERE `+clause, args...); err != nil {
 			return mapError(err)

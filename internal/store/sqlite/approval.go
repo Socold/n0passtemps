@@ -81,6 +81,8 @@ func (s *Store) ListApprovals(ctx context.Context, tenantID string, status store
 
 	args = append(args, clampLimit(limit, 50, 500))
 
+	// #nosec G202 -- approvalColumns is a package constant and both where entries are literals above; the status and
+	// the limit travel as ? parameters
 	query := `SELECT ` + approvalColumns + ` FROM approval_requests WHERE ` +
 		strings.Join(where, " AND ") + ` ORDER BY requested_at ASC, id ASC LIMIT ?`
 

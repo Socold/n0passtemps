@@ -1,6 +1,10 @@
 // Package totp implements time-based one-time passwords, RFC 6238, over the
 // HMAC counter construction of RFC 4226.
 //
+// The default hash is SHA1, which RFC 6238 requires for interoperability with
+// the authenticator applications people already have: HMAC does not inherit
+// the collision weakness of the bare hash. See the Algorithm type.
+//
 // Counter-based HOTP is not offered as a factor. A counter factor needs its own
 // look-ahead window and resynchronisation policy, which is a second anti-replay
 // surface to get right for no benefit to a passwordless deployment. Only the
@@ -16,6 +20,8 @@ package totp
 import (
 	"crypto/hmac"
 	"crypto/rand"
+
+	// #nosec G505 -- RFC 6238 interoperability requires HMAC-SHA1; see the Algorithm doc comment
 	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/sha512"
@@ -49,6 +55,7 @@ var (
 	ErrInvalidParams    = errors.New("totp: invalid parameters")
 	ErrShortSecret      = errors.New("totp: shared secret too short")
 	ErrInvalidLabel     = errors.New("totp: invalid provisioning label")
+	ErrTimeBeforeEpoch  = errors.New("totp: instant precedes the Unix epoch")
 )
 
 // Algorithm names the HMAC hash function of RFC 6238 section 1.2.
@@ -169,8 +176,24 @@ func Timestep(p Params, t time.Time) int64 {
 	return secs / step
 }
 
+// counterFor maps a timestep onto the RFC 4226 section 5.1 counter.
+//
+// The counter is an unsigned 64-bit quantity, so a negative timestep has no
+// counter: ok is false. Converting it would wrap to a counter near 2^64 and
+// change the HMAC input to one no authenticator would ever compute, which is
+// a wrong answer dressed up as a right one.
+func counterFor(step int64) (counter uint64, ok bool) {
+	if step < 0 {
+		return 0, false
+	}
+	return uint64(step), true
+}
+
 // Code returns the code for the timestep containing t, zero-padded to
 // p.Digits.
+//
+// It reports ErrTimeBeforeEpoch for an instant before 1970-01-01T00:00:00Z,
+// whose timestep is negative and therefore not a valid counter.
 func Code(secret []byte, p Params, t time.Time) (string, error) {
 	if err := p.Validate(); err != nil {
 		return "", err
@@ -178,7 +201,11 @@ func Code(secret []byte, p Params, t time.Time) (string, error) {
 	if len(secret) == 0 {
 		return "", fmt.Errorf("%w: secret is empty", ErrShortSecret)
 	}
-	return codeForStep(secret, p, Timestep(p, t)), nil
+	counter, ok := counterFor(Timestep(p, t))
+	if !ok {
+		return "", fmt.Errorf("%w: %s", ErrTimeBeforeEpoch, t.UTC().Format(time.RFC3339))
+	}
+	return codeForStep(secret, p, counter), nil
 }
 
 // Verify reports whether presented is the code for a timestep inside the
@@ -209,6 +236,12 @@ func Verify(secret []byte, p Params, presented string, t time.Time, lastStep int
 	}
 
 	now := Timestep(p, t)
+	// An instant before the Unix epoch has no counter, so no code can be
+	// verified against it. It is refused like any other failure, without
+	// saying why.
+	if now < 0 {
+		return 0, false
+	}
 	var matched int
 	var matchedStep int64
 
@@ -217,13 +250,18 @@ func Verify(secret []byte, p Params, presented string, t time.Time, lastStep int
 	// than a wrong code, which leaks the state of the replay counter. The
 	// window is at most a handful of steps, so the fixed cost is negligible.
 	for s := now - int64(p.Skew); s <= now+int64(p.Skew); s++ {
-		code := codeForStep(secret, p, s)
+		// Within Skew steps of the epoch the low end of the window is
+		// negative and has no counter. Such a step is still evaluated, on
+		// counter 0, and its comparison forced to a miss, so the loop costs
+		// the same number of HMAC evaluations at every instant.
+		counter, inRange := counterFor(s)
+		code := codeForStep(secret, p, counter)
 		// Constant-time comparison: a byte-wise early exit would reveal how
 		// many leading digits of a guess were right, which turns a 10^6 search
 		// into 6 searches of 10.
 		eq := subtle.ConstantTimeCompare([]byte(code), []byte(candidate))
 		fresh := ctGreater(s, lastStep)
-		hit := eq & fresh
+		hit := eq & fresh & boolToInt(inRange)
 
 		matched |= hit
 		// Branch-free select, so the loop takes the same path whether or not
@@ -290,12 +328,24 @@ func ProvisioningURI(issuer, accountName string, secret []byte, p Params) (strin
 	return u.String(), nil
 }
 
+// boolToInt maps a boolean onto the 0 or 1 that the helpers of crypto/subtle
+// work with.
+//
+// The branch is safe here: its condition is derived from the clock, never
+// from secret material or from the code presented.
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // codeForStep computes the code for one counter value. Params must already be
 // valid.
-func codeForStep(secret []byte, p Params, step int64) string {
+func codeForStep(secret []byte, p Params, counterValue uint64) string {
 	var counter [8]byte
 	// RFC 4226 section 5.1: the counter is an 8-byte big-endian value.
-	binary.BigEndian.PutUint64(counter[:], uint64(step))
+	binary.BigEndian.PutUint64(counter[:], counterValue)
 
 	mac := hmac.New(p.Algorithm.hash(), secret)
 	mac.Write(counter[:])
@@ -357,6 +407,11 @@ func ctGreater(a, b int64) int {
 	// borrow directly, which a shift of the wrapped difference would not do
 	// correctly for large operands.
 	const bias = uint64(1) << 63
+	// The uint64 conversions reinterpret the bit pattern on purpose: the bias
+	// trick needs the two's-complement encoding, not the numeric value, and
+	// xor with 2^63 restores the signed ordering.
+	// #nosec G115 -- two's-complement reinterpretation of a signed timestep, the wrap is what the bias relies on
 	_, borrow := bits.Sub64(uint64(b)^bias, uint64(a)^bias, 0)
+	// #nosec G115 -- bits.Sub64 defines borrow as 0 or 1, which every int holds
 	return int(borrow)
 }

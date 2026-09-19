@@ -133,6 +133,8 @@ func (s *Store) ListAlerts(ctx context.Context, tenantID string, f store.AlertFi
 
 	// Newest activity first, with the identifier breaking ties so that two
 	// alerts last seen in the same instant keep a stable order between calls.
+	// #nosec G202 -- alertColumns is a package constant and every where entry is a literal above, including the
+	// keyset subquery; the filter values travel as ? parameters
 	query := `SELECT ` + alertColumns + ` FROM alerts WHERE ` +
 		strings.Join(where, " AND ") + ` ORDER BY last_seen_at DESC, id DESC LIMIT ?`
 

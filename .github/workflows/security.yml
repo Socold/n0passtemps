@@ -27,8 +27,7 @@ concurrency:
 
 env:
   GO_VERSION: "1.27.1"
-  GOSEC_VERSION: "v2.21.4"
-  GOVULNCHECK_VERSION: "v1.1.4"
+  GOSEC_VERSION: "v2.29.0"
 
 jobs:
   gosec:
@@ -56,16 +55,32 @@ jobs:
         run: go install github.com/securego/gosec/v2/cmd/gosec@${{ env.GOSEC_VERSION }}
 
       - name: Run gosec
-        # -no-fail because the findings are triaged in the code scanning view;
-        # the job failing on the first medium-severity hit would make the SARIF
-        # upload below unreachable.
-        run: gosec -no-fail -exclude-generated -fmt sarif -out gosec.sarif ./...
+        # -no-fail keeps the SARIF upload below reachable; the report is turned
+        # into a job failure after it has been uploaded, so a finding is both
+        # visible in code scanning and red in the checks.
+        #
+        # -conf is the same configuration make sec uses: the G101 entropy
+        # thresholds and the requirement that a suppression names a rule and a
+        # reason.
+        run: gosec -conf .gosec.json -no-fail -exclude-generated -fmt sarif -out gosec.sarif ./...
 
       - name: Upload the gosec findings
         uses: github/codeql-action/upload-sarif@f079b8493333aace61c81488f8bd40919487bd9f # v3.25.7
         with:
           sarif_file: gosec.sarif
           category: gosec
+
+      - name: Fail on any gosec finding
+        # A clean report is the baseline. A finding is either fixed or
+        # suppressed in place with a "#nosec RULE -- reason" naming why; see
+        # CONTRIBUTING.md.
+        run: |
+          count=$(jq '[.runs[].results[]] | length' gosec.sarif)
+          echo "gosec reported ${count} finding(s)"
+          if [ "${count}" -ne 0 ]; then
+            echo "::error::gosec reported ${count} finding(s); see the code scanning view for this run"
+            exit 1
+          fi
 
   govulncheck:
     name: govulncheck
@@ -83,14 +98,14 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
-      - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@${{ env.GOVULNCHECK_VERSION }}
-
+      # The maintained action rather than "go install": govulncheck builds the
+      # SSA form of the whole dependency tree, and this one is large enough
+      # that doing it inside the job exhausted the runner's memory.
       - name: Check the dependency tree against the Go vulnerability database
-        # Reachability-based: an advisory against a package the binary never
-        # calls is reported as informational rather than failing the job, which
-        # is what keeps this signal worth acting on.
-        run: govulncheck ./...
+        uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0
+        with:
+          go-version-input: ${{ env.GO_VERSION }}
+          go-package: ./...
 
   gitleaks:
     name: gitleaks secret scan
@@ -109,7 +124,7 @@ jobs:
           fetch-depth: 0
 
       - name: Scan for committed secrets
-        uses: gitleaks/gitleaks-action@83373cf2f8c4db6e24b41c1a9b086bb9619e9cd3 # v2.3.6
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_CONFIG: .gitleaks.toml
@@ -169,7 +184,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Scan the repository filesystem
-        uses: aquasecurity/trivy-action@6c175e9c4083a92bbca2f9724c8a5e33bc2d97a5 # 0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -203,7 +218,7 @@ jobs:
             .
 
       - name: Scan the image
-        uses: aquasecurity/trivy-action@6c175e9c4083a92bbca2f9724c8a5e33bc2d97a5 # 0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image
           image-ref: n0passtemps:scan

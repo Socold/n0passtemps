@@ -123,6 +123,8 @@ func LoadFileProvider(path string, dataDirs ...string) (*FileProvider, error) {
 		return nil, err
 	}
 
+	// #nosec G304 -- the keyring path comes from kek.path in the operator's configuration or the KEK_PATH variable,
+	// and its mode and location are checked above
 	raw, err := os.ReadFile(abs)
 	if err != nil {
 		return nil, fmt.Errorf("kek: read %q: %w", abs, err)

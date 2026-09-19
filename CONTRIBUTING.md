@@ -60,7 +60,7 @@ the runner, and the runner is slower than you are.
 | `migrate-check` | A shell diff over the migration files | A table or index declared for one engine and not the other |
 | `test-race` | `go test -race ./...` | A data race |
 | `cover` | `go test -covermode=atomic` | Nothing by itself; it prints the number |
-| `sec` | `gosec`, `govulncheck` | Known-vulnerable dependencies, and the security patterns gosec recognises |
+| `sec` | `gosec`, `govulncheck` | Any gosec finding that is not answered in place, and known-vulnerable dependencies |
 | `secrets` | `gitleaks`, over the working tree **and the history** | A committed token, keyring or credential |
 | `build` | `go build` | A compilation failure in a package the tests do not reach |
 
@@ -81,6 +81,30 @@ The security workflow, `.github/workflows/security.yml`, runs `gosec`,
 `govulncheck`, `gitleaks`, CodeQL, Trivy and dependency review on every push and
 weekly on a schedule, because most findings there come from a newly published
 advisory rather than from a new commit.
+
+### gosec has to be clean
+
+A clean `gosec` report is the baseline, locally through `make sec` and on the
+runner, where the SARIF report is still uploaded to code scanning but a finding
+now fails the job. Both invocations pass `-conf .gosec.json`, so a run on a
+laptop and a run in CI reach the same verdict.
+
+Every finding is either fixed or answered where it sits, with a
+`// #nosec RULE -- reason` naming that rule and saying why this line is not the
+thing the rule looks for. The reason has to be specific to the line: "safe" is
+not a reason, "table is a literal chosen by the two callers in this file, and
+the values travel as `?` parameters" is. `.gosec.json` turns on
+`nosec-require-rules` and `nosec-require-justification`, so a bare `#nosec`, or
+one without a `--` reason, suppresses nothing.
+
+Excluding a whole rule is not acceptable. The one thing `.gosec.json` tunes is
+the G101 entropy threshold, because that rule reports every constant whose name
+contains `token`, `cred` or `secret`, and this repository holds a few dozen of
+them as permission names, audit event names and column projections. The
+thresholds sit above the entropy that identifier-shaped text reaches and below
+the entropy of a random token, so a real secret literal is still reported. If
+you change them, prove that with a throwaway file holding a secret-shaped
+literal before you keep the change.
 
 ## Code style
 

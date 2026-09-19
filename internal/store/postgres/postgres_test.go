@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"sync"
@@ -29,6 +30,7 @@ import (
 
 	"github.com/Socold/n0passtemps/internal/audit"
 	"github.com/Socold/n0passtemps/internal/store"
+	"github.com/Socold/n0passtemps/internal/store/migrations"
 )
 
 // dsnEnv names the variable that points the suite at a cluster.
@@ -241,12 +243,21 @@ func TestMigrateIsIdempotent(t *testing.T) {
 		t.Fatalf("second migrate: %v", err)
 	}
 
+	// The expected count is read from the embedded set rather than written in
+	// here, so adding a migration does not break this test for a reason that
+	// has nothing to do with idempotence.
+	embedded, err := migrations.Load("postgres")
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	var applied int
 	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&applied); err != nil {
 		t.Fatal(err)
 	}
-	if applied != 2 {
-		t.Fatalf("schema_migrations holds %d rows, want the 2 embedded migrations", applied)
+	if applied != len(embedded) {
+		t.Fatalf("schema_migrations holds %d rows, want the %d embedded migrations",
+			applied, len(embedded))
 	}
 
 	// A recorded checksum that no longer matches the embedded file must stop
@@ -255,7 +266,7 @@ func TestMigrateIsIdempotent(t *testing.T) {
 		`UPDATE schema_migrations SET checksum = 'deadbeef' WHERE version = 1`); err != nil {
 		t.Fatal(err)
 	}
-	err := s.Migrate(ctx)
+	err = s.Migrate(ctx)
 	if err == nil {
 		t.Fatal("expected Migrate to refuse a changed checksum")
 	}
@@ -675,6 +686,73 @@ func TestAdvanceSignCount(t *testing.T) {
 	// The transports array has to survive its JSONB round trip.
 	if len(after.Transports) != 2 || after.Transports[0] != "internal" {
 		t.Errorf("transports = %v, want the two stored values", after.Transports)
+	}
+}
+
+// sign_count lives in a BIGINT column while the WebAuthn signature counter is a
+// uint32, so a damaged or tampered row can hold a value the model cannot
+// represent. Reading it must fail rather than narrow the value: a narrowed
+// counter is a plausible counter, and it can only make the clone check pass
+// where it should have failed.
+func TestCredentialRejectsSignCountOutOfRange(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedTenant(t, s, "tenant-a")
+	seedSubject(t, s, "tenant-a", "subject-1", "ref-1")
+	seedCredential(t, s, "tenant-a", "subject-1", "cred-1", 10)
+
+	// wc_sign_count_ck keeps a negative counter out through SQL, so it is
+	// dropped for this test. That is what makes the fabricated rows below
+	// reachable at all: a real one would come from a restore without the
+	// constraint, or from damage below SQL.
+	if _, err := s.pool.Exec(ctx,
+		`ALTER TABLE webauthn_credentials DROP CONSTRAINT wc_sign_count_ck`); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name  string
+		value int64
+	}{
+		// 2^32 narrows to 0, which would read as a fresh authenticator.
+		{"above_uint32", int64(math.MaxUint32) + 1},
+		// -1 narrows to MaxUint32, the largest counter there is, which would
+		// refuse every genuine assertion that follows.
+		{"negative", -1},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := s.pool.Exec(ctx,
+				`UPDATE webauthn_credentials SET sign_count = $1 WHERE id = $2`,
+				c.value, "cred-1"); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := s.GetCredential(ctx, "tenant-a", "cred-1"); !errors.Is(err, store.ErrCorruptRow) {
+				t.Errorf("GetCredential = %v, want ErrCorruptRow", err)
+			}
+			if _, err := s.GetCredentialByID(ctx, "tenant-a", "example.test", []byte("cred-cred-1")); !errors.Is(err, store.ErrCorruptRow) {
+				t.Errorf("GetCredentialByID = %v, want ErrCorruptRow", err)
+			}
+			if _, err := s.ListCredentials(ctx, "tenant-a", "subject-1", true); !errors.Is(err, store.ErrCorruptRow) {
+				t.Errorf("ListCredentials = %v, want ErrCorruptRow", err)
+			}
+		})
+	}
+
+	// A counter at the top of the range is valid and must still be read.
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE webauthn_credentials SET sign_count = $1 WHERE id = $2`,
+		int64(math.MaxUint32), "cred-1"); err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.GetCredential(ctx, "tenant-a", "cred-1")
+	if err != nil {
+		t.Fatalf("GetCredential at MaxUint32: %v", err)
+	}
+	if c.SignCount != math.MaxUint32 {
+		t.Errorf("sign_count = %d, want %d", c.SignCount, uint32(math.MaxUint32))
 	}
 }
 

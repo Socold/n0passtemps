@@ -199,6 +199,8 @@ func (s *Store) QueryAudit(ctx context.Context, tenantID string, f store.AuditFi
 	limit := clampLimit(f.Limit, 100, 10000)
 	args = append(args, limit)
 
+	// #nosec G202 -- auditColumns is a package constant and every where entry is a literal above; the event-type
+	// prefix is escaped by escapeLike and bound as a ? parameter like the rest of the filter
 	query := `SELECT ` + auditColumns + ` FROM audit_log WHERE ` +
 		strings.Join(where, " AND ") + ` ORDER BY seq ASC LIMIT ?`
 
@@ -254,16 +256,22 @@ func (s *Store) VerifyChain(ctx context.Context, fromSeq int64) (int64, int64, e
 		for rows.Next() {
 			e, err := scanAuditEntry(rows)
 			if err != nil {
-				rows.Close()
+				// The scan already failed, so a close error cannot change what
+				// this call reports.
+				_ = rows.Close()
 				return checked, 0, err
 			}
 			batch = append(batch, e)
 		}
 		if err := rows.Err(); err != nil {
-			rows.Close()
+			// Reporting the iteration error, which is the one that says what
+			// went wrong; a close error here would be the same fault twice.
+			_ = rows.Close()
 			return checked, 0, fmt.Errorf("sqlite: iterate chain: %w", err)
 		}
-		rows.Close()
+		// rows.Err has just been checked, and Close reports the same error, so
+		// there is nothing left for it to tell this walk.
+		_ = rows.Close()
 
 		if len(batch) == 0 {
 			return checked, 0, nil

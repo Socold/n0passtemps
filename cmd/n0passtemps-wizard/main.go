@@ -127,6 +127,9 @@ func writeFile(path string, content []byte, mode os.FileMode, force bool) error 
 
 	// The file is created with its final mode rather than chmod'd afterwards,
 	// so there is no window in which a keyring is world-readable.
+	//
+	// #nosec G304 -- the destination is the path the operator asked the wizard to write, and an existing file is
+	// refused above unless -force was passed
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
 	if err != nil {
 		return fmt.Errorf("create %s: %w", path, err)

@@ -29,8 +29,11 @@ TEST_POSTGRES_URL ?= postgres://n0passtemps:n0passtemps@127.0.0.1:5432/n0passtem
 
 # Tool versions are pinned so a lint or scan result is reproducible across
 # machines and across time. Override to try a newer release.
-GOLANGCI_LINT_VERSION ?= v2.6.0
-GOSEC_VERSION         ?= v2.21.4
+GOLANGCI_LINT_VERSION ?= v2.13.2
+# Kept in step with .github/workflows/security.yml: the gosec configuration in
+# .gosec.json uses globals a release before v2.29.0 would ignore, which would
+# make a local run and a CI run disagree.
+GOSEC_VERSION         ?= v2.29.0
 GOVULNCHECK_VERSION   ?= v1.1.4
 GITLEAKS_VERSION      ?= v8.30.0
 
@@ -108,10 +111,14 @@ lint: ## Run golangci-lint with the repository configuration
 	@$(call require_tool,golangci-lint,github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION))
 	golangci-lint run ./...
 
+# gosec runs without -no-fail: a clean report is the baseline, so a new finding
+# stops the build rather than waiting to be noticed in a report. -conf carries
+# the G101 entropy thresholds and the requirement that a suppression names a
+# rule and a reason; see CONTRIBUTING.md.
 sec: ## Run the static security analyser and the vulnerability database check
 	@$(call require_tool,gosec,github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VERSION))
 	@$(call require_tool,govulncheck,golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION))
-	gosec -exclude-generated ./...
+	gosec -conf .gosec.json -exclude-generated ./...
 	govulncheck ./...
 
 secrets: ## Scan the working tree and history for committed secrets

@@ -29,8 +29,15 @@ func TestMigrateSmoke(t *testing.T) {
 	var names []string
 	for rows.Next() {
 		var n string
-		_ = rows.Scan(&n)
+		if err := rows.Scan(&n); err != nil {
+			t.Fatalf("scan table name: %v", err)
+		}
 		names = append(names, n)
+	}
+	// Without this an iteration cut short reads as a schema with fewer tables
+	// than it has, which is the failure this smoke test exists to notice.
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate table names: %v", err)
 	}
 	t.Logf("tables: %v", names)
 

@@ -112,8 +112,17 @@ func ComputeHash(e *store.AuditEntry, prevHash []byte) []byte {
 	writeField(h, []byte(chainDomain))
 	writeField(h, prevHash)
 
+	// The two numeric fields are reinterpreted as their two's-complement bit
+	// patterns. That mapping is injective, which is the only property the
+	// chain asks of them: both are committed to the digest and neither is
+	// ever read back or compared, so a negative sequence number or a
+	// pre-epoch instant still hashes to something no other entry hashes to.
+	// Rejecting either here would invalidate every chain already written
+	// without detecting anything.
+	// #nosec G115 -- injective bit reinterpretation of a value that is hashed, never read back
 	writeUint64(h, uint64(e.Seq))
 	writeField(h, []byte(e.TenantID))
+	// #nosec G115 -- injective bit reinterpretation of a value that is hashed, never read back
 	writeUint64(h, uint64(e.OccurredAt.UTC().UnixNano()))
 	writeField(h, []byte(e.EventType))
 	writeField(h, []byte(e.ActorType))

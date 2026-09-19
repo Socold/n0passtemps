@@ -159,10 +159,17 @@ func runSetup(args []string) error {
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 	if _, err := tmp.WriteString(cfgBody); err != nil {
-		tmp.Close()
+		// The write already failed and the file is removed by the deferred
+		// call above, so a close error adds nothing.
+		_ = tmp.Close()
 		return fmt.Errorf("write temporary file: %w", err)
 	}
-	tmp.Close()
+	// This close is checked: the file is about to be validated, and a close
+	// that failed means the body may not have reached the disk in full, which
+	// would surface as a puzzling validation error rather than a write fault.
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temporary file: %w", err)
+	}
 
 	// The two secrets are not in the file, so validation is run with them set
 	// in this process only.

@@ -131,6 +131,8 @@ func (s *Store) rotateAuthnRow(ctx context.Context, table, tenantID, predecessor
 	at := formatTime(predecessorExpiresAt)
 
 	return s.inTx(ctx, func(tx *sql.Tx) error {
+		// #nosec G202 -- table is "api_keys" or "admin_tokens", literals from the two callers in this file; the
+		// rotation values travel as ? parameters
 		res, err := tx.ExecContext(ctx, `
 			UPDATE `+table+` SET expires_at = ?
 			WHERE tenant_id = ? AND id = ? AND revoked_at IS NULL

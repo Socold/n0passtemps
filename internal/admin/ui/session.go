@@ -247,6 +247,9 @@ func expired(s *session, now time.Time, idle, absolute time.Duration) bool {
 //	                  would have expired anyway, rather than keeping a value the
 //	                  server will refuse
 func (h *Handler) setSessionCookie(w http.ResponseWriter, value string) {
+	// #nosec G124 -- HttpOnly and SameSite=Strict are unconditional; Secure comes from configuration only so a
+	// developer can sign in over http://localhost, and config.Validate forces it on whenever TLS is terminated here
+	// or a proxy is trusted
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    value,
@@ -263,6 +266,8 @@ func (h *Handler) setSessionCookie(w http.ResponseWriter, value string) {
 // It is only half of signing out. The other half, and the half that matters, is
 // removing the session from the store.
 func (h *Handler) clearSessionCookie(w http.ResponseWriter) {
+	// #nosec G124 -- the discard cookie carries the same attributes as the one it replaces, so a browser matches and
+	// drops it; see setSessionCookie for why Secure is configurable
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",

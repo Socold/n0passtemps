@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -226,6 +227,77 @@ func TestAdvanceSignCount(t *testing.T) {
 	}
 	if after.SignCount != 11 {
 		t.Errorf("sign_count moved to %d despite every refusal", after.SignCount)
+	}
+}
+
+// sign_count lives in a BIGINT column while the WebAuthn signature counter is a
+// uint32, so a damaged or tampered row can hold a value the model cannot
+// represent. Reading it must fail rather than narrow the value: a narrowed
+// counter is a plausible counter, and it can only make the clone check pass
+// where it should have failed.
+func TestCredentialRejectsSignCountOutOfRange(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	seedTenant(t, s, "tenant-a")
+	seedSubject(t, s, "tenant-a", "subject-1", "ref-1")
+	seedCredential(t, s, "tenant-a", "subject-1", "cred-1", 10)
+
+	cases := []struct {
+		name  string
+		value int64
+	}{
+		// 2^32 narrows to 0, which would read as a fresh authenticator.
+		{"above_uint32", int64(math.MaxUint32) + 1},
+		// -1 narrows to MaxUint32, the largest counter there is, which would
+		// refuse every genuine assertion that follows.
+		{"negative", -1},
+	}
+
+	// wc_sign_count_ck keeps a negative counter out through SQL, so the check
+	// constraints are suspended for the duration of this test. That is what
+	// makes the fabricated rows below reachable at all: a real one would come
+	// from a restore without the constraint, or from damage below SQL.
+	if _, err := s.write.ExecContext(ctx, `PRAGMA ignore_check_constraints = ON`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = s.write.ExecContext(ctx, `PRAGMA ignore_check_constraints = OFF`)
+	})
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// Nothing in the store interface can write these values, so the
+			// row is written directly.
+			if _, err := s.write.ExecContext(ctx,
+				`UPDATE webauthn_credentials SET sign_count = ? WHERE id = ?`,
+				c.value, "cred-1"); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := s.GetCredential(ctx, "tenant-a", "cred-1"); !errors.Is(err, store.ErrCorruptRow) {
+				t.Errorf("GetCredential = %v, want ErrCorruptRow", err)
+			}
+			if _, err := s.GetCredentialByID(ctx, "tenant-a", "example.test", []byte("cred-cred-1")); !errors.Is(err, store.ErrCorruptRow) {
+				t.Errorf("GetCredentialByID = %v, want ErrCorruptRow", err)
+			}
+			if _, err := s.ListCredentials(ctx, "tenant-a", "subject-1", true); !errors.Is(err, store.ErrCorruptRow) {
+				t.Errorf("ListCredentials = %v, want ErrCorruptRow", err)
+			}
+		})
+	}
+
+	// A counter at the top of the range is valid and must still be read.
+	if _, err := s.write.ExecContext(ctx,
+		`UPDATE webauthn_credentials SET sign_count = ? WHERE id = ?`,
+		int64(math.MaxUint32), "cred-1"); err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.GetCredential(ctx, "tenant-a", "cred-1")
+	if err != nil {
+		t.Fatalf("GetCredential at MaxUint32: %v", err)
+	}
+	if c.SignCount != math.MaxUint32 {
+		t.Errorf("sign_count = %d, want %d", c.SignCount, uint32(math.MaxUint32))
 	}
 }
 

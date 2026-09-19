@@ -194,6 +194,8 @@ func (s *Store) RevokeAdminToken(ctx context.Context, tenantID, id string, at ti
 // the statement at all.
 func (s *Store) revokeAuthnRow(ctx context.Context, table, tenantID, id string, at time.Time) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
+		// #nosec G202 -- table is "api_keys" or "admin_tokens", literals from RevokeAPIKey and RevokeAdminToken; the
+		// tenant, id and instant travel as ? parameters
 		res, err := tx.ExecContext(ctx, `
 			UPDATE `+table+` SET revoked_at = ?
 			WHERE tenant_id = ? AND id = ? AND revoked_at IS NULL`,
@@ -234,6 +236,8 @@ func (s *Store) touchAuthnRow(ctx context.Context, table, id string, at time.Tim
 	if id == "" {
 		return errors.New("sqlite: touch requires an id")
 	}
+	// #nosec G202 -- table is "api_keys" or "admin_tokens", literals from TouchAPIKey and TouchAdminToken; the
+	// instant and id travel as ? parameters
 	_, err := s.write.ExecContext(ctx,
 		`UPDATE `+table+` SET last_used_at = ? WHERE id = ?`, formatTime(at), id)
 	if err != nil {

@@ -1,0 +1,10 @@
+{
+  "global": {
+    "nosec-require-rules": "true",
+    "nosec-require-justification": "true"
+  },
+  "G101": {
+    "entropy_threshold": "70.0",
+    "per_char_threshold": "4.25"
+  }
+}

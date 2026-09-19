@@ -35,6 +35,13 @@ const EnvPrefix = "N0PASSTEMPS_"
 // settings. A test asserts the two stay equal.
 const SystemTenantID = "system"
 
+// MaxDatabaseConns is the largest connection pool this server accepts.
+//
+// No deployment of an authentication server needs a pool this wide; the bound
+// exists so that an absurd or mistyped value is refused at startup instead of
+// reaching a driver that takes the pool size as an int32.
+const MaxDatabaseConns = 4096
+
 // Config is the complete server configuration.
 type Config struct {
 	Tenant    Tenant    `toml:"tenant"`
@@ -133,6 +140,10 @@ type Database struct {
 	// see internal/crypto/kek.
 	DataDir string `toml:"data_dir"`
 
+	// MaxOpenConns is bounded above by MaxDatabaseConns as well as below,
+	// because the PostgreSQL pool takes its size as an int32 and a value that
+	// does not fit would reach the driver as a wrapped, possibly negative,
+	// pool size.
 	MaxOpenConns    int      `toml:"max_open_conns"`
 	MaxIdleConns    int      `toml:"max_idle_conns"`
 	ConnMaxLifetime Duration `toml:"conn_max_lifetime"`
@@ -774,6 +785,10 @@ func (c *Config) Validate() error {
 	}
 	if c.Database.MaxOpenConns <= 0 {
 		add("config: database.max_open_conns must be positive")
+	}
+	if c.Database.MaxOpenConns > MaxDatabaseConns {
+		add("config: database.max_open_conns (%d) cannot exceed %d",
+			c.Database.MaxOpenConns, MaxDatabaseConns)
 	}
 	if c.Database.MaxIdleConns > c.Database.MaxOpenConns {
 		add("config: database.max_idle_conns (%d) cannot exceed max_open_conns (%d)",
