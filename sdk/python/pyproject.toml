@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "n0passtemps"
-version = "1.0.0"
+version = "1.1.0"
 description = "Client SDK for the n0passtemps authentication server: WebAuthn, TOTP, recovery codes and offline verification of the signed assertion."
 readme = "README.md"
 requires-python = ">=3.9"

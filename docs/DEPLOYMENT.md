@@ -258,12 +258,12 @@ docker volume create n0passtemps_n0passtemps-kek
 
 docker run --rm -v n0passtemps_n0passtemps-kek:/etc/n0passtemps/kek \
   --entrypoint /usr/local/bin/n0passtemps-wizard \
-  ghcr.io/socold/n0passtemps:1.0.0 \
+  ghcr.io/socold/n0passtemps:1.1.0 \
   kek init -out /etc/n0passtemps/kek/keyring.json
 
 docker run --rm -v n0passtemps_n0passtemps-kek:/etc/n0passtemps/kek \
   --entrypoint /usr/local/bin/n0passtemps-wizard \
-  ghcr.io/socold/n0passtemps:1.0.0 \
+  ghcr.io/socold/n0passtemps:1.1.0 \
   assertion-key init -out /etc/n0passtemps/kek/assertion-key.pem
 ```
 
@@ -279,7 +279,7 @@ Generate the pepper and put the line it prints into `.env`, replacing the empty
 
 ```bash
 docker run --rm --entrypoint /usr/local/bin/n0passtemps-wizard \
-  ghcr.io/socold/n0passtemps:1.0.0 pepper
+  ghcr.io/socold/n0passtemps:1.1.0 pepper
 # N0PASSTEMPS_SUBJECT_PEPPER=...
 ```
 
@@ -416,7 +416,7 @@ Same clone, same `.env`, plus the database variables:
 cd n0passtemps/deploy
 cp .env.example .env
 $EDITOR .env
-# N0PASSTEMPS_VERSION=1.0.0
+# N0PASSTEMPS_VERSION=1.1.0
 # POSTGRES_USER=n0passtemps
 # POSTGRES_PASSWORD=<openssl rand -base64 32>
 # POSTGRES_DB=n0passtemps

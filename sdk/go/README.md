@@ -26,7 +26,7 @@ import n0passtemps "github.com/Socold/n0passtemps/sdk/go"
 
 The SDK is its own module, nested in the server repository. It shares no
 dependency with the server, and being nested its releases are tagged in the
-form `sdk/go/v1.0.0`, which is what the go command looks for.
+form `sdk/go/v1.1.0`, which is what the go command looks for.
 
 ## End to end
 

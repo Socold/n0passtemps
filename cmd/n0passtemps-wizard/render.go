@@ -183,7 +183,7 @@ func renderEnv(a answers) string {
 		"# Generate the pepper with: n0passtemps-wizard pepper\n\n")
 
 	b.WriteString("# Pin the image. A moving tag makes a rollback impossible to describe.\n" +
-		"N0PASSTEMPS_VERSION=1.0.0\n\n")
+		"N0PASSTEMPS_VERSION=1.1.0\n\n")
 
 	b.WriteString("# Derives the lookup key from your application's user reference. Losing it\n" +
 		"# makes every existing subject unfindable, so back it up with the keyring.\n" +

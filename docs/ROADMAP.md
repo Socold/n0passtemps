@@ -1,6 +1,6 @@
 # Roadmap
 
-Where the project stands after 1.0.0, what comes next, and which decisions are
+Where the project stands after 1.1.0, what comes next, and which decisions are
 still open. A roadmap that lists only intentions is a wish list, so each item
 below says what problem it solves, what it costs, and what would make it a bad
 idea.
@@ -11,7 +11,7 @@ idea.
 |---|---|
 | 0, foundations | Done |
 | 1, authentication core | Done, see the two notes below |
-| Launch | Tagged `v1.0.0`. Publication steps below are the maintainer's |
+| Launch | Tagged `v1.0.0`, then `v1.1.0`. Registry publication below is the maintainer's |
 | 2, this document | Credential rotation, risk signals and enrolment tickets landed; all three themes answered |
 | 6, hosted offering | Not started, and not planned before phase 2 has users |
 
@@ -27,18 +27,20 @@ a registry yet, which needs accounts that belong to the maintainer.
 It has not happened, and nothing in this repository substitutes for it. The
 test suites and the threat model make a reviewer's work shorter; they do not
 replace a second pair of eyes that did not write the code. Anyone deploying
-1.0.0 in front of something that matters should read
+this in front of something that matters should read
 [THREAT-MODEL.md](THREAT-MODEL.md) with that in mind.
 
-## Launch steps that need the maintainer
+## Steps that need the maintainer
+
+Done since this table was first written: `main` and both tags are pushed, the
+release workflow builds and publishes the image and the archives, and every
+pinned action SHA was verified against the GitHub API.
 
 | Step | Why it cannot be automated from here |
 |---|---|
-| Push `main` and the `v1.0.0` tag | Rewrites the remote branch, so it is a deliberate act |
-| Let the release workflow build and publish the image | Runs on the tag push; needs the repository's package permissions |
-| Confirm the pinned action SHAs in `.github/workflows/` | They were written without network verification; the first Dependabot run corrects them, or `gh api` does |
+| Push the `v1.1.0` tag | Rewrites nothing, but starts a publish, so it stays a deliberate act |
 | Enable private vulnerability reporting | A repository setting; [SECURITY.md](../SECURITY.md) points at it |
-| Publish `sdk/node` and `sdk/python` | npm and PyPI accounts |
+| Publish `sdk/node` and `sdk/python` | npm and PyPI accounts. The Go SDK needs no registry, only the `sdk/go/v1.1.0` tag |
 | Announce | The specification names the venues; the wording is personal |
 
 ## Phase 2
@@ -49,8 +51,7 @@ third shipped under a more honest name, risk signals; see 2.3.
 
 ### 2.1 Credential rotation: landed
 
-Implemented after 1.0.0; see the Unreleased section of
-[../CHANGELOG.md](../CHANGELOG.md).
+Shipped in 1.1.0; see [../CHANGELOG.md](../CHANGELOG.md).
 
 **Problem.** Replacing an API key meant minting a new one and revoking the old
 one. Revoke first and the integration is down until it is reconfigured; mint
@@ -74,8 +75,9 @@ save those would add a configuration surface out of proportion to the gain.
 
 ### 2.2 Enrolment tickets, in place of magic links: landed
 
-Decided as proposed below: enrolment tickets, not magic links. Implemented after
-1.0.0; see the Unreleased section of [../CHANGELOG.md](../CHANGELOG.md), the
+Decided as proposed below: enrolment tickets, not magic links. Shipped in
+1.1.0; see [../CHANGELOG.md](../CHANGELOG.md),
+[ADR 0015](adr/0015-enrolment-tickets-instead-of-magic-links.md), the
 procedure in [ADMIN-GUIDE.md](ADMIN-GUIDE.md) under "A user has lost every
 authenticator", the `[tickets]` section of [CONFIGURATION.md](CONFIGURATION.md),
 the new permission in [RBAC.md](RBAC.md), and attacker 10 in
@@ -139,9 +141,9 @@ enrols a WebAuthn credential and nothing else.
 
 ### 2.3 Risk signals: landed
 
-Implemented after 1.0.0; see [RISK.md](RISK.md) for the reason table, the
-weights and the thresholds, and the Unreleased section of
-[../CHANGELOG.md](../CHANGELOG.md) for what shipped.
+Shipped in 1.1.0; see [RISK.md](RISK.md) for the reason table, the
+weights and the thresholds, and [../CHANGELOG.md](../CHANGELOG.md) for what
+shipped.
 
 **Problem.** The service already saw a stalled signature counter, a change in
 the authenticator's characteristics, failure bursts per subject and per
@@ -203,7 +205,7 @@ be burned down deliberately instead of drifting.
 
 ### The style budget in golangci-lint
 
-The pinned linter could not run at all until 1.0.1: `v2.6.0` cannot read the
+The pinned linter could not run at all until 1.1.0: `v2.6.0` cannot read the
 export data of the toolchain this project builds with, so every `make lint`
 ended with one `typecheck` error and no analysis. With the pin moved and three
 genuine misconfigurations corrected, the correctness linters report nothing.

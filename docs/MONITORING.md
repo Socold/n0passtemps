@@ -39,7 +39,7 @@ the public surface and any API key reaches it.
 ```json
 {
   "status": "degraded",
-  "version": { "version": "1.0.0", "commit": "9f1c4e2", "build_date": "2026-09-16T11:02:41Z", "go_version": "go1.27.1" },
+  "version": { "version": "1.1.0", "commit": "9f1c4e2", "build_date": "2026-09-16T11:02:41Z", "go_version": "go1.27.1" },
   "uptime_seconds": 86400,
   "database": { "status": "ok", "engine": "postgres", "latency_ms": 2 },
   "kek": { "status": "degraded", "current_version": 1, "retained_versions": 1, "rotation_overdue": true,

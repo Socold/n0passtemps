@@ -118,12 +118,12 @@ docker volume create n0passtemps_n0passtemps-kek
 
 docker run --rm -v n0passtemps_n0passtemps-kek:/etc/n0passtemps/kek \
   --entrypoint /usr/local/bin/n0passtemps-wizard \
-  ghcr.io/socold/n0passtemps:1.0.0 \
+  ghcr.io/socold/n0passtemps:1.1.0 \
   kek init -out /etc/n0passtemps/kek/keyring.json
 
 docker run --rm -v n0passtemps_n0passtemps-kek:/etc/n0passtemps/kek \
   --entrypoint /usr/local/bin/n0passtemps-wizard \
-  ghcr.io/socold/n0passtemps:1.0.0 \
+  ghcr.io/socold/n0passtemps:1.1.0 \
   assertion-key init -out /etc/n0passtemps/kek/assertion-key.pem
 ```
 
@@ -136,7 +136,7 @@ it:
 
 ```bash
 docker run --rm --entrypoint /usr/local/bin/n0passtemps-wizard \
-  ghcr.io/socold/n0passtemps:1.0.0 pepper
+  ghcr.io/socold/n0passtemps:1.1.0 pepper
 # N0PASSTEMPS_SUBJECT_PEPPER=...
 ```
 

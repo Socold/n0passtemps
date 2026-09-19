@@ -39,7 +39,7 @@ __all__ = [
     "TOTPEnrolment",
 ]
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 # No response of this API comes anywhere near this size. The cap exists so that
 # a wrong base URL, or a hostile endpoint, cannot make the caller buffer an
