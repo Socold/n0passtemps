@@ -504,3 +504,57 @@ describe("staticKeys", () => {
     assert.equal(key.type, "public");
   });
 });
+
+describe("the risk claim", () => {
+  // The claim an application branches on when it decides whether to ask for
+  // more than the ceremony proved.
+
+  it("reads a reported assessment back", async () => {
+    const risk = {
+      level: "elevated",
+      reasons: ["user_verification_absent", "credential_dormant"],
+      score: 30,
+    };
+    const claims = await newVerifier().verify(mint({ claims: baseClaims({ risk }) }));
+    assert.deepEqual(claims.risk, risk);
+  });
+
+  it("reports nothing rather than low when the deployment does not assess", async () => {
+    // An application that read an absent claim as "low" would turn every
+    // step-up off the day an operator disabled the feature.
+    const claims = await newVerifier().verify(mint());
+    assert.equal(claims.risk, undefined);
+  });
+
+  it("carries an unknown reason and an unknown member through", async () => {
+    // The set of reasons is closed today, but a deployment newer than this
+    // library must not become unverifiable by adding to it.
+    const risk = { level: "high", reasons: ["some_new_signal"], score: 40, future: 1 };
+    const claims = await newVerifier().verify(mint({ claims: baseClaims({ risk }) }));
+    assert.equal(claims.risk.reasons[0], "some_new_signal");
+    assert.equal(claims.risk.level, "high");
+  });
+
+  it("refuses an assertion whose assessment is malformed", async () => {
+    // Accepting the token and dropping the claim would report "risk was not
+    // reported" when it was, which fails open on the very signal the
+    // application asked for.
+    const malformed = [
+      "elevated",
+      ["elevated"],
+      null,
+      { level: 2 },
+      { level: "" },
+      { level: "high", reasons: "recovery_code_used" },
+      { level: "high", reasons: [1] },
+      { level: "high", score: "lots" },
+      { level: "high", score: 1.5 },
+    ];
+    for (const risk of malformed) {
+      await assertInvalid(
+        newVerifier().verify(mint({ claims: baseClaims({ risk }) })),
+        `risk=${JSON.stringify(risk)}`,
+      );
+    }
+  });
+});

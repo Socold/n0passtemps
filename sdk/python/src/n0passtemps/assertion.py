@@ -63,6 +63,7 @@ from .errors import (
 
 __all__ = [
     "Claims",
+    "Risk",
     "KeySource",
     "StaticKeys",
     "RemoteJWKS",
@@ -429,6 +430,63 @@ def _load_ed25519() -> _SignatureCheck:
 
 
 @dataclass(frozen=True)
+class Risk:
+    """What the service made of the ceremony, from the ``risk`` claim.
+
+    It is a report and never a refusal: the service verified the ceremony
+    before signing it, so ``level == "high"`` is not a failed authentication.
+    What to do about it belongs to the application, which knows what the user
+    is about to do.
+
+    ``level`` is ``"low"``, ``"elevated"`` or ``"high"``. ``reasons`` names
+    every signal that fired, in a fixed order; the set is closed and
+    documented in docs/RISK.md, but a deployment newer than this library may
+    report a member it does not know, so do not treat the list as exhaustive.
+    ``score`` is the total weight, carried so a decision can be explained
+    rather than so applications can invent their own thresholds.
+    """
+
+    level: str
+    reasons: Tuple[str, ...]
+    score: int
+
+
+def _risk_from_claim(value: Any) -> Optional[Risk]:
+    """Read the ``risk`` claim, refusing one that is present but malformed.
+
+    A claim absent from the token yields ``None``, which means the deployment
+    does not report risk. That is deliberately not the same as a low
+    assessment: an application that steps up must handle the absent case
+    explicitly, or disabling the feature would silently turn every step-up
+    off.
+
+    A claim that is present but the wrong shape invalidates the assertion.
+    Dropping it to ``None`` instead would present "risk was not reported" to
+    an application when risk *was* reported, which fails open on exactly the
+    signal the application asked for. Unknown members are ignored, so a
+    service that adds a field does not break this library.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise InvalidAssertion()
+
+    level = value.get("level")
+    reasons = value.get("reasons", [])
+    score = value.get("score", 0)
+
+    if not isinstance(level, str) or not level:
+        raise InvalidAssertion()
+    if not isinstance(reasons, list) or not all(isinstance(r, str) for r in reasons):
+        raise InvalidAssertion()
+    # bool is a subclass of int, and a boolean score is a malformed one.
+    if not isinstance(score, int) or isinstance(score, bool):
+        raise InvalidAssertion()
+
+    return Risk(level=level, reasons=tuple(reasons), score=score)
+
+
+@dataclass(frozen=True)
 class Claims:
     """The verified claims of an assertion.
 
@@ -437,7 +495,8 @@ class Claims:
     API), not the caller's own reference. ``amr`` lists the factors that
     authenticated the subject: ``webauthn``, ``webauthn-uv`` (the authenticator
     also verified the user with a PIN or a biometric), ``totp``,
-    ``recovery-code``.
+    ``recovery-code``. ``risk`` is present only when the deployment reports
+    risk; see :class:`Risk`.
     """
 
     issuer: str
@@ -450,6 +509,7 @@ class Claims:
     amr: Tuple[str, ...]
     credential_id: Optional[str]
     tenant_id: Optional[str]
+    risk: Optional[Risk]
     raw: Dict[str, Any] = field(repr=False, compare=False)
 
 
@@ -639,5 +699,6 @@ class Verifier:
             amr=tuple(amr),
             credential_id=credential_id or None,
             tenant_id=tenant_id or None,
+            risk=_risk_from_claim(claims.get("risk")),
             raw=claims,
         )

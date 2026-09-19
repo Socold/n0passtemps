@@ -16,6 +16,7 @@ import (
 	"github.com/Socold/n0passtemps/internal/audit"
 	"github.com/Socold/n0passtemps/internal/crypto/recovery"
 	"github.com/Socold/n0passtemps/internal/crypto/zeroize"
+	"github.com/Socold/n0passtemps/internal/risk"
 	"github.com/Socold/n0passtemps/internal/store"
 	"github.com/Socold/n0passtemps/internal/totp"
 	wa "github.com/Socold/n0passtemps/internal/webauthn"
@@ -477,9 +478,27 @@ type assertionResponse struct {
 	// authentication. They are reported so the caller may decide to step up,
 	// not because this service considers the assertion invalid.
 	Signals map[string]any `json:"signals,omitempty"`
+
+	// RiskLevel and RiskReasons repeat the "risk" claim of the assertion for a
+	// caller that wants to look before it verifies. Both are absent when the
+	// deployment does not report risk.
+	//
+	// They are UNSIGNED. Everything else in this body is either public or
+	// covered by the signature on Assertion; these two are not, so anything on
+	// the network path between this service and the caller can rewrite them,
+	// including downgrading "high" to "low". A caller must take its step-up
+	// decision from the verified assertion. These fields exist for logging and
+	// for a first look during integration, and for nothing else.
+	RiskLevel   risk.Level    `json:"risk_level,omitempty"`
+	RiskReasons []risk.Reason `json:"risk_reasons,omitempty"`
 }
 
 // handleAssertComplete finishes an authentication ceremony.
+//
+// The risk assessment reaches the caller twice: inside the signed assertion,
+// where it is trustworthy, and as risk_level and risk_reasons in the response
+// body, where it is not. The body fields are unsigned, so a caller must read
+// the level it acts on from the verified assertion and never from here.
 func (s *Server) handleAssertComplete(w http.ResponseWriter, r *http.Request) error {
 	caller, err := requireCaller(r.Context())
 	if err != nil {
@@ -520,7 +539,8 @@ func (s *Server) handleAssertComplete(w http.ResponseWriter, r *http.Request) er
 			audit.EventAssertionRejected, err)
 	}
 
-	s.recordAttempt(r, tenantID, sub.ID, dims, false)
+	limits := s.recordAttempt(r, tenantID, sub.ID, dims, false)
+	assessed := s.assessWebAuthn(outcome, limits)
 
 	factors := []assertion.Factor{assertion.FactorWebAuthn}
 	if outcome.UserVerified {
@@ -550,7 +570,8 @@ func (s *Server) handleAssertComplete(w http.ResponseWriter, r *http.Request) er
 	}
 
 	token, claims, err := s.deps.Assertion.Issue(sub.ID, tenantID,
-		caller.ActorID(), factors, outcome.Credential.CredentialID)
+		caller.ActorID(), factors, outcome.Credential.CredentialID,
+		issueOptions(assessed)...)
 	if err != nil {
 		return Internal(fmt.Errorf("issue assertion: %w", err))
 	}
@@ -564,13 +585,14 @@ func (s *Server) handleAssertComplete(w http.ResponseWriter, r *http.Request) er
 		ResourceType: "credential",
 		ResourceID:   outcome.Credential.ID,
 		Outcome:      store.OutcomeSuccess,
-		Detail: map[string]any{
+		Detail: riskDetail(map[string]any{
 			"user_verified":  outcome.UserVerified,
 			"sign_count":     outcome.NewSignCount,
 			"previous_count": outcome.PreviousSignCount,
 			"assertion_jti":  claims.ID,
-		},
+		}, assessed),
 	})
+	s.reportHighRisk(r, tenantID, sub.ID, assessed)
 
 	WriteJSON(w, r, http.StatusOK, assertionResponse{
 		SubjectID: sub.ID,
@@ -578,7 +600,7 @@ func (s *Server) handleAssertComplete(w http.ResponseWriter, r *http.Request) er
 		ExpiresAt: time.Unix(claims.ExpiresAt, 0).UTC(),
 		Factors:   factors,
 		Signals:   signals,
-	})
+	}.withRisk(assessed))
 	return nil
 }
 
@@ -879,6 +901,10 @@ func (s *Server) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) error
 }
 
 // handleTOTPVerify authenticates a subject with a TOTP code.
+//
+// As with handleAssertComplete, risk_level and risk_reasons in the response
+// body are UNSIGNED: a caller must read the level it acts on from the verified
+// assertion, not from the body.
 func (s *Server) handleTOTPVerify(w http.ResponseWriter, r *http.Request) error {
 	caller, err := requireCaller(r.Context())
 	if err != nil {
@@ -934,11 +960,12 @@ func (s *Server) handleTOTPVerify(w http.ResponseWriter, r *http.Request) error 
 		return CeremonyFailed(errors.New("totp code did not verify"))
 	}
 
-	s.recordAttempt(r, tenantID, sub.ID, dims, false)
+	limits := s.recordAttempt(r, tenantID, sub.ID, dims, false)
+	assessed := s.assessCodeCeremony(r, tenantID, sub.ID, risk.CeremonyTOTP, limits)
 
 	factors := []assertion.Factor{assertion.FactorTOTP}
 	tokenStr, claims, err := s.deps.Assertion.Issue(sub.ID, tenantID,
-		caller.ActorID(), factors, nil)
+		caller.ActorID(), factors, nil, issueOptions(assessed)...)
 	if err != nil {
 		return Internal(err)
 	}
@@ -948,15 +975,16 @@ func (s *Server) handleTOTPVerify(w http.ResponseWriter, r *http.Request) error 
 		ActorType: caller.ActorType(), ActorID: caller.ActorID(),
 		SubjectID: sub.ID, ResourceType: "totp_secret", ResourceID: secret.ID,
 		Outcome: store.OutcomeSuccess,
-		Detail:  map[string]any{"assertion_jti": claims.ID},
+		Detail:  riskDetail(map[string]any{"assertion_jti": claims.ID}, assessed),
 	})
+	s.reportHighRisk(r, tenantID, sub.ID, assessed)
 
 	WriteJSON(w, r, http.StatusOK, assertionResponse{
 		SubjectID: sub.ID,
 		Assertion: tokenStr,
 		ExpiresAt: time.Unix(claims.ExpiresAt, 0).UTC(),
 		Factors:   factors,
-	})
+	}.withRisk(assessed))
 	return nil
 }
 
@@ -1100,6 +1128,11 @@ type recoveryConsumeRequest struct {
 }
 
 // handleRecoveryConsume authenticates a subject with a recovery code.
+//
+// A redemption always carries the recovery_code_used risk reason, since the
+// code is the weakest factor the service offers. As with the other two
+// completion routes, risk_level and risk_reasons in the response body are
+// UNSIGNED and a caller must act on the verified assertion instead.
 func (s *Server) handleRecoveryConsume(w http.ResponseWriter, r *http.Request) error {
 	caller, err := requireCaller(r.Context())
 	if err != nil {
@@ -1182,7 +1215,8 @@ func (s *Server) handleRecoveryConsume(w http.ResponseWriter, r *http.Request) e
 		return Internal(err)
 	}
 
-	s.recordAttempt(r, tenantID, sub.ID, dims, false)
+	limits := s.recordAttempt(r, tenantID, sub.ID, dims, false)
+	assessed := s.assessCodeCeremony(r, tenantID, sub.ID, risk.CeremonyRecoveryCode, limits)
 
 	remaining, err := s.deps.Store.CountUnusedRecoveryCodes(r.Context(), tenantID, sub.ID)
 	if err != nil {
@@ -1192,7 +1226,7 @@ func (s *Server) handleRecoveryConsume(w http.ResponseWriter, r *http.Request) e
 
 	factors := []assertion.Factor{assertion.FactorRecoveryCode}
 	tokenStr, claims, err := s.deps.Assertion.Issue(sub.ID, tenantID,
-		caller.ActorID(), factors, nil)
+		caller.ActorID(), factors, nil, issueOptions(assessed)...)
 	if err != nil {
 		return Internal(err)
 	}
@@ -1202,11 +1236,12 @@ func (s *Server) handleRecoveryConsume(w http.ResponseWriter, r *http.Request) e
 		ActorType: caller.ActorType(), ActorID: caller.ActorID(),
 		SubjectID: sub.ID, ResourceType: "recovery_code", ResourceID: rec.ID,
 		Outcome: store.OutcomeSuccess,
-		Detail: map[string]any{
+		Detail: riskDetail(map[string]any{
 			"remaining":     remaining,
 			"assertion_jti": claims.ID,
-		},
+		}, assessed),
 	})
+	s.reportHighRisk(r, tenantID, sub.ID, assessed)
 
 	WriteJSON(w, r, http.StatusOK, struct {
 		assertionResponse
@@ -1217,7 +1252,7 @@ func (s *Server) handleRecoveryConsume(w http.ResponseWriter, r *http.Request) e
 			Assertion: tokenStr,
 			ExpiresAt: time.Unix(claims.ExpiresAt, 0).UTC(),
 			Factors:   factors,
-		},
+		}.withRisk(assessed),
 		Remaining: remaining,
 	})
 	return nil

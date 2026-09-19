@@ -105,6 +105,73 @@ type Claims struct {
 
 	// TenantID is present on multi-tenant deployments.
 	TenantID string `json:"tid,omitempty"`
+
+	// Risk is what the service made of the ceremony, present only when the
+	// deployment reports risk. It is a report and never a refusal: the
+	// service verified the ceremony before signing this, so a high level is
+	// not a failed authentication. What to do about it is the application's
+	// decision, because the application knows what the user is about to do.
+	//
+	// A nil value means the deployment does not report risk, which is not the
+	// same as having looked and found nothing. Treating nil as low risk would
+	// silently turn every step-up off the day an operator disables the
+	// feature, so an application that steps up should branch on Level and
+	// treat the absent case explicitly.
+	Risk *Risk `json:"risk,omitempty"`
+}
+
+// Risk is the assessment carried by the "risk" claim.
+type Risk struct {
+	// Level is "low", "elevated" or "high". Compare against the constants
+	// rather than ordering the strings.
+	Level RiskLevel `json:"level"`
+
+	// Reasons names every signal that fired, in a fixed order, so two
+	// identical ceremonies produce identical claims. The set is closed and
+	// documented in docs/RISK.md; an unrecognised member means the service is
+	// newer than this library, so an application should not treat the list as
+	// exhaustive of what it knows.
+	Reasons []string `json:"reasons"`
+
+	// Score is the total weight of the reasons. It is included so that a
+	// decision can be recomputed and explained, not so that applications
+	// invent their own thresholds: the levels are what the operator
+	// configured.
+	Score int `json:"score"`
+}
+
+// RiskLevel is the reported level.
+type RiskLevel string
+
+const (
+	// RiskLow means nothing in the ceremony stood out. It is not a statement
+	// that the subject is who they claim to be.
+	RiskLow RiskLevel = "low"
+
+	// RiskElevated means the ceremony proved less than a full unphishable
+	// factor, or the authenticator was not quite the one enrolled.
+	RiskElevated RiskLevel = "elevated"
+
+	// RiskHigh means either one signal that is evidence of an attack rather
+	// than of a weaker ceremony, or several weaker signals together.
+	RiskHigh RiskLevel = "high"
+)
+
+// HasRiskReason reports whether reason is among the signals that fired.
+//
+// It answers false for a nil Risk, so an application must not read that as
+// "the signal did not fire" without also checking whether risk was reported
+// at all.
+func (c *Claims) HasRiskReason(reason string) bool {
+	if c == nil || c.Risk == nil {
+		return false
+	}
+	for _, got := range c.Risk.Reasons {
+		if got == reason {
+			return true
+		}
+	}
+	return false
 }
 
 // HasFactor reports whether f is among the factors that completed the

@@ -724,6 +724,74 @@ class VerifierTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Verifier(ISSUER, AUDIENCE, self.keys, clock_skew=-1)
 
+    # --- the risk claim ---
+    #
+    # The claim an application branches on when it decides whether to ask for
+    # more than the ceremony proved.
+
+    def test_a_reported_assessment_is_read_back(self) -> None:
+        token = self.mint(
+            claims=self.claims(
+                risk={
+                    "level": "elevated",
+                    "reasons": ["user_verification_absent", "credential_dormant"],
+                    "score": 30,
+                }
+            )
+        )
+        claims = self.verifier.verify(token)
+        self.assertIsNotNone(claims.risk)
+        assert claims.risk is not None
+        self.assertEqual(claims.risk.level, "elevated")
+        self.assertEqual(claims.risk.score, 30)
+        self.assertEqual(
+            claims.risk.reasons, ("user_verification_absent", "credential_dormant")
+        )
+
+    def test_no_claim_is_not_a_low_assessment(self) -> None:
+        # A deployment that does not report risk yields None. An application
+        # that treated that as "low" would turn every step-up off the day an
+        # operator disabled the feature.
+        claims = self.verifier.verify(self.mint())
+        self.assertIsNone(claims.risk)
+
+    def test_an_unknown_reason_is_carried_through(self) -> None:
+        # The set is closed today, but a deployment newer than this library
+        # must not become unverifiable by adding a signal to it.
+        token = self.mint(
+            claims=self.claims(risk={"level": "high", "reasons": ["some_new_signal"], "score": 40})
+        )
+        claims = self.verifier.verify(token)
+        assert claims.risk is not None
+        self.assertEqual(claims.risk.reasons, ("some_new_signal",))
+
+    def test_an_unknown_member_does_not_break_verification(self) -> None:
+        token = self.mint(
+            claims=self.claims(
+                risk={"level": "low", "reasons": [], "score": 0, "future_field": 1}
+            )
+        )
+        claims = self.verifier.verify(token)
+        assert claims.risk is not None
+        self.assertEqual(claims.risk.level, "low")
+
+    def test_a_malformed_assessment_invalidates_the_assertion(self) -> None:
+        # Accepting the token and dropping the claim would report "risk was not
+        # reported" when it was, which fails open on the very signal the
+        # application asked for.
+        for malformed in (
+            "elevated",
+            ["elevated"],
+            {"level": 2},
+            {"level": ""},
+            {"level": "high", "reasons": "recovery_code_used"},
+            {"level": "high", "reasons": [1]},
+            {"level": "high", "score": "lots"},
+            {"level": "high", "score": True},
+        ):
+            with self.subTest(risk=malformed):
+                self.assertRefused(self.mint(claims=self.claims(risk=malformed)))
+
 
 @NEEDS_CRYPTOGRAPHY
 class VerifierWithRemoteJWKSTests(unittest.TestCase):

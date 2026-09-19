@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/Socold/n0passtemps/internal/crypto/zeroize"
+	"github.com/Socold/n0passtemps/internal/risk"
 )
 
 // algEdDSA is the only value of the "alg" header this package produces or
@@ -149,6 +150,18 @@ type Claims struct {
 
 	// TenantID is present on multi-tenant deployments.
 	TenantID string `json:"tid,omitempty"`
+
+	// Risk is the risk assessment of the ceremony, present only when the
+	// deployment reports risk. It is a pointer so that a deployment with
+	// reporting off omits the member entirely rather than signing an empty
+	// one, which keeps a verifier written against such a deployment
+	// unaffected. Verify does not require it, and never will: an optional
+	// claim that a verifier insists on is not optional.
+	//
+	// The type comes from internal/risk rather than being restated here, so
+	// that the claim, the audit entry detail and the administrative interface
+	// cannot disagree about the spelling of a level or a reason.
+	Risk *risk.Assessment `json:"risk,omitempty"`
 }
 
 // joseHeader is the JWS protected header, restricted to the members this
@@ -227,13 +240,33 @@ func (i *Issuer) PublicKey() ed25519.PublicKey {
 	return i.priv.Public().(ed25519.PublicKey)
 }
 
+// IssueOption sets an optional claim on an assertion.
+//
+// Options were chosen over further positional parameters so that the three
+// call sites which do not set a given claim stay exactly as they were. A
+// parameter added to the signature would have to be threaded through every
+// caller and every test whether it had anything to pass or not, and each of
+// those edits is a chance to pass the wrong thing.
+type IssueOption func(*Claims)
+
+// WithRisk attaches the risk assessment of the ceremony as the "risk" claim.
+//
+// The assessment is copied, so a later mutation by the caller cannot disagree
+// with what was signed. A caller that omits this option produces a token with
+// no risk claim at all, which is what a deployment with reporting off does.
+func WithRisk(a risk.Assessment) IssueOption {
+	copied := a
+	copied.Reasons = append([]risk.Reason(nil), a.Reasons...)
+	return func(c *Claims) { c.Risk = &copied }
+}
+
 // Issue signs an assertion for a completed ceremony.
 //
 // factors must be non-empty: a token with no "amr" entry asserts that the
 // subject authenticated by no means at all, which no application should be
 // asked to interpret. credentialID may be nil when no WebAuthn factor was
 // used.
-func (i *Issuer) Issue(subjectID, tenantID, audience string, factors []Factor, credentialID []byte) (token string, claims *Claims, err error) {
+func (i *Issuer) Issue(subjectID, tenantID, audience string, factors []Factor, credentialID []byte, opts ...IssueOption) (token string, claims *Claims, err error) {
 	if subjectID == "" {
 		return "", nil, fmt.Errorf("%w: subject id is empty", ErrInvalidClaims)
 	}
@@ -270,6 +303,11 @@ func (i *Issuer) Issue(subjectID, tenantID, audience string, factors []Factor, c
 	}
 	if len(credentialID) > 0 {
 		c.CredentialID = encodeSegment(credentialID)
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(c)
+		}
 	}
 
 	payload, err := json.Marshal(c)

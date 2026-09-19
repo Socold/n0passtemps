@@ -17,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Socold/n0passtemps/internal/risk"
 )
 
 const (
@@ -901,5 +903,117 @@ func TestVerifyRefusesWhitespaceInsideASegment(t *testing.T) {
 					"must have exactly one valid encoding", name, ws, err, got)
 			}
 		}
+	}
+}
+
+// TestRiskClaimSurvivesARoundTrip checks the optional claim end to end.
+//
+// It has to come back exactly as it went in, because an application's step-up
+// decision is taken on it and an audit entry is expected to match it.
+func TestRiskClaimSurvivesARoundTrip(t *testing.T) {
+	iss, _ := newTestIssuer(t)
+	assessed := risk.Assessment{
+		Level: risk.LevelElevated,
+		Reasons: []risk.Reason{
+			risk.ReasonRecoveryCodeUsed,
+			risk.ReasonRecentFailuresSubject,
+		},
+		Score: 35,
+	}
+
+	token, issued, err := iss.Issue(testSubject, "", testAudience,
+		[]Factor{FactorRecoveryCode}, nil, WithRisk(assessed))
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if issued.Risk == nil {
+		t.Fatal("Issue returned claims with no risk")
+	}
+
+	got, err := newTestVerifier(iss, fixedNow.Add(time.Second)).Verify(token, testAudience)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if got.Risk == nil {
+		t.Fatal("the verified claims carry no risk")
+	}
+	if got.Risk.Level != assessed.Level || got.Risk.Score != assessed.Score {
+		t.Errorf("risk = %+v, want level %s and score %d", *got.Risk, assessed.Level, assessed.Score)
+	}
+	if len(got.Risk.Reasons) != len(assessed.Reasons) {
+		t.Fatalf("risk reasons = %v, want %v", got.Risk.Reasons, assessed.Reasons)
+	}
+	for i, reason := range assessed.Reasons {
+		if got.Risk.Reasons[i] != reason {
+			t.Errorf("risk reason %d = %q, want %q", i, got.Risk.Reasons[i], reason)
+		}
+	}
+
+	// The claim is a copy, so mutating the caller's slice afterwards cannot
+	// make the token disagree with what the caller believes it signed.
+	assessed.Reasons[0] = risk.ReasonTOTPOnly
+	if issued.Risk.Reasons[0] != risk.ReasonRecoveryCodeUsed {
+		t.Error("the signed claim shares its backing array with the caller's assessment")
+	}
+
+	// And the member is actually named "risk" on the wire, since a verifier in
+	// another language reads it by name.
+	var raw map[string]any
+	payload, err := decodeSegment(strings.Split(token, ".")[1])
+	if err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	claim, ok := raw["risk"].(map[string]any)
+	if !ok {
+		t.Fatalf("the payload has no risk object: %s", payload)
+	}
+	for _, member := range []string{"level", "reasons", "score"} {
+		if _, ok := claim[member]; !ok {
+			t.Errorf("the risk claim has no %q member: %s", member, payload)
+		}
+	}
+}
+
+// TestTokenWithNoRiskClaimStillVerifies is the compatibility guarantee.
+//
+// A deployment with risk reporting off must produce a token that is exactly
+// what it produced before the feature existed: no risk member at all, not an
+// empty one, and a verifier must not require it.
+func TestTokenWithNoRiskClaimStillVerifies(t *testing.T) {
+	iss, _ := newTestIssuer(t)
+
+	token, issued, err := iss.Issue(testSubject, "", testAudience, []Factor{FactorTOTP}, nil)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if issued.Risk != nil {
+		t.Errorf("Issue attached a risk claim nobody asked for: %+v", *issued.Risk)
+	}
+
+	got, err := newTestVerifier(iss, fixedNow.Add(time.Second)).Verify(token, testAudience)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if got.Risk != nil {
+		t.Errorf("the verified claims invented a risk claim: %+v", *got.Risk)
+	}
+
+	// Omitted entirely, so a strict verifier that rejects unknown members and
+	// one that ignores them both see the payload they saw before.
+	payload, err := decodeSegment(strings.Split(token, ".")[1])
+	if err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if strings.Contains(string(payload), "risk") {
+		t.Errorf("the payload mentions risk although none was attached: %s", payload)
+	}
+
+	// A nil option is tolerated, so a caller may build the slice
+	// unconditionally.
+	if _, _, err := iss.Issue(testSubject, "", testAudience, []Factor{FactorTOTP}, nil, nil); err != nil {
+		t.Errorf("Issue with a nil option: %v", err)
 	}
 }

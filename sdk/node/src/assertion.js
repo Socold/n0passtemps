@@ -326,6 +326,26 @@ export function remoteJwks(
  * @property {string[]} amr Factors that completed the ceremony.
  * @property {string} [cid] base64url WebAuthn credential identifier.
  * @property {string} [tid] Tenant identifier on multi-tenant deployments.
+ * @property {AssertionRisk} [risk] What the service made of the ceremony, present only when the deployment reports risk.
+ */
+
+/**
+ * What the service made of the ceremony, from the `risk` claim.
+ *
+ * It is a report and never a refusal: the service verified the ceremony before
+ * signing it, so `level === "high"` is not a failed authentication. What to do
+ * about it belongs to the application, which knows what the user is about to
+ * do.
+ *
+ * An absent claim means the deployment does not report risk, which is
+ * deliberately not the same as a low assessment. An application that steps up
+ * must handle the absent case explicitly, or disabling the feature would
+ * silently turn every step-up off.
+ *
+ * @typedef {object} AssertionRisk
+ * @property {"low" | "elevated" | "high"} level Reported level. Compare against these values rather than ordering the strings.
+ * @property {string[]} reasons Every signal that fired, in a fixed order. The set is closed and documented in docs/RISK.md, but a newer deployment may report a member this library does not know, so do not treat it as exhaustive.
+ * @property {number} score Total weight of the reasons, carried so a decision can be explained rather than so applications invent their own thresholds.
  */
 
 /**
@@ -485,6 +505,26 @@ export class Verifier {
       if (claims[name] !== undefined && typeof claims[name] !== "string") throw invalid();
     }
     if (claims.iat !== undefined && !Number.isSafeInteger(claims.iat)) throw invalid();
+
+    // A "risk" claim that is present but malformed invalidates the assertion.
+    // Dropping it instead would present "risk was not reported" to an
+    // application when risk was reported, which fails open on exactly the
+    // signal the application asked for. Unknown members are ignored, so a
+    // service that adds a field does not break this library.
+    if (claims.risk !== undefined) {
+      const risk = claims.risk;
+      if (risk === null || typeof risk !== "object" || Array.isArray(risk)) throw invalid();
+      if (typeof risk.level !== "string" || risk.level === "") throw invalid();
+      if (risk.reasons !== undefined) {
+        if (
+          !Array.isArray(risk.reasons) ||
+          !risk.reasons.every((reason) => typeof reason === "string")
+        ) {
+          throw invalid();
+        }
+      }
+      if (risk.score !== undefined && !Number.isSafeInteger(risk.score)) throw invalid();
+    }
 
     // "exp" is required. Treating a missing "exp" as "no expiry" turns a
     // captured assertion into a permanent credential.

@@ -613,3 +613,71 @@ func FuzzVerify(f *testing.F) {
 		}
 	})
 }
+
+// TestVerifyReadsTheRiskClaim covers the claim an application branches on when
+// it decides whether to ask for more than the ceremony proved.
+func TestVerifyReadsTheRiskClaim(t *testing.T) {
+	f := newFixture(t)
+
+	token := f.token(t, func(c map[string]any) {
+		c["risk"] = map[string]any{
+			"level":   "elevated",
+			"reasons": []any{"user_verification_absent", "credential_dormant"},
+			"score":   30,
+		}
+	})
+
+	claims, err := f.verifier.Verify(context.Background(), token)
+	if err != nil {
+		t.Fatalf("a token carrying a risk claim was refused: %v", err)
+	}
+	if claims.Risk == nil {
+		t.Fatal("the risk claim was dropped")
+	}
+	if claims.Risk.Level != RiskElevated || claims.Risk.Score != 30 {
+		t.Errorf("risk = %+v", claims.Risk)
+	}
+	if !claims.HasRiskReason("credential_dormant") {
+		t.Errorf("reasons = %v", claims.Risk.Reasons)
+	}
+	if claims.HasRiskReason("signature_counter_stalled") {
+		t.Error("HasRiskReason reports a signal that did not fire")
+	}
+}
+
+// TestVerifyWithoutARiskClaim pins the distinction the doc comment insists on:
+// no claim is not a low assessment.
+func TestVerifyWithoutARiskClaim(t *testing.T) {
+	f := newFixture(t)
+
+	claims, err := f.verifier.Verify(context.Background(), f.token(t, nil))
+	if err != nil {
+		t.Fatalf("a valid token was refused: %v", err)
+	}
+	if claims.Risk != nil {
+		t.Errorf("risk = %+v, want nil when the deployment does not report it", claims.Risk)
+	}
+	if claims.HasRiskReason("recovery_code_used") {
+		t.Error("HasRiskReason must not report a signal when no risk was reported")
+	}
+}
+
+// TestVerifyRefusesMalformedRisk checks the claim fails closed. Accepting the
+// token and dropping the claim would tell an application that risk was not
+// reported when it was, which is fail-open on the one signal it asked for.
+func TestVerifyRefusesMalformedRisk(t *testing.T) {
+	f := newFixture(t)
+
+	for name, value := range map[string]any{
+		"not an object":       "elevated",
+		"level not a string":  map[string]any{"level": 2},
+		"reasons not strings": map[string]any{"level": "high", "reasons": []any{1, 2}},
+		"score not a number":  map[string]any{"level": "high", "score": "lots"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			mustRefuse(t, f.verifier, f.token(t, func(c map[string]any) {
+				c["risk"] = value
+			}))
+		})
+	}
+}

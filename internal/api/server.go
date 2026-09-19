@@ -148,9 +148,14 @@ func (e *throttledError) Error() string { return "rate limit reached on dimensio
 
 // recordAttempt registers the outcome of an authentication attempt and raises
 // an alert when a limit trips.
-func (s *Server) recordAttempt(r *http.Request, tenantID, subjectID string, dims map[throttle.Dimension]string, failure bool) {
+//
+// The limiter's result is returned so that risk reporting can read the failure
+// counters this call already fetched, rather than querying for them again on
+// the authentication path. Callers with no use for it ignore it, which is why
+// it is a return value and not an out parameter.
+func (s *Server) recordAttempt(r *http.Request, tenantID, subjectID string, dims map[throttle.Dimension]string, failure bool) throttle.Result {
 	if s.deps.Limiter == nil || len(dims) == 0 {
-		return
+		return throttle.Result{Allowed: true}
 	}
 	ctx := r.Context()
 
@@ -158,10 +163,10 @@ func (s *Server) recordAttempt(r *http.Request, tenantID, subjectID string, dims
 	if err != nil {
 		s.deps.Logger.WarnContext(ctx, "attempt not recorded against throttle",
 			slog.Any("error", err))
-		return
+		return throttle.Result{Allowed: true}
 	}
 	if res.Allowed || s.deps.Alerts == nil {
-		return
+		return res
 	}
 
 	// A lockout is worth an alert: it is either an attack on one account or a
@@ -193,6 +198,7 @@ func (s *Server) recordAttempt(r *http.Request, tenantID, subjectID string, dims
 	}); err != nil {
 		s.deps.Logger.ErrorContext(ctx, "lockout not audited", slog.Any("error", err))
 	}
+	return res
 }
 
 // audited records an event, logging rather than failing when the append does
