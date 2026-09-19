@@ -36,7 +36,17 @@ GOLANGCI_LINT_VERSION ?= v2.13.2
 # .gosec.json uses globals a release before v2.29.0 would ignore, which would
 # make a local run and a CI run disagree.
 GOSEC_VERSION         ?= v2.29.0
-GOVULNCHECK_VERSION   ?= v1.1.4
+# v1.1.4 vendors golang.org/x/tools v0.29.0, whose SSA builder panics with
+# "unexpected expr: *ast.KeyValueExpr" on the toolchain this project builds
+# with, so 'make sec' produced a goroutine dump rather than a scan. The same
+# class of failure as the golangci-lint pin in docs/ROADMAP.md: a pinned
+# analyser eventually stops understanding the language it is pointed at.
+GOVULNCHECK_VERSION   ?= v1.8.0
+# Installed from github.com/zricethezav/gitleaks: the repository moved to the
+# gitleaks organisation but the module still declares the old path, so
+# 'go install github.com/gitleaks/...' fails with a version constraints
+# conflict. CI calls the action rather than this target, which is why the wrong
+# path here went unnoticed.
 GITLEAKS_VERSION      ?= v8.30.0
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -99,8 +109,14 @@ build-all: ## Cross-compile both binaries for every supported platform into dist
 test: ## Run the unit tests
 	go test $(GOFLAGS_BUILD) ./...
 
+# The one target that overrides the global CGO_ENABLED := 0 above. The race
+# detector is built on cgo and refuses to run without it, so with the global
+# setting inherited this target failed on every machine with "-race requires
+# cgo". It went unnoticed because the CI workflow does not call it: that job
+# runs the same command inline with CGO_ENABLED set to 1 in the step, so the
+# gate CONTRIBUTING.md asks contributors to run was the only one that broke.
 test-race: ## Run the unit tests under the race detector
-	go test $(GOFLAGS_BUILD) -race ./...
+	CGO_ENABLED=1 go test $(GOFLAGS_BUILD) -race ./...
 
 test-integration: ## Run the PostgreSQL integration tests (build tag 'integration')
 	N0PASSTEMPS_TEST_POSTGRES_DSN='$(TEST_POSTGRES_URL)' \
@@ -177,7 +193,7 @@ sec: ## Run the static security analyser and the vulnerability database check
 	govulncheck ./...
 
 secrets: ## Scan the working tree and history for committed secrets
-	@$(call require_tool,gitleaks,github.com/gitleaks/gitleaks/v8@$(GITLEAKS_VERSION))
+	@$(call require_tool,gitleaks,github.com/zricethezav/gitleaks/v8@$(GITLEAKS_VERSION))
 	gitleaks detect --config .gitleaks.toml --redact --verbose
 
 fmt: ## Rewrite the sources with gofmt
