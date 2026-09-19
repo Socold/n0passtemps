@@ -116,6 +116,11 @@ func (s *Store) ListApprovals(ctx context.Context, tenantID string, status store
 // accepts. The comparison ignores case and surrounding whitespace: a check an
 // administrator defeats by capitalising their own identifier is not a check.
 //
+// The two sides are compared as principals and not as token identifiers. A
+// rotation leaves one administrator holding two live tokens for the grace
+// period, and a rule that compared the tokens let them ask with one and approve
+// with the other; see adminPrincipal.
+//
 // A request that has expired is refused with store.ErrStaleWrite. The expiry
 // exists so that a sensitive operation cannot be approved long after the
 // circumstances that justified it, and an expired request is no more decidable
@@ -158,7 +163,15 @@ func (s *Store) DecideApproval(ctx context.Context, tenantID, id, decidedBy stri
 		return nil, fmt.Errorf("%w: request expired at %s", store.ErrStaleWrite,
 			current.ExpiresAt.Format(time.RFC3339))
 	}
-	if sameAdministrator(current.RequestedBy, decidedBy) {
+	requester, err := s.adminPrincipal(ctx, tenantID, current.RequestedBy)
+	if err != nil {
+		return nil, err
+	}
+	decider, err := s.adminPrincipal(ctx, tenantID, decidedBy)
+	if err != nil {
+		return nil, err
+	}
+	if sameAdministrator(requester, decider) {
 		return nil, store.ErrSelfApproval
 	}
 
@@ -242,6 +255,36 @@ func (s *Store) ExpireApprovals(ctx context.Context, before time.Time) (int64, e
 // is not a byte equality.
 func sameAdministrator(a, b string) bool {
 	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+}
+
+// adminPrincipal resolves an administrative token to the principal it belongs
+// to, which is the identifier the dual-approval rule compares.
+//
+// A token that was issued is its own principal. A token minted by a rotation
+// carries the principal of the one it replaced, however many rotations back
+// that was, so the line of tokens one administrator has held resolves to one
+// value.
+//
+// An identifier that names no token in the tenant is returned as it was given.
+// The rule then compares what it compared before there were principals, which
+// refuses no less than it did; failing the decision instead would make a request
+// undecidable once its requester's row was gone.
+//
+// Like the read above it, this does not need the update's transaction: a
+// principal is written in the transaction that inserts the token and is never
+// modified afterwards.
+func (s *Store) adminPrincipal(ctx context.Context, tenantID, tokenID string) (string, error) {
+	var principal string
+	err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(principal_id, id) FROM admin_tokens WHERE tenant_id = $1 AND id = $2`,
+		tenantID, strings.TrimSpace(tokenID)).Scan(&principal)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return tokenID, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("postgres: resolve administrator: %w", mapError(err))
+	}
+	return principal, nil
 }
 
 func scanApproval(sc rowScanner) (*store.ApprovalRequest, error) {

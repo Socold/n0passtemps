@@ -92,6 +92,20 @@ func (s *Store) RotateAdminToken(ctx context.Context, tenantID, predecessorID st
 				successor.VerifierHash, string(successor.Role), formatTime(successor.CreatedAt),
 				nullString(successor.CreatedBy), formatTimePtr(successor.LastUsedAt),
 				formatTimePtr(successor.ExpiresAt), formatTimePtr(successor.RevokedAt))
+			if err != nil {
+				return mapError(err)
+			}
+			// The successor is the same administrator under a new identifier.
+			// Written here, from the predecessor's own row and in the insert's
+			// transaction, so that no caller chooses whose principal a token
+			// carries; see adminPrincipal.
+			_, err = tx.ExecContext(ctx, `
+				UPDATE admin_tokens
+				SET principal_id = (
+					SELECT COALESCE(p.principal_id, p.id) FROM admin_tokens AS p
+					WHERE p.tenant_id = ? AND p.id = ?)
+				WHERE tenant_id = ? AND id = ?`,
+				tenantID, predecessorID, tenantID, successor.ID)
 			return mapError(err)
 		})
 	if err != nil {

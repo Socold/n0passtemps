@@ -1,0 +1,21 @@
+-- 0006_admin_principal: who an administrative token belongs to, across rotations.
+--
+-- The dual-approval rule says the administrator who decides a request is not
+-- the one who made it, and an administrator was identified by the identifier of
+-- their token. Rotation mints a successor under a new identifier and leaves the
+-- predecessor valid for the grace period, so for that period one person held
+-- two identifiers and the rule compared them and found two administrators: ask
+-- with the old token, rotate, approve with the new one, redeem with the old.
+--
+-- principal_id is the identifier that does not change. It is NULL on a token
+-- that was issued, which is its own principal, and on a successor it is the
+-- principal of the token it replaced, written by the rotation in the same
+-- transaction as the insert. Every reader takes COALESCE(principal_id, id), so
+-- the rows that existed before this migration need no backfill and mean what
+-- they always meant.
+--
+-- It identifies a line of tokens and not a person. Two tokens issued separately
+-- to one administrator are two principals, and nothing in the schema can know
+-- otherwise; that is a matter of who is handed a token, not of what is stored.
+
+ALTER TABLE admin_tokens ADD COLUMN principal_id TEXT;

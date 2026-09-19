@@ -119,6 +119,11 @@ func (s *Store) ListApprovals(ctx context.Context, tenantID string, status store
 // whitespace: a check an administrator defeats by capitalising their own
 // identifier is not a check.
 //
+// The two sides are compared as principals and not as token identifiers. A
+// rotation leaves one administrator holding two live tokens for the grace
+// period, and a rule that compared the tokens let them ask with one and approve
+// with the other; see adminPrincipal.
+//
 // A request that has expired is refused with store.ErrStaleWrite. The expiry
 // exists so that a sensitive operation cannot be approved long after the
 // circumstances that justified it, and an expired request is no more decidable
@@ -156,7 +161,15 @@ func (s *Store) DecideApproval(ctx context.Context, tenantID, id, decidedBy stri
 			return fmt.Errorf("%w: request expired at %s", store.ErrStaleWrite,
 				current.ExpiresAt.Format(time.RFC3339))
 		}
-		if sameAdministrator(current.RequestedBy, decidedBy) {
+		requester, err := adminPrincipal(ctx, tx, tenantID, current.RequestedBy)
+		if err != nil {
+			return err
+		}
+		decider, err := adminPrincipal(ctx, tx, tenantID, decidedBy)
+		if err != nil {
+			return err
+		}
+		if sameAdministrator(requester, decider) {
 			return store.ErrSelfApproval
 		}
 
@@ -270,6 +283,32 @@ func (s *Store) ExpireApprovals(ctx context.Context, before time.Time) (int64, e
 // is not a byte equality.
 func sameAdministrator(a, b string) bool {
 	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+}
+
+// adminPrincipal resolves an administrative token to the principal it belongs
+// to, which is the identifier the dual-approval rule compares.
+//
+// A token that was issued is its own principal. A token minted by a rotation
+// carries the principal of the one it replaced, however many rotations back
+// that was, so the line of tokens one administrator has held resolves to one
+// value.
+//
+// An identifier that names no token in the tenant is returned as it was given.
+// The rule then compares what it compared before there were principals, which
+// refuses no less than it did; failing the decision instead would make a request
+// undecidable once its requester's row was gone.
+func adminPrincipal(ctx context.Context, tx *sql.Tx, tenantID, tokenID string) (string, error) {
+	var principal string
+	err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(principal_id, id) FROM admin_tokens WHERE tenant_id = ? AND id = ?`,
+		tenantID, strings.TrimSpace(tokenID)).Scan(&principal)
+	if errors.Is(err, sql.ErrNoRows) {
+		return tokenID, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("sqlite: resolve administrator: %w", mapError(err))
+	}
+	return principal, nil
 }
 
 func scanApproval(sc rowScanner) (*store.ApprovalRequest, error) {

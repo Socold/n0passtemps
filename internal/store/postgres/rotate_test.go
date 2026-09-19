@@ -287,3 +287,65 @@ func TestRotateAdminToken(t *testing.T) {
 		t.Errorf("usable auditors after rotation = %d, want at least the successor", n)
 	}
 }
+
+// TestASuccessorCannotApproveWhatItsPredecessorAsked is the dual-approval rule
+// across a rotation.
+//
+// Rotation leaves the predecessor valid for the grace period, so one
+// administrator holds two live tokens under two identifiers. A rule that
+// compared the identifiers saw two administrators: ask with the old token,
+// rotate, approve with the new one, redeem with the old. The rule compares
+// principals, and a successor carries the principal of the token it replaced,
+// however many rotations back that was.
+func TestASuccessorCannotApproveWhatItsPredecessorAsked(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedTenant(t, s, "tenant-a")
+	seedAdminToken(t, s, "tenant-a", "first", store.RoleFull, nil)
+	seedAdminToken(t, s, "tenant-a", "colleague", store.RoleFull, nil)
+
+	cutoff := rotationNow.Add(24 * time.Hour)
+	if err := s.RotateAdminToken(ctx, "tenant-a", "first",
+		adminTokenSuccessor("tenant-a", "second", store.RoleFull), cutoff); err != nil {
+		t.Fatalf("first rotation: %v", err)
+	}
+	if err := s.RotateAdminToken(ctx, "tenant-a", "second",
+		adminTokenSuccessor("tenant-a", "third", store.RoleFull), cutoff); err != nil {
+		t.Fatalf("second rotation: %v", err)
+	}
+
+	create := func(id, requestedBy string) {
+		t.Helper()
+		err := s.CreateApproval(ctx, &store.ApprovalRequest{
+			ID: id, TenantID: "tenant-a", Operation: "admin_token.create",
+			Payload: []byte(`{"name":"x","role":"admin_full"}`), Reason: "test",
+			RequestedBy: requestedBy, RequestedAt: rotationNow, ExpiresAt: rotationNow.Add(time.Hour),
+		})
+		if err != nil {
+			t.Fatalf("create approval %s: %v", id, err)
+		}
+	}
+	at := rotationNow.Add(time.Minute)
+
+	// Forwards: the predecessor asks, a successor decides. Two rotations on,
+	// it is still the same administrator.
+	create("req-forwards", "first")
+	for _, decider := range []string{"second", "third"} {
+		if _, err := s.DecideApproval(ctx, "tenant-a", "req-forwards", decider, true, "", at); !errors.Is(err, store.ErrSelfApproval) {
+			t.Errorf("%s approving what first asked = %v, want store.ErrSelfApproval", decider, err)
+		}
+	}
+
+	// Backwards: the successor asks and the predecessor, still inside its
+	// grace period, decides.
+	create("req-backwards", "third")
+	if _, err := s.DecideApproval(ctx, "tenant-a", "req-backwards", "first", true, "", at); !errors.Is(err, store.ErrSelfApproval) {
+		t.Errorf("first approving what third asked = %v, want store.ErrSelfApproval", err)
+	}
+
+	// A token issued separately is another administrator, and the rule has to
+	// keep letting them through or there is no approval at all.
+	if _, err := s.DecideApproval(ctx, "tenant-a", "req-forwards", "colleague", true, "", at); err != nil {
+		t.Errorf("a colleague approving = %v, want success", err)
+	}
+}
