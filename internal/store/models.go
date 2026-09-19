@@ -167,6 +167,49 @@ type RecoveryCode struct {
 	ConsumedAt   *time.Time `json:"consumed_at,omitempty"`
 }
 
+// EnrolmentTicket is a single-use, short-lived secret that permits one WebAuthn
+// registration and nothing else.
+//
+// It is the way back in for a subject who holds no authenticator yet, or who has
+// lost every one they had. Redeeming it never produces a signed assertion: a
+// stolen ticket lets an attacker enrol a key of their own, which is audited and
+// alertable, rather than hand them a session.
+//
+// Selector and VerifierHash follow the recovery-code construction exactly, and
+// are marked json:"-" for the same reason: the plaintext is shown once in the
+// issuing response and is not recoverable afterwards, and neither half of the
+// stored form belongs in any later response.
+//
+// ConsumedCredentialID records what the redemption produced, so an operator can
+// answer what a ticket was used for rather than only whether it was used.
+type EnrolmentTicket struct {
+	ID           string `json:"id"`
+	TenantID     string `json:"tenant_id"`
+	SubjectID    string `json:"subject_id"`
+	Selector     string `json:"-"`
+	VerifierHash string `json:"-"`
+
+	// IssuedBy is the identifier of the API key or administrative token that
+	// put the ticket into circulation.
+	IssuedBy string `json:"issued_by"`
+
+	Reason               string     `json:"reason,omitempty"`
+	CreatedAt            time.Time  `json:"created_at"`
+	ExpiresAt            time.Time  `json:"expires_at"`
+	ConsumedAt           *time.Time `json:"consumed_at,omitempty"`
+	ConsumedCredentialID string     `json:"consumed_credential_id,omitempty"`
+	RevokedAt            *time.Time `json:"revoked_at,omitempty"`
+}
+
+// Redeemable reports whether the ticket may still be redeemed at now.
+//
+// It is an early filter, not the enforcement. Single use is a property of
+// ConsumeEnrolmentTicket's conditional update, because two concurrent
+// redemptions would both pass a check made here.
+func (t *EnrolmentTicket) Redeemable(now time.Time) bool {
+	return t.ConsumedAt == nil && t.RevokedAt == nil && now.Before(t.ExpiresAt)
+}
+
 // Ceremony distinguishes the two WebAuthn flows.
 type Ceremony string
 

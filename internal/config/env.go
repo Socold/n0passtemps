@@ -135,6 +135,9 @@ func applyEnv(cfg *Config) error {
 	num("RECOVERY_CODE_COUNT", &cfg.Recovery.CodeCount)
 	num("RECOVERY_LOW_WATERMARK", &cfg.Recovery.LowWatermark)
 
+	dur("TICKETS_TTL", &cfg.Tickets.TTL)
+	boolean("TICKETS_REQUIRE_EXISTING_FACTOR_DEFAULT", &cfg.Tickets.RequireExistingFactorDefault)
+
 	str("ASSERTION_ISSUER", &cfg.Assertion.Issuer)
 	str("ASSERTION_SIGNING_KEY_PATH", &cfg.Assertion.SigningKeyPath)
 	dur("ASSERTION_TTL", &cfg.Assertion.TTL)
@@ -147,6 +150,14 @@ func applyEnv(cfg *Config) error {
 	num("THROTTLE_MAX_REQUESTS_PER_KEY", &cfg.Throttle.MaxRequestsPerKey)
 	dur("THROTTLE_LOCKOUT_DURATION", &cfg.Throttle.LockoutDuration)
 	num("THROTTLE_ADMIN_REVOKE_BURST", &cfg.Throttle.AdminRevokeBurst)
+
+	// The scalars only. The per-reason weight table is file-only on purpose;
+	// see the comment on config.Risk.Weights.
+	boolean("RISK_ENABLED", &cfg.Risk.Enabled)
+	num("RISK_ELEVATED_AT", &cfg.Risk.ElevatedAt)
+	num("RISK_HIGH_AT", &cfg.Risk.HighAt)
+	dur("RISK_DORMANT_AFTER", &cfg.Risk.DormantAfter)
+	dur("RISK_NEW_CREDENTIAL_WITHIN", &cfg.Risk.NewCredentialWithin)
 
 	num("AUDIT_RETENTION_DAYS", &cfg.Audit.RetentionDays)
 	boolean("AUDIT_VERIFY_ON_START", &cfg.Audit.VerifyOnStart)

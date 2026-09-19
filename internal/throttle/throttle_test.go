@@ -615,3 +615,84 @@ func TestRecordAttributesOnlySubjectBuckets(t *testing.T) {
 		})
 	}
 }
+
+// TestResultCarriesEveryDimensionsCounters checks the per-dimension snapshot.
+//
+// Dimension, Attempts and Failures name one bucket, which is the right answer
+// for a refusal. Risk reporting needs two at once, and it gets them from here
+// rather than from a second round trip to the store, since Record has already
+// read every bucket it was given.
+func TestResultCarriesEveryDimensionsCounters(t *testing.T) {
+	l, _, _ := newLimiter(t, testConfig())
+	dims := map[Dimension]string{
+		DimSubject: "subject-1",
+		DimIP:      "198.51.100.7",
+	}
+
+	// Two failures against the subject, one of which is also the network's.
+	if _, err := l.Record(context.Background(), tenant, dims, true); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	res, err := l.Record(context.Background(), tenant,
+		map[Dimension]string{DimSubject: "subject-1"}, true)
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if got := res.Counters[DimSubject].Failures; got != 2 {
+		t.Errorf("subject failures = %d, want 2", got)
+	}
+	// A dimension the call did not supply is absent rather than zero, so a
+	// caller cannot mistake "not asked" for "no failures".
+	if _, present := res.Counters[DimIP]; present {
+		t.Error("a dimension that was not supplied appears in the counters")
+	}
+
+	both, err := l.Record(context.Background(), tenant, dims, false)
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if got := both.Counters[DimSubject].Failures; got != 2 {
+		t.Errorf("subject failures = %d, want 2; a success must not count as one", got)
+	}
+	if got := both.Counters[DimIP].Failures; got != 1 {
+		t.Errorf("network failures = %d, want 1", got)
+	}
+	if got := both.Counters[DimSubject].Attempts; got != 3 {
+		t.Errorf("subject attempts = %d, want 3", got)
+	}
+
+	// Check reports the same snapshot without recording anything.
+	seen, err := l.Check(context.Background(), tenant, dims)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if got := seen.Counters[DimSubject].Failures; got != 2 {
+		t.Errorf("Check reports %d subject failures, want 2", got)
+	}
+	if got := seen.Counters[DimIP].Failures; got != 1 {
+		t.Errorf("Check reports %d network failures, want 1", got)
+	}
+}
+
+// TestDisabledLimiterReportsNoCounters checks that a deployment with limiting
+// off reports no failures rather than a zeroed map.
+//
+// Risk reporting reads these counters, and a deployment that counts nothing
+// must report no failure reasons, which is what it truthfully observed.
+func TestDisabledLimiterReportsNoCounters(t *testing.T) {
+	cfg := testConfig()
+	cfg.Enabled = false
+	l, _, _ := newLimiter(t, cfg)
+	dims := map[Dimension]string{DimSubject: "subject-1"}
+
+	res, err := l.Record(context.Background(), tenant, dims, true)
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if res.Counters != nil {
+		t.Errorf("a disabled limiter reported counters: %v", res.Counters)
+	}
+	if got := res.Counters[DimSubject].Failures; got != 0 {
+		t.Errorf("reading an absent dimension gave %d, want the zero value", got)
+	}
+}

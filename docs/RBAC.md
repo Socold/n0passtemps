@@ -1,6 +1,6 @@
 # Administrative roles and permissions
 
-Three roles, twenty-seven permissions, one mapping. The authority is in
+Three roles, twenty-eight permissions, one mapping. The authority is in
 `internal/rbac/rbac.go`; the matrix below is generated to match it.
 
 ## The design principle
@@ -54,24 +54,40 @@ to `admin_full`.
 | 15 | `recovery.reissue` | no | yes | yes | no |
 | 16 | `throttle.reset` | no | yes | yes | no |
 | 17 | `alert.acknowledge` | no | yes | yes | no |
-| 18 | `credential.revoke_bulk` | no | no | yes | yes |
-| 19 | `approval.decide` | no | no | yes | no |
-| 20 | `erasure.request` | no | no | yes | yes |
-| 21 | `erasure.cancel` | no | no | yes | no |
-| 22 | `api_key.create` | no | no | yes | no |
-| 23 | `api_key.revoke` | no | no | yes | no |
-| 24 | `api_key.rotate` | no | no | yes | no |
-| 25 | `admin_token.create` | no | no | yes | yes |
-| 26 | `admin_token.revoke` | no | no | yes | no |
-| 27 | `kek.rotate` | no | no | yes | yes |
+| 18 | `enrolment_ticket.issue` | no | yes | yes | no |
+| 19 | `credential.revoke_bulk` | no | no | yes | yes |
+| 20 | `approval.decide` | no | no | yes | no |
+| 21 | `erasure.request` | no | no | yes | yes |
+| 22 | `erasure.cancel` | no | no | yes | no |
+| 23 | `api_key.create` | no | no | yes | no |
+| 24 | `api_key.revoke` | no | no | yes | no |
+| 25 | `api_key.rotate` | no | no | yes | no |
+| 26 | `admin_token.create` | no | no | yes | yes |
+| 27 | `admin_token.revoke` | no | no | yes | no |
+| 28 | `kek.rotate` | no | no | yes | yes |
 
-Counts: `admin_auditor` holds 11, `admin_operator` holds 17, `admin_full` holds
-all 27.
+Counts: `admin_auditor` holds 11, `admin_operator` holds 18, `admin_full` holds
+all 28.
 
 `audit.verify` sits among the read permissions because verification recomputes
 hashes and writes nothing. It does append one audit entry recording that a
 verification ran, which is the log recording its own inspection rather than the
 caller changing state.
+
+`enrolment_ticket.issue` sits with the user support permissions because the
+case it serves is the one that role exists for: a user who has lost every
+authenticator and holds no recovery code. Its effect is confined to one subject
+and is undone by revoking the ticket or the credential it produced. It is not a
+dual-approval candidate, because a user with no way in cannot wait for a second
+administrator to wake up, and because the two controls that actually bound the
+risk are the short lifetime and the factor guard rather than a second signature.
+Issuing over an existing factor raises an alert, which is the after-the-fact
+review a queue would have provided in advance.
+
+The same permission covers withdrawing a ticket. Whoever may put one into
+circulation must be able to take it out, and an operator who had to find a full
+administrator to withdraw their own mis-delivery would in practice wait for the
+expiry instead.
 
 `api_key.list` and `admin_token.list` are read only and metadata only: neither
 listing can disclose a token, because only a selector and a digest of the
@@ -134,6 +150,8 @@ check cannot exist as an open route.
 | `POST /admin/v1/subjects/{subject_id}/credentials/revoke-all` | `credential.revoke_bulk` |
 | `POST /admin/v1/subjects/{subject_id}/recovery/reissue` | `recovery.reissue` |
 | `POST /admin/v1/subjects/{subject_id}/throttle/reset` | `throttle.reset` |
+| `POST /admin/v1/subjects/{subject_id}/enrolment-ticket` | `enrolment_ticket.issue` |
+| `POST /admin/v1/enrolment-tickets/{ticket_id}/revoke` | `enrolment_ticket.issue` |
 | `POST /admin/v1/subjects/{subject_id}/erasure` | `erasure.request` |
 | `DELETE /admin/v1/subjects/{subject_id}/erasure` | `erasure.cancel` |
 | `GET /admin/v1/audit` | `audit.read` |
@@ -154,7 +172,7 @@ check cannot exist as an open route.
 | `POST /admin/v1/kek/rewrap` | `kek.rotate` |
 | `GET /admin/v1/health` | `health.read_detailed` |
 
-Three of these are worth stating plainly.
+Four of these are worth stating plainly.
 
 Both credential listings are readable by every role, including `admin_auditor`.
 An auditor can therefore see which API keys and which administrative tokens
@@ -170,6 +188,13 @@ every factor a subject holds in one call. `kek.rotate` guards the rewrap pass
 over the sealed records. Adding a key version to the keyring file is not an API
 operation at all; it is `n0passtemps-wizard kek rotate`, run on the host by
 someone who can write the file.
+
+`enrolment_ticket.issue` guards two routes rather than one, and the second is a
+revocation. That is deliberate and is the only place in this table where an
+issuing permission also withdraws; the reasoning is above, in
+[The matrix](#the-matrix). The revoke route names the ticket and not the
+subject, so the audit entry for it carries no subject; the issuance entry for
+the same resource identifier does.
 
 Revealing a subject reference is part of `GET /admin/v1/subjects/{subject_id}`,
 not a separate route. Passing `?reveal_ref=true` decrypts `subjects.ref_sealed`

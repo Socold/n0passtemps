@@ -120,12 +120,13 @@ func newEngine(t *testing.T) (*Engine, *fakeStore, *clock, *logBuffer) {
 
 const tenant = "tenant-1"
 
-func TestTenTypesAreDeclared(t *testing.T) {
-	if len(AllTypes) != 10 {
-		t.Fatalf("AllTypes has %d entries, want 10", len(AllTypes))
+func TestEveryDeclaredTypeIsCounted(t *testing.T) {
+	const want = 12
+	if len(AllTypes) != want {
+		t.Fatalf("AllTypes has %d entries, want %d", len(AllTypes), want)
 	}
-	if len(specs) != 10 {
-		t.Fatalf("specs has %d entries, want 10", len(specs))
+	if len(specs) != want {
+		t.Fatalf("specs has %d entries, want %d", len(specs), want)
 	}
 	seen := map[Type]bool{}
 	for _, ty := range AllTypes {
@@ -454,6 +455,13 @@ func TestConvenienceMethodsCoverEveryType(t *testing.T) {
 		}},
 		{TypeKEKRotationOverdue, func(e *Engine) (*store.Alert, error) {
 			return e.KEKRotationOverdue(ctx, tenant, "v3", 400*24*time.Hour, 365*24*time.Hour)
+		}},
+		{TypeRiskHigh, func(e *Engine) (*store.Alert, error) {
+			return e.RiskHigh(ctx, tenant, "subject-1", 45,
+				[]string{"recovery_code_used", "recent_failures_subject", "recent_failures_network"})
+		}},
+		{TypeTicketFactorOverride, func(e *Engine) (*store.Alert, error) {
+			return e.TicketFactorOverride(ctx, tenant, "subject-1", "ticket-1", "key-1", 2, true)
 		}},
 	}
 

@@ -73,8 +73,8 @@ info:
     # API key scopes
 
     An API key may be restricted to named families of `/v1` routes. The scopes
-    are `subjects`, `webauthn`, `totp`, `recovery` and `health`, and each `/v1`
-    route states the one it needs. A key minted with an empty scope list is
+    are `subjects`, `webauthn`, `totp`, `recovery`, `health` and `tickets`, and
+    each `/v1` route states the one it needs. A key minted with an empty scope list is
     unrestricted and reaches every family; the minting response says so in
     `unrestricted`, so that an unrestricted key is a visible choice. A key
     calling outside its scopes is answered `403` with
@@ -209,6 +209,11 @@ tags:
     description: Time-based one-time password enrolment and verification.
   - name: Recovery
     description: Single-use recovery codes.
+  - name: Enrolment tickets
+    description: |
+      Single-use secrets that permit exactly one WebAuthn registration. They
+      never produce a signed assertion, and delivering them is the integrating
+      application's responsibility.
   - name: Administration
     description: Operator routes under /admin/v1.
 
@@ -1035,6 +1040,228 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /v1/subjects/{subject_ref}/enrolment-ticket:
+    parameters:
+      - $ref: "#/components/parameters/SubjectRef"
+    post:
+      tags: [Enrolment tickets]
+      operationId: issueEnrolmentTicket
+      summary: Issue a single-use enrolment ticket for a subject.
+      description: |
+        Requires an API key that holds the `tickets` scope, or an unrestricted
+        key.
+
+        A ticket permits exactly one thing: starting and completing one WebAuthn
+        registration for this subject. It never produces a signed assertion, so
+        a stolen ticket lets an attacker enrol an authenticator of their own,
+        which is audited, rather than hand them a session.
+
+        This is the onboarding route: a user who holds no authenticator yet. The
+        operator counterpart, for a user who has lost every authenticator they
+        had, is
+        `POST /admin/v1/subjects/{subject_id}/enrolment-ticket`.
+
+        The subject must already exist. Creating one here implicitly would let a
+        caller populate the database with subjects by minting tickets it never
+        delivers.
+
+        The ticket appears in this response and nowhere else, ever. Only its
+        selector and an Argon2id hash of its verifier are stored, the same
+        construction as a recovery code, so there is no operation that can show
+        it again.
+
+        Issuing revokes any live ticket the subject already had, in the same
+        transaction. Two live tickets double the window in which an intercepted
+        one can be redeemed, and reissuing after a failed delivery is exactly
+        when the first is most likely to be in the wrong hands.
+
+        **Delivering the ticket is your responsibility and your risk.** This
+        service sends no email and makes no outbound connection. Whoever
+        controls the channel you choose can enrol an authenticator until the
+        ticket expires, which is why `tickets.ttl` is capped at 24h and why the
+        factor guard below exists.
+      security:
+        - apiKey: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TicketIssueRequest"
+      responses:
+        "201":
+          description: The ticket. Deliver it immediately; it is shown once.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TicketIssueResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/CeremonyFailed"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: |
+            The subject already holds an active authenticator or a confirmed
+            TOTP secret, and `tickets.require_existing_factor_default` is on.
+            Send `require_existing_factor: false` to issue one anyway. Both the
+            refusal and the override are audited, and the override raises the
+            `enrolment_ticket.factor_override` alert.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/Throttled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/enrolment/register:
+    post:
+      tags: [Enrolment tickets]
+      operationId: redeemEnrolmentTicketBegin
+      summary: Start the one registration an enrolment ticket permits.
+      description: |
+        Requires an API key that holds the `tickets` scope, or an unrestricted
+        key.
+
+        The ticket is in the request body, not in the path. A path reaches the
+        access log of every reverse proxy, load balancer and monitoring agent in
+        front of this service, and those logs are rotated, shipped and read by
+        people who have no business holding an enrolment credential; it also
+        reaches a `Referer` header and browser history if the value is ever put
+        in front of a browser. Nothing equivalent happens to a body. This is the
+        same reasoning that puts a recovery code in the body of
+        `POST /v1/recovery/{subject_ref}/consume`, and the routes are named for
+        what they do because neither carries the secret as a parameter.
+
+        There is no `subject_ref` either. The ticket already names its subject,
+        and accepting a second, caller-supplied answer to the same question
+        would create a mismatch to resolve and a way to probe which references
+        exist.
+
+        The response is an ordinary `BeginRegistrationResult`: pass `options` to
+        `navigator.credentials.create()` and call
+        `POST /v1/enrolment/register/complete` with the `challenge_id`, the
+        ticket again, and the credential the browser returns.
+
+        **The ticket is not consumed here.** Consumption records which credential
+        the ticket produced, and that does not exist until the ceremony
+        completes; burning the ticket on a ceremony the user abandoned would
+        send them back to the helpdesk. Single use is enforced at completion, by
+        a conditional update in the store. What bounds this route instead is the
+        rate limit, applied per source address and per ticket selector.
+
+        Every refusal is the same `401` with no detail: an unknown ticket, an
+        expired one, one already redeemed, one revoked or superseded, and one
+        whose subject is locked or pending erasure are indistinguishable. The
+        reason is audited as `enrolment_ticket.rejected`, where an operator can
+        read it and an attacker cannot.
+      security:
+        - apiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TicketRegisterBeginRequest"
+      responses:
+        "200":
+          description: The ceremony to run in the browser.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BeginRegistrationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/CeremonyFailed"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/Throttled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/enrolment/register/complete:
+    post:
+      tags: [Enrolment tickets]
+      operationId: redeemEnrolmentTicketComplete
+      summary: Finish the registration and spend the enrolment ticket.
+      description: |
+        Requires an API key that holds the `tickets` scope, or an unrestricted
+        key.
+
+        The response carries the credential and the subject identifier, and
+        nothing else. **There is deliberately no assertion.** A ticket proves
+        that whoever holds it was given it, not that the person at the browser is
+        the subject, so signing an authentication on the strength of one would
+        turn an intercepted ticket into a session rather than an enrolment. Ask
+        the user to authenticate with the key they have just enrolled, through
+        `POST /v1/webauthn/{subject_ref}/assert`, and take the signed result from
+        there.
+
+        The ticket is spent by a conditional update that has exactly one winner
+        under concurrent redemption. If it loses, the ticket was spent, revoked
+        or expired between the two halves of the ceremony, the credential just
+        created is revoked, and the request is refused: a ticket that produced
+        two credentials is exactly what single use exists to deny.
+
+        The `credential` member of the request is the `PublicKeyCredential` the
+        browser produced, **forwarded verbatim**, as on every other completion
+        route.
+      security:
+        - apiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TicketRegisterCompleteRequest"
+      responses:
+        "201":
+          description: The credential was registered and the ticket is spent.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TicketRegisterCompleteResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/CeremonyFailed"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/Throttled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /admin/v1/subjects:
     get:
       tags: [Administration]
@@ -1526,6 +1753,130 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/subjects/{subject_id}/enrolment-ticket:
+    parameters:
+      - $ref: "#/components/parameters/SubjectId"
+    post:
+      tags: [Administration]
+      operationId: adminIssueEnrolmentTicket
+      summary: Issue a single-use enrolment ticket for a subject.
+      description: |
+        Requires `enrolment_ticket.issue`, held by admin_operator or admin_full.
+
+        This is the operator route, for the one case nothing else covers: a user
+        who has lost every authenticator and holds no recovery code. The
+        application counterpart, for onboarding a user who has none yet, is
+        `POST /v1/subjects/{subject_ref}/enrolment-ticket`; the policy, the audit
+        entry and the alert are identical on both.
+
+        The ticket appears in this response and nowhere else. Transmit it over a
+        channel you trust, and confirm who is on the other end of it first:
+        whoever receives it can enrol an authenticator against this account until
+        it expires. See the procedure in `docs/ADMIN-GUIDE.md`.
+
+        Issuing revokes any live ticket the subject already had. A subject who is
+        locked or pending erasure is refused with `409`, because a ticket they
+        could not redeem is a live secret in a delivery channel for no purpose.
+      security:
+        - adminToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TicketIssueRequest"
+      responses:
+        "201":
+          description: The ticket. Transmit it out of band; it is shown once.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TicketIssueResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            Either the subject cannot authenticate, or it already holds a factor
+            and the guard is on. The second is overridden with
+            `require_existing_factor: false`; the first is not overridable, since
+            the ticket would not be redeemable.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /admin/v1/enrolment-tickets/{ticket_id}/revoke:
+    parameters:
+      - $ref: "#/components/parameters/TicketId"
+    post:
+      tags: [Administration]
+      operationId: adminRevokeEnrolmentTicket
+      summary: Withdraw an enrolment ticket that has not been redeemed.
+      description: |
+        Requires `enrolment_ticket.issue`, the same permission as issuing.
+        Whoever may put a ticket into circulation must be able to take it out,
+        and an operator who had to find a full administrator to withdraw their
+        own mistake would in practice wait for the expiry instead.
+
+        This is the answer to a ticket delivered to the wrong place, which is the
+        failure a delivery channel makes likely. Issuing a replacement also
+        revokes the live one, so there are two ways out of a mis-delivery; this
+        is the one that does not put a second secret into circulation to
+        neutralise the first.
+
+        The path names the ticket, not the subject, and the audit entry
+        therefore carries no subject either. The issuance entry for the same
+        resource identifier names it, which is where the two correlate.
+      security:
+        - adminToken: []
+      responses:
+        "200":
+          description: The ticket can no longer be redeemed.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TicketRevokeResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            The ticket has already been redeemed or revoked, so there is nothing
+            left to withdraw.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
         "415":
           $ref: "#/components/responses/UnsupportedMediaType"
         "500":
@@ -2804,6 +3155,17 @@ components:
       schema:
         type: string
         format: uuid
+    TicketId:
+      name: ticket_id
+      in: path
+      required: true
+      description: |
+        The enrolment ticket identifier, a UUID. It is the `ticket_id` of the
+        issuing response, and is not the secret: the secret never appears in a
+        path.
+      schema:
+        type: string
+        format: uuid
     KeyId:
       name: key_id
       in: path
@@ -3722,6 +4084,28 @@ components:
             are reported so the caller may decide to step up, not because this
             service considers the assertion invalid.
           additionalProperties: true
+        risk_level:
+          allOf:
+            - $ref: "#/components/schemas/RiskLevel"
+          description: |
+            The risk level of the ceremony, repeated from the `risk` claim of
+            the assertion. Absent when the deployment does not report risk.
+
+            **Unsigned.** Everything else in this body is either public or
+            covered by the signature on `assertion`; this field and
+            `risk_reasons` are not, so anything on the network path between the
+            service and the caller can rewrite them, including downgrading
+            `high` to `low`. Take the step-up decision from the verified
+            assertion. These two fields exist for logging and for a first look
+            during integration.
+        risk_reasons:
+          type: array
+          description: |
+            The reasons that fired, repeated from the `risk` claim. Absent when
+            the deployment does not report risk or when nothing fired.
+            **Unsigned**, for the reason given on `risk_level`.
+          items:
+            $ref: "#/components/schemas/RiskReason"
     AssertionClaims:
       type: object
       title: AssertionClaims
@@ -3801,7 +4185,115 @@ components:
         tid:
           type: string
           description: Present on multi-tenant deployments.
+        risk:
+          allOf:
+            - $ref: "#/components/schemas/RiskAssessment"
+          description: |
+            The risk assessment of the ceremony. Present only when the
+            deployment reports risk; absent entirely otherwise, rather than
+            present and empty, so a verifier written against a deployment that
+            does not report risk is unaffected by one that does.
 
+            A verifier must not require it. An optional claim a verifier
+            insists on is not optional.
+
+            This is the only copy of the assessment a caller may act on: it is
+            covered by the signature, whereas the `risk_level` and
+            `risk_reasons` fields of the response body are not.
+
+    RiskLevel:
+      type: string
+      title: RiskLevel
+      description: |
+        The reported risk level of a completed ceremony.
+
+        The service reports risk and never refuses an authentication on risk
+        alone: it knows how the subject proved themselves, and the integrating
+        application knows what they are about to do. `low` means nothing in the
+        ceremony stood out; it is not a statement that the subject is who they
+        claim to be. `elevated` means the ceremony proved less than a full
+        unphishable factor, or the authenticator was not quite the one
+        enrolled; proceed for ordinary use and ask for more before anything
+        consequential. `high` means either one signal that is evidence of an
+        attack or several weaker ones together; grant the session and treat it
+        as untrusted.
+
+        Levels come from summing the weights of the reasons that fired against
+        two configured thresholds. There is no model and no training data; see
+        docs/RISK.md for the table.
+      enum:
+        - low
+        - elevated
+        - high
+    RiskReason:
+      type: string
+      title: RiskReason
+      description: |
+        One risk signal that fired. The set is closed, and every member is
+        derived from something the service already collected while completing
+        the ceremony.
+
+        `signature_counter_stalled`, the WebAuthn signature counter did not
+        advance, the documented signal for two copies of one credential private
+        key in use. `authenticator_binding_changed`, the authenticator's
+        observed characteristics differ from those recorded at registration.
+        `user_verification_absent`, the WebAuthn ceremony proved possession of
+        the device and not the identity of its holder. `recovery_code_used`, a
+        single-use recovery code completed the ceremony. `credential_dormant`,
+        the credential has not been used within the configured window.
+        `credential_new`, it was registered within the configured window.
+        `recent_failures_subject` and `recent_failures_network`, at least one
+        attempt against this subject or from this source network failed inside
+        the current throttle window. `totp_only`, the subject holds no WebAuthn
+        credential, so the factor that authenticated them is phishable and
+        there is nothing stronger to fall back on.
+
+        Each carries a weight, documented with its default in docs/RISK.md.
+      enum:
+        - signature_counter_stalled
+        - authenticator_binding_changed
+        - user_verification_absent
+        - recovery_code_used
+        - credential_dormant
+        - credential_new
+        - recent_failures_subject
+        - recent_failures_network
+        - totp_only
+    RiskAssessment:
+      type: object
+      title: RiskAssessment
+      description: |
+        The `risk` claim of an assertion: the level, the reasons that produced
+        it and the score they add up to.
+
+        The assessment is a pure function of what the ceremony observed and of
+        the deployment's configured weights, so two identical ceremonies
+        produce identical assessments and anyone reading the matching audit
+        entry can recompute it.
+      required:
+        - level
+        - reasons
+        - score
+      properties:
+        level:
+          $ref: "#/components/schemas/RiskLevel"
+        reasons:
+          type: array
+          description: |
+            The reasons that fired, in a fixed order so that two identical
+            ceremonies produce byte-identical claims. Empty when nothing fired,
+            which is the ordinary case.
+          items:
+            $ref: "#/components/schemas/RiskReason"
+        score:
+          type: integer
+          description: |
+            The sum of the weights of the reasons above. Carried so that a
+            caller can see how close an assessment sat to a threshold, and so
+            that an operator comparing a claim with an audit entry has one
+            number to check.
+          examples:
+            - 40
     AttestationType:
       type: string
       title: AttestationType
@@ -4045,6 +4537,147 @@ components:
                 because a subject with no codes left has no way back in if they
                 lose their authenticator.
 
+    TicketIssueRequest:
+      type: object
+      title: TicketIssueRequest
+      description: |
+        The optional body of both issuing routes. Unknown fields are refused, so
+        a misspelled `require_existing_factor` cannot fall back to the default
+        unnoticed.
+      properties:
+        reason:
+          type: string
+          description: |
+            Free text recorded in the audit entry. An operator issuing a ticket
+            should say why; an application onboarding a user has nothing to add.
+        require_existing_factor:
+          type: boolean
+          description: |
+            Overrides `tickets.require_existing_factor_default` for this
+            request.
+
+            With the guard on, issuing is refused with `409` for a subject who
+            already holds an active WebAuthn credential or a confirmed TOTP
+            secret: that subject has a way in, and the correct answer is to use
+            it. An unconfirmed TOTP secret does not count, because the user has
+            not proved they can produce codes from it.
+
+            Sending `false` is the caller stating that the existing factor is no
+            longer usable. It is audited with
+            `existing_factor_override: true` and raises the
+            `enrolment_ticket.factor_override` alert, because a ticket issued for
+            an account that already has factors is an account-takeover primitive
+            for whoever controls the delivery channel.
+    TicketIssueResult:
+      type: object
+      title: TicketIssueResult
+      required:
+        - ticket_id
+        - subject_id
+        - ticket
+        - expires_at
+        - warning
+      properties:
+        ticket_id:
+          type: string
+          format: uuid
+          description: |
+            The identifier of the ticket, not the secret. It is what
+            `POST /admin/v1/enrolment-tickets/{ticket_id}/revoke` takes, and what
+            the audit entries name.
+        subject_id:
+          type: string
+          format: uuid
+        ticket:
+          type: string
+          description: |
+            The secret, in the same grouped Crockford base32 form a recovery code
+            takes. It appears here and nowhere else, ever.
+          examples:
+            - AAAAA-BBBBB-CCCCC-DDDDD
+        expires_at:
+          type: string
+          format: date-time
+          description: |
+            When the ticket stops being redeemable, from `tickets.ttl`. It is
+            short by design: the lifetime is the whole window in which an
+            intercepted ticket can be used.
+        warning:
+          type: string
+          description: |
+            Returned alongside the ticket because a caller that does not deliver
+            it immediately has lost it, and because delivery is the caller's risk
+            rather than this service's.
+    TicketRegisterBeginRequest:
+      type: object
+      title: TicketRegisterBeginRequest
+      required:
+        - ticket
+      properties:
+        ticket:
+          type: string
+          description: |
+            The secret from the issuing response. Input is normalised: lowercase,
+            whitespace and separators are accepted, and the Crockford homoglyphs
+            I, L and O are folded onto 1, 1 and 0.
+
+            It is in the body rather than the path because a path reaches proxy
+            access logs, a `Referer` header and browser history, and a body does
+            not.
+        label:
+          type: string
+          description: |
+            Shown by the authenticator while the user confirms, and stored so an
+            operator can tell one of a subject's keys from another. It is not
+            used for any decision.
+    TicketRegisterCompleteRequest:
+      type: object
+      title: TicketRegisterCompleteRequest
+      required:
+        - ticket
+        - challenge_id
+        - credential
+      properties:
+        ticket:
+          type: string
+          description: |
+            The same secret presented to the begin route. It is required again so
+            that the second half of the ceremony is authorised by the ticket
+            rather than by a challenge identifier alone.
+        challenge_id:
+          type: string
+          format: uuid
+          description: The value returned by `POST /v1/enrolment/register`.
+        credential:
+          $ref: "#/components/schemas/PublicKeyCredential"
+    TicketRegisterCompleteResult:
+      type: object
+      title: TicketRegisterCompleteResult
+      description: |
+        The credential and the subject it belongs to. There is deliberately no
+        assertion: see the route description.
+      required:
+        - credential
+        - subject_id
+      properties:
+        credential:
+          $ref: "#/components/schemas/Credential"
+        subject_id:
+          type: string
+          format: uuid
+    TicketRevokeResult:
+      type: object
+      title: TicketRevokeResult
+      required:
+        - ticket_id
+        - revoked
+      properties:
+        ticket_id:
+          type: string
+          format: uuid
+        revoked:
+          type: boolean
+          const: true
     AdminSubject:
       type: object
       title: AdminSubject
@@ -4689,12 +5322,22 @@ components:
         `/v1/subjects`, `webauthn` covers `/v1/webauthn`, `totp` covers
         `/v1/totp` under both spellings of enrol, `recovery` covers
         `/v1/recovery`, and `health` covers `GET /v1/health/detail`.
+
+        `tickets` covers `POST /v1/subjects/{subject_ref}/enrolment-ticket` and
+        both `/v1/enrolment` routes. It is separate from `webauthn` even though
+        redeeming a ticket runs a registration ceremony: a key holding
+        `webauthn` can enrol an authenticator only for a user who is present,
+        while a key holding `tickets` can mint a secret that enrols one later
+        through a channel the key does not control. The second is the stronger
+        capability, so an integration that only runs ceremonies does not acquire
+        it by association.
       enum:
         - subjects
         - webauthn
         - totp
         - recovery
         - health
+        - tickets
     Role:
       type: string
       title: Role

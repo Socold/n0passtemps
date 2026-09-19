@@ -65,6 +65,7 @@ Six boundaries, and the honest characterisation of each:
 | 4 | Tenant | `Server.callerTenant`, on every handler | A credential carried over from another deployment. It is not a multi-tenancy control: v1 serves one tenant |
 | 5 | Database connection | `sslmode` validation refusing silent plaintext fallback, and refusing `sslmode=disable` off the machine unless `database.allow_plaintext` says the link is private | A passive observer on the database path. Not against the database server itself, and not against an operator who sets `database.allow_plaintext` on a link that is not private: the validator cannot see network topology |
 | 6 | Filesystem | Mode 0600 enforced on the keyring and the signing key; the keyring refused inside a data directory | The obvious misconfiguration. Not against root, and not against the operator |
+| 7 | Enrolment ticket delivery | Nothing in this service: the channel belongs to the integrating application. Bounded by `tickets.ttl`, single use, one live ticket per subject and the factor guard | Nobody. It is a transferred risk, not an enforced boundary, and attacker 10 is what it costs |
 
 ## Attacker by attacker
 
@@ -144,6 +145,12 @@ integrating application's configuration.
   the tenant's subjects, not merely access to an endpoint.
 - Issue a fresh batch of recovery codes for any subject and read them from the
   response, which retires the user's existing sheet.
+- Issue an enrolment ticket for any subject who holds no factor, and read it
+  from the response. It adds nothing to what the key can already do, since the
+  key can enrol an authenticator directly; it is listed because it is one more
+  route whose response carries a secret, and because a ticket issued and
+  delivered nowhere is a live secret the key holder alone knows about until it
+  expires.
 - Read the detailed health report: version, keyring state, rotation status,
   certificate expiry.
 
@@ -152,7 +159,7 @@ integrating application's configuration.
 | Control | Effect |
 |---|---|
 | `webauthn.max_credentials_per_subject`, default 10 | Bounds silent mass enrolment |
-| API key scopes | A key minted with `scopes` reaches only the named route families: `subjects`, `webauthn`, `totp`, `recovery`, `health`. A key that only verifies TOTP codes cannot issue recovery codes or enrol an authenticator. A call outside the scopes is a 403 and an `api_key.rejected` audit entry, so a stolen key being explored leaves a trace |
+| API key scopes | A key minted with `scopes` reaches only the named route families: `subjects`, `webauthn`, `totp`, `recovery`, `health`, `tickets`. A key that only verifies TOTP codes cannot issue recovery codes or enrol an authenticator, and cannot mint an enrolment ticket. A call outside the scopes is a 403 and an `api_key.rejected` audit entry, so a stolen key being explored leaves a trace |
 | Per-key volume limit | `throttle.max_requests_per_key` is metered by a middleware on every public route, so it bounds starting ceremonies and resolving subjects as well as failed authentications |
 | Every action audited | `subject.created`, `webauthn.registration.completed`, `recovery.issued` and the rest carry `actor_type: api_key` and the key's identifier, so the blast radius of a specific key is reconstructable |
 | `recovery.exhausted` and `recovery.low` alerts | A user whose sheet was retired out from under them shows up |
@@ -177,7 +184,7 @@ integrating application's configuration.
   public surface. A leaked key therefore discloses the version and the keyring
   state, which ADR 0008 withheld from the unauthenticated caller.
 - **Detection latency.** Nothing alerts on a key being used from a new address,
-  or at a new time, or for an unusual mix of routes. The alert engine has ten
+  or at a new time, or for an unusual mix of routes. The alert engine has eleven
   conditions and none of them is behavioural.
 
 ### 3. A rogue administrator
@@ -187,9 +194,15 @@ integrating application's configuration.
 **Can do, with `admin_operator`**
 
 Lock and unlock subjects, revoke one credential at a time, reissue recovery
-codes and read them, reset throttles, acknowledge alerts. Every one of those is
-a denial of service against a user, or a way to obtain a working login for one:
-reissuing recovery codes returns them in the response.
+codes and read them, reset throttles, acknowledge alerts, and issue or withdraw
+an enrolment ticket. Every one of those is a denial of service against a user,
+or a way to obtain a working login for one: reissuing recovery codes returns
+them in the response, and an enrolment ticket lets the holder enrol an
+authenticator of their own against the subject. The ticket is the narrower of
+the two, because it produces no assertion and because issuing it for a subject
+who still holds a factor requires an explicit override that raises an alert; it
+is not narrow enough to matter against an administrator who is willing to revoke
+the factor first.
 
 **Can do, with `admin_full`**
 
@@ -547,9 +560,88 @@ Within a single database, detection is the strongest property available, and it
 is enough to make undetected selective deletion impractical for anybody who does
 not have write access.
 
+### 10. Whoever controls ticket delivery
+
+**Starts with** read access to the channel an enrolment ticket travels over, and
+nothing else: no credential of this service, no key, no database. A mail relay,
+a shared inbox, an SMS gateway, an unlocked phone on a lock screen, the helpdesk
+queue the ticket was read out from, a Slack channel somebody pasted it into.
+
+This attacker exists because of a deliberate design decision. The service does
+not deliver tickets. It has no SMTP dependency, no outbound network access and no
+opinion about the channel, so the delivery risk is transferred whole to the
+integrating application. That is the right place for it, because the knowledge of
+the user and of the channel lives there. It is not a way of making the risk
+disappear, and this section is what the transfer costs.
+
+**Can do**
+
+- Redeem an intercepted ticket before the legitimate user does, and enrol an
+  authenticator of their own choosing against that subject. From then on they
+  can assert as the subject through the ordinary ceremony, indefinitely, until
+  the credential is revoked.
+- Do it silently from the user's point of view. The user finds a ticket that no
+  longer works and reports a broken link, which reads as a delivery problem
+  rather than as a compromise.
+- Nothing else with the ticket itself. Redeeming one never produces a signed
+  assertion, so the ticket is not a session and cannot be exchanged for one. It
+  cannot read a subject, issue recovery codes, enrol TOTP, or reach any other
+  route: both redemption routes accept it and no other route does.
+
+**Stopped by**
+
+| Control | Effect |
+|---|---|
+| `tickets.ttl`, default `1h`, maximum 24h | The window is the exposure. An attacker with read access to a mailbox they do not watch continuously has an hour, not a fortnight |
+| Single use, enforced by a compare-and-swap | A ticket redeemed by the legitimate user is dead. The race is winnable, but only once, and only by whoever gets there first |
+| One live ticket per subject, enforced by a partial unique index | Issuing again revokes the previous one, so tickets cannot accumulate and a reissue after a suspected interception closes the first window rather than adding a second |
+| `tickets.require_existing_factor_default`, default on | A subject who still holds an authenticator or a confirmed TOTP secret cannot be issued a ticket without an explicit `require_existing_factor: false`. This is the control that stops the channel from being a general account-takeover route rather than a recovery one |
+| The `enrolment_ticket.factor_override` alert | Every override is a warning-level row an operator sees in `GET /admin/v1/alerts`, collapsed by fingerprint so a campaign is one row with a rising count |
+| Full audit trail | `enrolment_ticket.issued` names who issued it and what factors the subject held at the time; `webauthn.registration.started` and `.completed` carry `via: enrolment_ticket` and the ticket identifier; `enrolment_ticket.redeemed` records which credential the redemption produced. An enrolment through a ticket is therefore distinguishable from an ordinary one, after the fact |
+| Rate limiting per source address and per ticket selector | Guessing a ticket costs the per-subject failure budget per selector, and spraying across selectors costs the per-address budget. A wrong ticket is indistinguishable from an expired or consumed one, so nothing tells an attacker which selectors exist |
+| Revocation | `POST /admin/v1/enrolment-tickets/{ticket_id}/revoke` kills a ticket believed intercepted, and `POST /admin/v1/subjects/{subject_id}/credentials/{credential_id}/revoke` kills whatever it enrolled |
+
+**Not mitigated**
+
+- **Interception inside the window is a full account takeover.** Every control
+  above bounds it, records it or makes it noisy. None of them prevents it. An
+  attacker who reads the ticket and redeems it first owns the account until
+  somebody revokes the credential, and the service cannot tell the two
+  redemptions apart because both present a valid ticket from a plausible
+  address.
+- **The service cannot see the channel.** It does not know whether the ticket
+  went to a corporate mailbox behind MFA or to a webmail account whose password
+  was in a breach dump. It cannot verify that the person on the helpdesk call
+  was the subject. `reason` is free text nobody validates.
+- **The factor guard protects accounts that have factors, not accounts that do
+  not.** A subject with nothing enrolled is exactly the case a ticket is for,
+  and is exactly the case where the guard does not apply. Enrolment tickets
+  move the root of trust from "holds an authenticator" to "receives what the
+  application sent", for that one subject, for that one hour. That is the
+  trade, and it is the same trade a password reset email makes, with a shorter
+  window, a single use, no assertion at the end, and an audit trail.
+- **Detection is after the fact.** Nothing alerts on a redemption from an
+  unexpected address, or on a redemption minutes before the legitimate user
+  tries. The alert list has eleven conditions and none of them is behavioural.
+- **Delivery is unauthenticated at the application's end.** If the integrating
+  application emails tickets and its mail path is compromised, every ticket it
+  ever sends is readable. That is a property of the application's
+  infrastructure, and this service's contribution to it is to keep the ticket
+  out of its own logs: it appears in the issuing response body and in no path,
+  no header and no log line.
+
+**What would actually narrow it**
+
+Requiring a second, independent factor at redemption, which is to say requiring
+the subject to already hold one, which is the case tickets exist to handle. The
+honest narrowing is operational rather than technical: set `tickets.ttl` as low
+as the delivery channel tolerates, issue on a live call rather than in a batch,
+and read `enrolment_ticket.` in the audit log as a routine review rather than
+during an incident.
+
 ## Cross-cutting limits
 
-Three limits apply to every attacker above and are easy to overlook.
+These limits apply to every attacker above and are easy to overlook.
 
 ### `zeroize` is best-effort
 
@@ -586,12 +678,49 @@ made with it from that moment on.
 
 ### Detection depends on somebody reading
 
-Ten alert types, a hash chain and an audit log are all detection. Every one of
-them assumes an operator who looks. The alert engine deliberately has ten
-conditions and no more, because an alert stream nobody reads is worse than no
-alert stream: it creates the belief that someone would notice.
+The alert types, the hash chain and the audit log are all detection. Every one
+of them assumes an operator who looks. The alert engine deliberately has a
+short, closed list of conditions, because an alert stream nobody reads is worse
+than no alert stream: it creates the belief that someone would notice.
 [MONITORING.md](MONITORING.md) says what to alert on and what response each one
 warrants.
+
+### Risk signals report, and that is all they buy
+
+[RISK.md](RISK.md) describes the risk claim: nine signals, each with a weight,
+and two thresholds. It is worth being precise about what it adds to this model
+and what it does not.
+
+What it buys. Three signals that were already collected and only reachable by
+reading the audit log now travel in the signed assertion, where the integrating
+application can act on them at the moment it matters rather than the morning
+after: a stalled signature counter, a changed authenticator binding and a
+possession-only assertion. A recovery-code redemption and a failure burst
+followed by a success become visible to the application in the same way. That
+moves the step-up decision to the only party that knows what the user is about
+to do, and it does so without this service holding any new data about anyone.
+
+What it does not buy. Every signal is a property of the ceremony, not of the
+person. An attacker who holds the authenticator and its PIN produces a ceremony
+indistinguishable from the legitimate one, and no threshold will say otherwise:
+against that attacker the assessment reads `low`, correctly, because nothing
+about the ceremony was wrong. The signals that would catch such an attacker are
+the ones this service deliberately does not have: no geolocation, no device
+fingerprint, no behavioural baseline, no reputation feed. Those need data the
+service refuses to collect, or network access it refuses to make, and each of
+them would also be a new way to lock out a legitimate user for travelling.
+
+Two further limits. The service never refuses on risk, so a high assessment
+that the integrating application ignores changes nothing at all: the control is
+the application's, and this service can only report and alert. And the level in
+the response body is unsigned, so an attacker on the network path between the
+service and a careless caller can downgrade it at will; only the claim inside
+the assertion is covered by the signature, which is why the documentation says
+so in every place the fields appear.
+
+Risk reporting is therefore not a mitigation for any attacker listed above. It
+is a way of telling the integrating application what this service saw, so that
+its own mitigations can be applied in proportion.
 
 ### The metadata BLOB is as fresh as the operator keeps it
 
@@ -641,6 +770,7 @@ passes.
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Where each secret lives and what the boundaries are |
 | [GDPR.md](GDPR.md) | The personal data inventory and the erasure mechanism |
 | [MONITORING.md](MONITORING.md) | Turning the detection above into something somebody reads |
+| [RISK.md](RISK.md) | The risk signals reported on a completed ceremony, and what they are not |
 | [RBAC.md](RBAC.md) | The role split in full |
 | [../SECURITY.md](../SECURITY.md) | Reporting a vulnerability, and what is in and out of scope |
 | [docs/adr](adr/README.md) | The reasoning behind each accepted limit |

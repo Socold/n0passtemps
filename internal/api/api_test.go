@@ -34,6 +34,9 @@ func TestPublicRoutesRequireACredential(t *testing.T) {
 		{http.MethodPost, "/v1/totp/user-1/verify"},
 		{http.MethodPost, "/v1/recovery/user-1/issue"},
 		{http.MethodPost, "/v1/recovery/user-1/consume"},
+		{http.MethodPost, "/v1/subjects/user-1/enrolment-ticket"},
+		{http.MethodPost, "/v1/enrolment/register"},
+		{http.MethodPost, "/v1/enrolment/register/complete"},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			res := h.do(tc.method, tc.path, "", map[string]any{})

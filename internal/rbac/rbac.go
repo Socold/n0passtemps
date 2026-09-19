@@ -98,6 +98,21 @@ const (
 	PermThrottleReset    Permission = "throttle.reset"
 	PermAlertAcknowledge Permission = "alert.acknowledge"
 
+	// Issuing and withdrawing an enrolment ticket.
+	//
+	// It sits with the user support permissions because the operator case for
+	// it is the one this role exists to serve: a user who has lost every
+	// authenticator and holds no recovery code. The effect is confined to one
+	// subject and is undone by revoking the ticket or the credential it
+	// produced, which is the line the role is drawn on.
+	//
+	// Withdrawing shares the permission rather than having one of its own. An
+	// operator who has just put a ticket into the wrong mailbox must be able to
+	// take it back without finding a full administrator; splitting the two
+	// would guard nothing, since revoking a ticket is strictly less dangerous
+	// than issuing one.
+	PermEnrolmentTicketIssue Permission = "enrolment_ticket.issue"
+
 	// Permissions reserved to admin_full.
 	PermCredentialRevokeBulk Permission = "credential.revoke_bulk"
 	PermApprovalDecide       Permission = "approval.decide"
@@ -136,6 +151,7 @@ var AllPermissions = []Permission{
 	PermRecoveryReissue,
 	PermThrottleReset,
 	PermAlertAcknowledge,
+	PermEnrolmentTicketIssue,
 
 	PermCredentialRevokeBulk,
 	PermApprovalDecide,
@@ -199,6 +215,7 @@ var operatorExtras = []Permission{
 	PermRecoveryReissue,
 	PermThrottleReset,
 	PermAlertAcknowledge,
+	PermEnrolmentTicketIssue,
 }
 
 // rolePermissions is the mapping consulted by every decision.

@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -52,8 +53,10 @@ type Config struct {
 	WebAuthn  WebAuthn  `toml:"webauthn"`
 	TOTP      TOTP      `toml:"totp"`
 	Recovery  Recovery  `toml:"recovery"`
+	Tickets   Tickets   `toml:"tickets"`
 	Assertion Assertion `toml:"assertion"`
 	Throttle  Throttle  `toml:"throttle"`
+	Risk      Risk      `toml:"risk"`
 	Audit     Audit     `toml:"audit"`
 	Admin     Admin     `toml:"admin"`
 	Logging   Logging   `toml:"logging"`
@@ -294,6 +297,40 @@ type Recovery struct {
 	LowWatermark int `toml:"low_watermark"`
 }
 
+// Tickets configures single-use enrolment tickets.
+//
+// A ticket permits exactly one thing: starting and completing one WebAuthn
+// registration for the subject it names. It never produces a signed assertion.
+// Delivery is the integrating application's responsibility, so the settings
+// here are the two the service can enforce on its own: how long a ticket lives,
+// and whether a subject who already holds a factor may be issued one at all.
+type Tickets struct {
+	// TTL bounds how long a ticket may be redeemed for.
+	//
+	// It is short by design. The window is the whole exposure: whoever
+	// intercepts the delivery channel can enrol an authenticator of their own
+	// until the ticket lapses. Validate caps it at 24h, because a ticket meant
+	// to survive longer than a working day is being used as a standing
+	// credential rather than as a hand-off.
+	TTL Duration `toml:"ttl"`
+
+	// RequireExistingFactorDefault decides what an issuing request means when
+	// it does not say.
+	//
+	// With it true, the default, issuing is refused for a subject who already
+	// holds an active WebAuthn credential or a confirmed TOTP secret: that
+	// subject has a way in, and the correct answer is to use it. A request may
+	// override the refusal with require_existing_factor=false, which is the
+	// caller declaring that the existing factor is no longer usable. The
+	// override is audited and raises an alert.
+	//
+	// Turning this off deployment-wide makes every issuance an override, which
+	// turns the route into an account-takeover primitive for whoever controls
+	// delivery. It exists for the deployment that enrols users through tickets
+	// as a matter of course and has accepted that.
+	RequireExistingFactorDefault bool `toml:"require_existing_factor_default"`
+}
+
 // Assertion configures the signed result returned by a successful ceremony.
 //
 // The result is a detached signature the integrating application verifies
@@ -345,6 +382,67 @@ type Throttle struct {
 	// control that replaces the reversible revocation the specification
 	// called for; see docs/adr/0010.
 	AdminRevokeBurst int `toml:"admin_revoke_burst"`
+}
+
+// Risk configures the risk signals reported on a completed authentication.
+//
+// The service reports and never refuses on risk, so nothing in this section
+// can lock anyone out. What it changes is the "risk" claim of the signed
+// assertion and the "risk" key of the audit entry detail. See internal/risk
+// and docs/RISK.md; the reason table and the reasoning behind the defaults
+// live there, beside the weights they score.
+type Risk struct {
+	// Enabled reports risk. With it off the claim is omitted from the
+	// assertion entirely, rather than present and empty, so a verifier
+	// written against a deployment that has it off is unaffected by one that
+	// has it on.
+	Enabled bool `toml:"enabled"`
+
+	// ElevatedAt and HighAt are the score thresholds, inclusive at the
+	// boundary. ElevatedAt must be below HighAt, or the elevated level would
+	// be unreachable and every signal would read as high.
+	ElevatedAt int `toml:"elevated_at"`
+	HighAt     int `toml:"high_at"`
+
+	// DormantAfter is how long a credential must go unused before the
+	// credential_dormant reason fires. Expressed as a duration, so ninety
+	// days is "2160h".
+	DormantAfter Duration `toml:"dormant_after"`
+
+	// NewCredentialWithin is how recently a credential must have been
+	// registered for the credential_new reason to fire.
+	NewCredentialWithin Duration `toml:"new_credential_within"`
+
+	// Weights overrides the default weight of individual reasons, keyed on
+	// the reason strings listed in RiskReasons. A key that is not one of them
+	// is refused by Validate: a misspelled reason would otherwise sit in the
+	// file doing nothing while the operator believed they had retuned the
+	// policy.
+	//
+	// It is deliberately file-only, with no environment counterpart. The
+	// weights are the policy itself, which belongs in the file that is
+	// committed and reviewed rather than in a deployment's environment, and
+	// a flat environment namespace would need one variable per reason, which
+	// is a second copy of a closed set and so a second place for it to drift.
+	Weights map[string]int `toml:"weights"`
+}
+
+// RiskReasons lists the keys accepted in the [risk.weights] table.
+//
+// It mirrors risk.AllReasons and is duplicated rather than imported, because
+// internal/risk reads this section and importing it back would make the
+// dependency circular. This is the same arrangement as SystemTenantID, and a
+// test in internal/risk asserts the two stay equal.
+var RiskReasons = []string{
+	"signature_counter_stalled",
+	"authenticator_binding_changed",
+	"user_verification_absent",
+	"recovery_code_used",
+	"credential_dormant",
+	"credential_new",
+	"recent_failures_subject",
+	"recent_failures_network",
+	"totp_only",
 }
 
 // Audit configures the append-only log.
@@ -547,6 +645,10 @@ func Default() Config {
 			CodeCount:    16,
 			LowWatermark: 3,
 		},
+		Tickets: Tickets{
+			TTL:                          Duration{time.Hour},
+			RequireExistingFactorDefault: true,
+		},
 		Assertion: Assertion{
 			Issuer:           "n0passtemps",
 			SigningKeyPath:   "/etc/n0passtemps/kek/assertion-key.pem",
@@ -561,6 +663,17 @@ func Default() Config {
 			MaxRequestsPerKey:     6000,
 			LockoutDuration:       Duration{15 * time.Minute},
 			AdminRevokeBurst:      10,
+		},
+		Risk: Risk{
+			// On by default: it changes nothing about who gets in, and an
+			// application that ignores the claim is exactly as it was before.
+			// The thresholds and windows mirror the constants in
+			// internal/risk, where the reasoning sits beside the weights.
+			Enabled:             true,
+			ElevatedAt:          20,
+			HighAt:              40,
+			DormantAfter:        Duration{90 * 24 * time.Hour},
+			NewCredentialWithin: Duration{time.Hour},
 		},
 		Audit: Audit{
 			RetentionDays: 0,
@@ -611,6 +724,8 @@ func Load(path string) (*Config, error) {
 	cfg := Default()
 
 	if path != "" {
+		// #nosec G304 -- the configuration file is named by the operator on the command line; reading the path they
+		// gave is the whole purpose of Load
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("config: read %q: %w", path, err)
@@ -668,6 +783,9 @@ func explicitKeys(path string) map[string]bool {
 	if path == "" {
 		return out
 	}
+
+	// #nosec G304 -- the same operator-supplied configuration path Load was given, re-read to see which keys the file
+	// set explicitly
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return out
@@ -928,6 +1046,16 @@ func (c *Config) Validate() error {
 			c.Recovery.LowWatermark, c.Recovery.CodeCount)
 	}
 
+	// Enrolment tickets. The ceiling is a working day: the ticket's lifetime is
+	// the whole window in which whoever intercepts the delivery channel can
+	// enrol an authenticator of their own, and one that outlives a shift is
+	// being used as a standing credential rather than as a hand-off.
+	if c.Tickets.TTL.Duration <= 0 || c.Tickets.TTL.Duration > 24*time.Hour {
+		add("config: tickets.ttl must be positive and at most 24h; the lifetime is "+
+			"the window in which an intercepted ticket can be redeemed, got %s",
+			c.Tickets.TTL.Duration)
+	}
+
 	// Assertion.
 	if c.Assertion.Issuer == "" {
 		add("config: assertion.issuer is required")
@@ -959,6 +1087,44 @@ func (c *Config) Validate() error {
 		}
 		if c.Throttle.AdminRevokeBurst < 1 {
 			add("config: throttle.admin_revoke_burst must be at least 1")
+		}
+	}
+
+	// Risk. Checked even when reporting is off, so that turning it on later
+	// does not turn a file that loaded yesterday into one that refuses to.
+	if c.Risk.ElevatedAt < 1 {
+		add("config: risk.elevated_at must be at least 1, got %d; a threshold of zero "+
+			"or below reports every ceremony as elevated, including one where no "+
+			"signal fired", c.Risk.ElevatedAt)
+	}
+	if c.Risk.HighAt < 1 {
+		add("config: risk.high_at must be at least 1, got %d", c.Risk.HighAt)
+	}
+	if c.Risk.ElevatedAt >= c.Risk.HighAt {
+		add("config: risk.elevated_at (%d) must be below risk.high_at (%d), otherwise "+
+			"the elevated level is unreachable and every signal that fires reads as high",
+			c.Risk.ElevatedAt, c.Risk.HighAt)
+	}
+	if c.Risk.DormantAfter.Duration <= 0 {
+		add("config: risk.dormant_after must be positive, got %s; every credential "+
+			"would otherwise be dormant the instant it is used", c.Risk.DormantAfter.Duration)
+	}
+	if c.Risk.NewCredentialWithin.Duration <= 0 {
+		add("config: risk.new_credential_within must be positive, got %s; no credential "+
+			"would ever be new", c.Risk.NewCredentialWithin.Duration)
+	}
+	for reason, weight := range c.Risk.Weights {
+		// An unknown key is refused rather than ignored. A misspelled reason
+		// sits in the file doing nothing while the operator believes they have
+		// retuned the policy, and nothing at runtime would ever tell them.
+		if !slices.Contains(RiskReasons, reason) {
+			add("config: risk.weights has no reason %q; the reasons are %s",
+				reason, strings.Join(RiskReasons, ", "))
+		}
+		if weight < 0 {
+			add("config: risk.weights.%s is %d; a negative weight would let one signal "+
+				"cancel another out, so a reason an operator wants ignored is given a "+
+				"weight of 0 instead", reason, weight)
 		}
 	}
 

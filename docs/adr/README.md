@@ -25,8 +25,13 @@ superseded by a new record rather than edited in place. See
 | [0012](0012-server-rendered-administration-interface.md) | Server-rendered administration interface instead of a single-page application | accepted |
 | [0013](0013-approvals-are-redeemed-not-executed.md) | Approvals are redeemed, not executed | accepted |
 | [0014](0014-bootstrap-by-explicit-command.md) | Bootstrap the first administrator by explicit command | accepted |
+| [0015](0015-enrolment-tickets-instead-of-magic-links.md) | Enrolment tickets instead of magic links | accepted |
 
 Records 0013 and 0014 are of a different kind. The specification is silent on
 both questions, how an approved operation comes to run and where the first
 administrative token comes from, so they record a design choice rather than a
 deviation.
+
+Record 0015 is a twelfth deviation, and the first raised after 1.0.0. The
+specification names a phase 2 feature this implementation declines to build as
+written.

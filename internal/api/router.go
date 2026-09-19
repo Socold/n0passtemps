@@ -133,6 +133,21 @@ func (s *Server) mountPublic(mux *http.ServeMux) {
 	mux.Handle("POST /v1/recovery/{subject_ref}/issue", authed(ScopeRecovery, s.handleRecoveryIssue))
 	mux.Handle("POST /v1/recovery/{subject_ref}/consume", authed(ScopeRecovery, s.handleRecoveryConsume))
 
+	// Enrolment tickets. Issuing names the subject, because the caller chooses
+	// who gets one; redeeming does not, because the ticket already says whose
+	// it is and a second, caller-supplied answer would only be a way to probe
+	// which references exist.
+	//
+	// The ticket itself travels in the request body on both redemption routes,
+	// never in the path, which is why neither path carries it and why the routes
+	// are named for what they do. See internal/api/tickets.go for the reasoning:
+	// a path reaches proxy access logs, a body does not.
+	mux.Handle("POST /v1/subjects/{subject_ref}/enrolment-ticket",
+		authed(ScopeTickets, s.handleIssueEnrolmentTicket))
+	mux.Handle("POST /v1/enrolment/register", authed(ScopeTickets, s.handleTicketRegisterBegin))
+	mux.Handle("POST /v1/enrolment/register/complete",
+		authed(ScopeTickets, s.handleTicketRegisterComplete))
+
 	// A preflight request carries no credential, by definition, so it cannot
 	// pass through the authentication middleware. It is answered by the CORS
 	// middleware alone.
@@ -186,6 +201,14 @@ func (s *Server) mountAdmin(mux *http.ServeMux) {
 		guarded(rbac.PermRecoveryReissue, s.handleAdminReissueRecovery))
 	mux.Handle("POST /admin/v1/subjects/{subject_id}/throttle/reset",
 		guarded(rbac.PermThrottleReset, s.handleAdminResetThrottle))
+
+	// Enrolment tickets, the third thing behind a user who cannot log in, and
+	// the only one that works when they hold no factor at all. Withdrawing one
+	// shares the issuing permission; see handleAdminRevokeEnrolmentTicket.
+	mux.Handle("POST /admin/v1/subjects/{subject_id}/enrolment-ticket",
+		guarded(rbac.PermEnrolmentTicketIssue, s.handleAdminIssueEnrolmentTicket))
+	mux.Handle("POST /admin/v1/enrolment-tickets/{ticket_id}/revoke",
+		guarded(rbac.PermEnrolmentTicketIssue, s.handleAdminRevokeEnrolmentTicket))
 
 	// Erasure.
 	mux.Handle("POST /admin/v1/subjects/{subject_id}/erasure",

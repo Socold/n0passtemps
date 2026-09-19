@@ -1,6 +1,6 @@
 // Package alerts turns detected conditions into rows an operator can act on.
 //
-// There are exactly ten conditions. The list is deliberately short: an alert
+// There are exactly twelve conditions. The list is deliberately short: an alert
 // stream nobody reads is worse than no alert stream, because it creates the
 // belief that someone would notice. Each condition here is either evidence of
 // an attack in progress, evidence that a control has failed, or a state that
@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"hash"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -33,7 +34,7 @@ import (
 	"github.com/Socold/n0passtemps/internal/store"
 )
 
-// Type identifies one of the ten conditions.
+// Type identifies one of the twelve conditions.
 //
 // The values are dotted and match the audit event families, so an alert and the
 // audit entries that explain it can be correlated by prefix.
@@ -83,6 +84,20 @@ const (
 	// TypeKEKRotationOverdue reports a key encryption key past its rotation
 	// interval. Nothing is broken yet, which is why it is informational.
 	TypeKEKRotationOverdue Type = "kek.rotation_overdue"
+
+	// TypeTicketFactorOverride reports an enrolment ticket issued for a subject
+	// who already holds a factor, which the caller asked for explicitly with
+	// require_existing_factor=false.
+	//
+	// A ticket is a way in for someone with no factor. Issuing one for an
+	// account that has factors turns it into an account-takeover primitive for
+	// whoever controls the delivery channel, so the override is never silent.
+	TypeTicketFactorOverride Type = "enrolment_ticket.factor_override"
+
+	// TypeRiskHigh reports an authentication that completed and was assessed
+	// as high risk. The service never refuses on risk alone, so the subject
+	// is already in; this row is how an operator finds out.
+	TypeRiskHigh Type = "risk.high"
 )
 
 // spec is the fixed description of a condition.
@@ -144,9 +159,35 @@ var specs = map[Type]spec{
 		severity: store.SeverityInfo,
 		summary:  "The key encryption key is overdue for rotation",
 	},
+	TypeTicketFactorOverride: {
+		// A warning, not critical. Critical is reserved for a control that has
+		// failed on its own, and here a control was overridden deliberately by
+		// an authorised caller with a legitimate use: a user whose confirmed
+		// TOTP secret sits on a phone at the bottom of a canal still holds a
+		// factor by this service's reckoning and still needs a way back in.
+		// Info would be wrong in the other direction, because the override is
+		// exactly the step an attacker who controls delivery needs, so it has
+		// to appear in the list an operator actually reads.
+		severity: store.SeverityWarning,
+		summary:  "An enrolment ticket was issued for a subject who already holds a factor",
+	},
+	TypeRiskHigh: {
+		// A warning, not critical, and not info. Nothing has failed: the
+		// ceremony verified, the controls all held, and the service reported
+		// what it saw rather than refusing, which is the design. Critical is
+		// reserved for a broken audit chain, the record every other
+		// investigation rests on. Info would put it below the failure-burst
+		// alerts, which is the wrong way round: a high assessment is strictly
+		// more specific than a burst, because it names the signals and it
+		// concerns an authentication that succeeded. So it belongs at the
+		// level an operator reads, without displacing the one condition that
+		// means the evidence itself is unreliable.
+		severity: store.SeverityWarning,
+		summary:  "An authentication completed and was assessed as high risk",
+	},
 }
 
-// AllTypes lists the ten conditions in the order they are declared, for the
+// AllTypes lists the twelve conditions in the order they are declared, for the
 // administrative interface and for the completeness tests.
 var AllTypes = []Type{
 	TypeAuthFailureSubject,
@@ -159,6 +200,8 @@ var AllTypes = []Type{
 	TypeAdminDenied,
 	TypeAuditChainBroken,
 	TypeKEKRotationOverdue,
+	TypeTicketFactorOverride,
+	TypeRiskHigh,
 }
 
 // Severity returns the severity of the condition.
@@ -170,7 +213,7 @@ func (t Type) Severity() store.Severity { return specs[t].severity }
 // Summary returns the default summary line for the condition.
 func (t Type) Summary() string { return specs[t].summary }
 
-// Valid reports whether t is one of the ten declared conditions.
+// Valid reports whether t is one of the twelve declared conditions.
 func (t Type) Valid() bool {
 	_, ok := specs[t]
 	return ok
@@ -489,6 +532,31 @@ func (e *Engine) AuditChainBroken(ctx context.Context, tenantID string, brokenAt
 	})
 }
 
+// TicketFactorOverride reports an enrolment ticket issued for a subject who
+// already holds a factor.
+//
+// credentials and totp say what the subject held at the moment of issuance, so
+// an operator reading the alert can see whether the override was plausible
+// without opening the audit log. issuedBy names the credential that asked for
+// it, because the question after an unexpected override is always which
+// integration or which operator made the call.
+func (e *Engine) TicketFactorOverride(ctx context.Context, tenantID, subjectID, ticketID, issuedBy string, credentials int, totp bool) (*store.Alert, error) {
+	return e.Raise(ctx, Input{
+		TenantID:   tenantID,
+		Type:       TypeTicketFactorOverride,
+		SubjectID:  subjectID,
+		ResourceID: ticketID,
+		Summary: fmt.Sprintf("Enrolment ticket issued over an existing factor: %d active credentials, totp confirmed %t",
+			credentials, totp),
+		Detail: map[string]any{
+			"active_credentials": credentials,
+			"totp_confirmed":     totp,
+			"issued_by":          issuedBy,
+			"ticket_id":          ticketID,
+		},
+	})
+}
+
 // KEKRotationOverdue reports a key encryption key past its rotation interval.
 func (e *Engine) KEKRotationOverdue(ctx context.Context, tenantID, keyVersion string, age, interval time.Duration) (*store.Alert, error) {
 	return e.Raise(ctx, Input{
@@ -497,5 +565,27 @@ func (e *Engine) KEKRotationOverdue(ctx context.Context, tenantID, keyVersion st
 		ResourceID: keyVersion,
 		Summary:    fmt.Sprintf("Key version %s is %s old, the rotation interval is %s", keyVersion, age, interval),
 		Detail:     map[string]any{"key_version": keyVersion, "age": age.String(), "interval": interval.String()},
+	})
+}
+
+// RiskHigh reports an authentication assessed as high risk.
+//
+// reasons are the risk reasons that fired, in the order internal/risk reports
+// them. They are carried in the summary as well as in the detail, because the
+// question an operator asks on seeing this row is which signals it was, and a
+// row that needs opening to answer that is a row that gets skipped.
+//
+// The fingerprint covers the type and the subject and nothing else, so a run
+// of high assessments against one subject collapses onto one row with a rising
+// occurrence count. Including the reasons would split that run into a row per
+// combination, which is the flood the fingerprint exists to prevent.
+func (e *Engine) RiskHigh(ctx context.Context, tenantID, subjectID string, score int, reasons []string) (*store.Alert, error) {
+	return e.Raise(ctx, Input{
+		TenantID:  tenantID,
+		Type:      TypeRiskHigh,
+		SubjectID: subjectID,
+		Summary: fmt.Sprintf("Authentication completed at high risk, score %d: %s",
+			score, strings.Join(reasons, ", ")),
+		Detail: map[string]any{"score": score, "reasons": reasons},
 	})
 }

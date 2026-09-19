@@ -141,6 +141,7 @@ type Store interface {
 	CredentialStore
 	TOTPStore
 	RecoveryStore
+	TicketStore
 	ChallengeStore
 	AuditStore
 	AuthnStore
@@ -295,6 +296,66 @@ type RecoveryStore interface {
 	ConsumeRecoveryCode(ctx context.Context, tenantID, id string, at time.Time) error
 
 	CountUnusedRecoveryCodes(ctx context.Context, tenantID, subjectID string) (int, error)
+}
+
+// TicketStore manages single-use enrolment tickets.
+//
+// A ticket permits exactly one thing: starting and completing one WebAuthn
+// registration for the subject it names. Nothing here issues an assertion, and
+// nothing here reads a ticket back in plaintext, because only the selector and
+// the Argon2id hash of the verifier are stored.
+type TicketStore interface {
+	// ReplaceEnrolmentTicket revokes any live ticket for the subject and
+	// inserts t, in one transaction.
+	//
+	// The two writes belong together for the same reason as
+	// ReplaceRecoveryCodes: a second ticket issued without the first being
+	// retired doubles the window in which a stolen one can be redeemed, and an
+	// operator reissuing after a failed delivery would leave the first one
+	// working. The schema carries a partial unique index over live tickets per
+	// subject as the backstop, so accumulation is impossible rather than merely
+	// unlikely.
+	ReplaceEnrolmentTicket(ctx context.Context, tenantID, subjectID string, t *EnrolmentTicket) error
+
+	// GetEnrolmentTicketBySelector finds a ticket by the clear half of the
+	// secret.
+	//
+	// A consumed, revoked or expired ticket is still returned. The caller
+	// verifies the hashed half first and only then decides, so that a ticket
+	// which is merely spent and one that never existed take the same amount of
+	// work to reject.
+	GetEnrolmentTicketBySelector(ctx context.Context, tenantID, selector string) (*EnrolmentTicket, error)
+
+	// ConsumeEnrolmentTicket marks the ticket spent and records the credential
+	// the redemption produced.
+	//
+	// The update is a compare-and-swap conditional on consumed_at IS NULL AND
+	// revoked_at IS NULL AND expires_at > at, expressed as one statement.
+	// Single use is that condition and not the caller's check: two concurrent
+	// redemptions would both read an unspent ticket, and only one may win.
+	//
+	// It returns ErrStaleWrite when the row exists but the condition no longer
+	// holds, which covers a replay, a revocation and an expiry alike, and
+	// ErrNotFound when there is no such row.
+	ConsumeEnrolmentTicket(ctx context.Context, tenantID, id, credentialID string, at time.Time) error
+
+	// RevokeEnrolmentTicket withdraws a ticket that has not been redeemed.
+	//
+	// It is the answer to a mis-delivered ticket, which is the failure the
+	// delivery channel makes likely. It returns ErrStaleWrite when the ticket
+	// has already been consumed or revoked, and ErrNotFound when there is no
+	// such row, so a caller can tell "nothing to withdraw" from "never
+	// existed".
+	RevokeEnrolmentTicket(ctx context.Context, tenantID, id string, at time.Time) error
+
+	// DeleteExpiredEnrolmentTickets is called by the janitor.
+	//
+	// The sweep spans every tenant and takes no tenant argument, like the other
+	// sweeps, because the janitor acts on behalf of none of them and an expired
+	// ticket belongs to nobody. Consumed and revoked rows go the same way once
+	// they are past their expiry: the durable record of a redemption is the
+	// audit log, not this table.
+	DeleteExpiredEnrolmentTickets(ctx context.Context, before time.Time) (int64, error)
 }
 
 // ChallengeStore holds in-flight WebAuthn ceremony state.

@@ -394,6 +394,47 @@ Refused by the validator:
 - `config: recovery.code_count must be between 1 and 64, got %d`
 - `config: recovery.low_watermark (%d) must be below code_count (%d), otherwise a fresh batch is already in the warning state`
 
+## tickets
+
+An enrolment ticket is a single-use, short-lived secret that permits exactly one
+WebAuthn registration and never produces a signed assertion. It is the way back
+in for a user who holds no authenticator yet, or who has lost every one they
+had.
+
+Delivering it is the integrating application's responsibility: this service sends
+no email and makes no outbound connection. Whoever controls the channel the
+application chooses can enrol an authenticator until the ticket expires, and the
+two settings below are what bound that.
+
+| Key | Type | Default | Environment variable | Purpose |
+|---|---|---|---|---|
+| `tickets.ttl` | duration | `1h` | `N0PASSTEMPS_TICKETS_TTL` | How long a ticket may be redeemed for. The lifetime is the whole window an intercepted ticket is good for. |
+| `tickets.require_existing_factor_default` | bool | `true` | `N0PASSTEMPS_TICKETS_REQUIRE_EXISTING_FACTOR_DEFAULT` | Refuse to issue a ticket for a subject who already holds an active authenticator or a confirmed TOTP secret. |
+
+Refused by the validator:
+
+- `config: tickets.ttl must be positive and at most 24h; the lifetime is the window in which an intercepted ticket can be redeemed, got %s`
+
+The 24h ceiling is a judgement and it is worth stating why. A ticket is a
+hand-off, not a credential: it exists to carry a user from a helpdesk call to a
+registered key, which takes minutes. Anything that outlives a working day is
+being used as a standing credential, and a standing credential delivered by
+email is the thing enrolment tickets were designed to avoid.
+
+Leave `require_existing_factor_default` at `true`. An individual request may
+override it by sending `require_existing_factor: false`, which is the caller
+stating that the existing factor is genuinely unusable; that override is audited
+with `existing_factor_override: true` and raises the
+`enrolment_ticket.factor_override` alert. Setting the default to `false` makes
+every such issuance an override, which is only reasonable in a deployment that
+enrols users through tickets as a matter of course and has accepted that a ticket
+for an account with factors is an account-takeover primitive for whoever controls
+delivery.
+
+Neither setting is touched by lite mode. The guard is a security property rather
+than a governance feature, and a lite deployment has fewer operators watching the
+alert list, not more.
+
 ## assertion
 
 A successful ceremony returns a detached signature the integrating application
@@ -449,6 +490,62 @@ Refused by the validator, when `throttle.enabled` is true:
 IPv6 sources are bucketed by their `/64` prefix, IPv4 by the single address. A
 single host is routinely delegated a whole `/64`, so a per-address limit there
 is bypassed at no cost.
+
+## risk
+
+Risk signals reported on a completed authentication. The service reports and
+never refuses on risk, so nothing in this section can lock anyone out: what it
+changes is the `risk` claim of the signed assertion, the `risk` key of the
+audit entry detail, and whether a `risk.high` alert is raised. The reason
+table, the weights and the reasoning behind every default are in
+[RISK.md](RISK.md).
+
+| Key | Type | Default | Environment variable | Purpose |
+|---|---|---|---|---|
+| `risk.enabled` | bool | `true` | `N0PASSTEMPS_RISK_ENABLED` | Reports risk. With it off the claim is omitted from the assertion entirely rather than present and empty, so a verifier written against such a deployment is unaffected by one that has it on. |
+| `risk.elevated_at` | int | `20` | `N0PASSTEMPS_RISK_ELEVATED_AT` | Score at which the level becomes `elevated`, inclusive. It is the weight of the lightest single signal that says the ceremony proved less than a full unphishable factor. |
+| `risk.high_at` | int | `40` | `N0PASSTEMPS_RISK_HIGH_AT` | Score at which the level becomes `high`, inclusive. Double `elevated_at`: one signal that is evidence of an attack, or the weakest factor together with the failures that preceded it. |
+| `risk.dormant_after` | duration | `2160h` | `N0PASSTEMPS_RISK_DORMANT_AFTER` | How long a credential must go unused before `credential_dormant` fires. Ninety days: a spare key is routinely unused for a quarter, and a shorter window reports ordinary behaviour as a signal. |
+| `risk.new_credential_within` | duration | `1h` | `N0PASSTEMPS_RISK_NEW_CREDENTIAL_WITHIN` | How recently a credential must have been registered for `credential_new` to fire. An enrolment followed by a sign-in is one sitting. |
+| `risk.weights` | table of int | the defaults in [RISK.md](RISK.md) | none, file only | Overrides the weight of individual reasons, keyed on the reason strings. |
+
+`[risk.weights]` has deliberately no environment counterpart. The weights are
+the policy itself, which belongs in the file that is committed and reviewed
+rather than in one deployment's environment, and a flat environment namespace
+would need one variable per reason, which is a second copy of a closed set and
+so a second place for it to drift.
+
+```toml
+[risk]
+enabled = true
+elevated_at = 20
+high_at = 40
+dormant_after = "2160h"
+new_credential_within = "1h"
+
+[risk.weights]
+# A deployment where every user holds a security key treats a TOTP sign-in as
+# more of an exception than the defaults do.
+totp_only = 20
+# And one that has no opinion about dormancy silences it. The reason still
+# appears in the claim, because it did fire; it contributes nothing.
+credential_dormant = 0
+```
+
+Refused by the validator, whether or not reporting is enabled, so that turning
+it on later does not turn a file that loaded yesterday into one that refuses to:
+
+- `config: risk.elevated_at must be at least 1, got %d`
+- `config: risk.high_at must be at least 1, got %d`
+- `config: risk.elevated_at (%d) must be below risk.high_at (%d)`
+- `config: risk.dormant_after must be positive, got %s`
+- `config: risk.new_credential_within must be positive, got %s`
+- `config: risk.weights has no reason %q` for a key that is not one of the nine
+- `config: risk.weights.%s is %d` for a negative weight
+
+An unknown reason key is refused rather than ignored because a misspelled
+reason would sit in the file doing nothing while the operator believed they had
+retuned the policy, and nothing at runtime would ever tell them.
 
 ## audit
 
@@ -565,4 +662,5 @@ throttle and the alert engine are identical in both modes.
 | [DEPLOYMENT.md](DEPLOYMENT.md) | Where each of these values goes in the four supported deployment forms |
 | [TROUBLESHOOT.md](TROUBLESHOOT.md) | What to do when one of the refusals above appears at startup |
 | [MONITORING.md](MONITORING.md) | The health report these settings are visible in |
+| [RISK.md](RISK.md) | The reason table, the weights and the thresholds the `[risk]` section tunes |
 | [docs/adr](adr/README.md) | Why the defaults are what they are |

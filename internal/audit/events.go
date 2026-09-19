@@ -51,6 +51,18 @@ const (
 	EventRecoveryRejected  = "recovery.rejected"
 	EventRecoveryExhausted = "recovery.exhausted"
 
+	// Enrolment tickets.
+	//
+	// Redemption has two audited steps rather than one, because the ceremony
+	// has two round trips and an attacker who starts one but never finishes it
+	// still proves they hold the ticket. The rejected event carries the reason
+	// in its detail, which is the only place the reason appears: the caller is
+	// told nothing beyond a refusal.
+	EventTicketIssued   = "enrolment_ticket.issued"
+	EventTicketRedeemed = "enrolment_ticket.redeemed"
+	EventTicketRejected = "enrolment_ticket.rejected"
+	EventTicketRevoked  = "enrolment_ticket.revoked"
+
 	// Throttling.
 	EventThrottleTripped = "throttle.tripped"
 	EventThrottleReset   = "throttle.reset"

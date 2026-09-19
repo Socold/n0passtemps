@@ -35,6 +35,7 @@ type fakeStore struct {
 	due []*store.ErasureRequest
 
 	challengesBefore time.Time
+	ticketsBefore    time.Time
 	throttlesBefore  time.Time
 	approvalsBefore  time.Time
 	dueBefore        time.Time
@@ -69,6 +70,11 @@ func (f *fakeStore) called(prefix string) int {
 func (f *fakeStore) DeleteExpiredChallenges(_ context.Context, before time.Time) (int64, error) {
 	f.challengesBefore = before
 	return 3, f.note("challenges")
+}
+
+func (f *fakeStore) DeleteExpiredEnrolmentTickets(_ context.Context, before time.Time) (int64, error) {
+	f.ticketsBefore = before
+	return 4, f.note("tickets")
 }
 
 func (f *fakeStore) DeleteStaleThrottles(_ context.Context, before time.Time) (int64, error) {
@@ -152,13 +158,16 @@ func TestSweepCounts(t *testing.T) {
 	if len(res.Errors) != 0 {
 		t.Fatalf("errors = %v, want none", res.Errors)
 	}
-	want := Result{Challenges: 3, Throttles: 5, Approvals: 2, Erasures: 1, AuditPruned: 7}
+	want := Result{Challenges: 3, Tickets: 4, Throttles: 5, Approvals: 2, Erasures: 1, AuditPruned: 7}
 	if !reflect.DeepEqual(res, want) {
 		t.Errorf("result = %+v, want %+v", res, want)
 	}
 
 	if !st.challengesBefore.Equal(testNow) {
 		t.Errorf("challenges were deleted before %v, want the injected clock: a later cutoff would remove a ceremony still in progress", st.challengesBefore)
+	}
+	if !st.ticketsBefore.Equal(testNow) {
+		t.Errorf("tickets were deleted before %v, want the injected clock: a later cutoff would remove a ticket a user is still redeeming", st.ticketsBefore)
 	}
 	if !st.approvalsBefore.Equal(testNow) {
 		t.Errorf("approvals were expired before %v, want the injected clock", st.approvalsBefore)
@@ -179,6 +188,7 @@ func TestSweepCounts(t *testing.T) {
 
 func TestSweepRunsEverySweepDespiteErrors(t *testing.T) {
 	errChallenges := errors.New("challenges failed")
+	errTickets := errors.New("tickets failed")
 	errThrottles := errors.New("throttles failed")
 	errApprovals := errors.New("approvals failed")
 	errList := errors.New("list failed")
@@ -195,7 +205,7 @@ func TestSweepRunsEverySweepDespiteErrors(t *testing.T) {
 
 		res := newJanitor(cfg, st).Sweep(context.Background())
 
-		for _, call := range []string{"challenges", "throttles", "approvals", "list-erasures", "erase-audit", "prune-audit"} {
+		for _, call := range []string{"challenges", "tickets", "throttles", "approvals", "list-erasures", "erase-audit", "prune-audit"} {
 			if st.called(call) != 1 {
 				t.Errorf("%s ran %d times, want 1: a janitor that stops at its first error has silently given up its other duties", call, st.called(call))
 			}
@@ -206,7 +216,7 @@ func TestSweepRunsEverySweepDespiteErrors(t *testing.T) {
 		if res.Challenges != 0 {
 			t.Errorf("challenges = %d for a sweep that failed", res.Challenges)
 		}
-		if res.Throttles != 5 || res.Approvals != 2 || res.Erasures != 1 || res.AuditPruned != 7 {
+		if res.Tickets != 4 || res.Throttles != 5 || res.Approvals != 2 || res.Erasures != 1 || res.AuditPruned != 7 {
 			t.Errorf("result = %+v: the sweeps after the failure did not report their work", res)
 		}
 	})
@@ -214,6 +224,7 @@ func TestSweepRunsEverySweepDespiteErrors(t *testing.T) {
 	t.Run("every sweep fails", func(t *testing.T) {
 		st := &fakeStore{errs: map[string]error{
 			"challenges":    errChallenges,
+			"tickets":       errTickets,
 			"throttles":     errThrottles,
 			"approvals":     errApprovals,
 			"list-erasures": errList,
@@ -224,19 +235,19 @@ func TestSweepRunsEverySweepDespiteErrors(t *testing.T) {
 
 		res := newJanitor(cfg, st).Sweep(context.Background())
 
-		wantCalls := []string{"challenges", "throttles", "approvals", "list-erasures", "prune-audit"}
+		wantCalls := []string{"challenges", "tickets", "throttles", "approvals", "list-erasures", "prune-audit"}
 		if !reflect.DeepEqual(st.calls, wantCalls) {
 			t.Errorf("calls = %v, want %v", st.calls, wantCalls)
 		}
-		if len(res.Errors) != 5 {
-			t.Fatalf("collected %d errors, want 5: the operator must see every problem from one pass, not only the first", len(res.Errors))
+		if len(res.Errors) != 6 {
+			t.Fatalf("collected %d errors, want 6: the operator must see every problem from one pass, not only the first", len(res.Errors))
 		}
-		for _, want := range []error{errChallenges, errThrottles, errApprovals, errList, errPrune} {
+		for _, want := range []error{errChallenges, errTickets, errThrottles, errApprovals, errList, errPrune} {
 			if !errors.Is(errors.Join(res.Errors...), want) {
 				t.Errorf("%q is missing from the collected errors", want)
 			}
 		}
-		if res.Challenges+res.Throttles+res.Approvals+res.Erasures+res.AuditPruned != 0 {
+		if res.Challenges+res.Tickets+res.Throttles+res.Approvals+res.Erasures+res.AuditPruned != 0 {
 			t.Errorf("result = %+v: failed sweeps reported work", res)
 		}
 	})

@@ -145,10 +145,10 @@ Verification is linear in the number of entries and gets slower for the lifetime
 of the deployment. Measure it before scheduling it. On a large log, verify in
 slices with `from_seq` rather than the whole chain every night.
 
-## The ten alert types
+## The alert types
 
-`internal/alerts/alerts.go` declares exactly ten conditions. The list is short
-on purpose: an alert stream nobody reads is worse than no alert stream, because
+`internal/alerts/alerts.go` declares a short, closed list of conditions. It is
+short on purpose: an alert stream nobody reads is worse than no alert stream, because
 it creates the belief that someone would notice. Each condition is either
 evidence of an attack in progress, evidence that a control has failed, or a
 state that will lock a user out if it is left alone.
@@ -176,6 +176,8 @@ cannot file the same condition at three different levels.
 | 8 | `admin.denied` | warning | An administrative token was denied a permission its role does not hold. Either a misconfigured integration or a stolen token being explored | Read the `admin.denied` audit entries for that token. A single denial after a role change is a misconfiguration; a sequence probing different permissions is not |
 | 9 | `audit.chain_broken` | **critical** | The hash chain failed verification. The audit log is the record every other investigation rests on, which is why this is the one condition that is critical by itself | Stop writing to the database, take a filesystem copy, and work through the procedure in [ADMIN-GUIDE.md](ADMIN-GUIDE.md). Do not attempt a repair: a routine that recomputed the chain would be exactly the tool an attacker needs |
 | 10 | `kek.rotation_overdue` | info | A key encryption key is past `kek.rotation_interval`. Nothing is broken yet, which is why it is informational. Raised by the janitor pass rather than by a request | Plan a rotation: `n0passtemps-wizard kek rotate`, restart, then `POST /admin/v1/kek/rewrap`. It is an explicit operator action and the service will never perform one on its own. Requires `features.kek_rotation_reminder`; see [ADMIN-GUIDE.md](ADMIN-GUIDE.md#rotating-the-keyring) |
+| 11 | `risk.high` | warning | An authentication completed and was assessed as high risk. The service reports risk and never refuses on it, so the subject is already in and this row is how an operator finds out. The detail carries the score and the reasons that fired; so does the summary, because the question on seeing this row is always which signals it was | Read the reasons. `recovery_code_used` with `recent_failures_subject` is the account-takeover shape: check with the account holder out of band before anything else, and consider locking the subject. `signature_counter_stalled` reaches high on its own and is handled as row 3. Warning rather than critical because nothing has failed: the ceremony verified and every control held. Warning rather than info because the assessment is strictly more specific than a failure burst and concerns an authentication that succeeded. Collapses by fingerprint onto one row per subject, so a subject under attack produces a rising `occurrences` count rather than a row per attempt. Only `high` raises it: alerting on `elevated`, which an ordinary recovery-code redemption reaches, would bury the rest of the stream.  See [RISK.md](RISK.md) |
+| 12 | `enrolment_ticket.factor_override` | warning | An enrolment ticket was issued for a subject who already holds an active authenticator or a confirmed TOTP secret, which the caller asked for explicitly with `require_existing_factor: false`. A ticket is a way in for someone with no factor; issued for an account that has factors it is an account-takeover primitive for whoever controls delivery | Check who asked. The detail carries `issued_by`, the credential that issued it, and what the subject held at the time. An operator override after a telephone identity check is the expected case and the `reason` on the `enrolment_ticket.issued` audit entry should say so. A run of them from one API key is not: revoke the key. Warning rather than critical because a control was overridden deliberately by an authorised caller with a legitimate use, a user whose confirmed TOTP secret is on a phone they no longer have; warning rather than info because the override is exactly the step an attacker who controls delivery needs. See [ADMIN-GUIDE.md](ADMIN-GUIDE.md#6-a-user-has-lost-every-authenticator) |
 
 Reading them:
 

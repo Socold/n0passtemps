@@ -26,9 +26,20 @@ const (
 	ScopeTOTP     Scope = "totp"
 	ScopeRecovery Scope = "recovery"
 	ScopeHealth   Scope = "health"
+
+	// ScopeTickets covers issuing and redeeming an enrolment ticket.
+	//
+	// It is its own scope rather than part of webauthn, even though redemption
+	// runs a registration ceremony. A key that holds webauthn can enrol an
+	// authenticator only for a subject it can already name and a user who is
+	// already present; a key that holds tickets can mint a secret that enrols
+	// one later, through whatever channel the application chooses. The second
+	// is the stronger capability, and an integration that only runs ceremonies
+	// should not acquire it by association.
+	ScopeTickets Scope = "tickets"
 )
 
-var allScopes = []Scope{ScopeSubjects, ScopeWebAuthn, ScopeTOTP, ScopeRecovery, ScopeHealth}
+var allScopes = []Scope{ScopeSubjects, ScopeWebAuthn, ScopeTOTP, ScopeRecovery, ScopeHealth, ScopeTickets}
 
 // ValidateScopes checks a requested scope list and returns it normalised:
 // lowercased, deduplicated and sorted.

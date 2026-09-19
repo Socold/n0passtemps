@@ -54,6 +54,16 @@ const (
 	// inside the window. Revocation is final, so this burst limit is the
 	// control that replaces the reversibility the design does not offer.
 	DimAdminRevoke Dimension = "admin_revoke"
+
+	// DimEnrolmentTicket counts attempts against one enrolment ticket, keyed on
+	// the clear selector half of the presented secret.
+	//
+	// It is keyed on the selector rather than on the subject because a
+	// redemption attempt naming a ticket that does not exist resolves to no
+	// subject, and those are exactly the attempts a guessing campaign consists
+	// of. Bucketing on what the caller presented bounds guessing per ticket,
+	// while DimIP bounds spraying across many.
+	DimEnrolmentTicket Dimension = "enrolment_ticket"
 )
 
 // dimensionOrder fixes the evaluation order.
@@ -61,7 +71,7 @@ const (
 // Ranging over the caller's map would report a different dimension on each
 // identical request, which makes both the alerting and the tests
 // non-deterministic.
-var dimensionOrder = []Dimension{DimSubject, DimIP, DimAPIKey, DimAdminRevoke}
+var dimensionOrder = []Dimension{DimSubject, DimIP, DimAPIKey, DimAdminRevoke, DimEnrolmentTicket}
 
 // unknownIP is the single bucket every address that cannot be parsed lands in.
 //
@@ -105,6 +115,26 @@ type Result struct {
 	Dimension  Dimension
 	Attempts   int
 	Failures   int
+
+	// Counters reports what every dimension the call actually touched stood
+	// at, keyed by dimension. Dimension, Attempts and Failures above name one
+	// of them, which is the right answer for a refusal but not for a caller
+	// that needs several at once.
+	//
+	// It exists so that internal/risk can read the per-subject and
+	// per-network failure counts without a second round trip to the store:
+	// Record already reads every bucket, so the numbers are in hand and the
+	// alternative is one extra query per dimension on the authentication
+	// path. A dimension the caller did not supply, one with an empty value,
+	// and every dimension after the one that refused a Check, are absent
+	// rather than zero. It is nil when limiting is disabled.
+	Counters map[Dimension]Counter
+}
+
+// Counter is one bucket's state inside the current window.
+type Counter struct {
+	Attempts int
+	Failures int
 }
 
 // Check reports whether any supplied dimension is currently blocked, without
@@ -127,6 +157,7 @@ func (l *Limiter) Check(ctx context.Context, tenantID string, dims map[Dimension
 	now := l.now()
 	var closest Result
 	closest.Allowed = true
+	counters := make(map[Dimension]Counter, len(dims))
 
 	for _, dim := range dimensionOrder {
 		value, ok := dims[dim]
@@ -148,13 +179,14 @@ func (l *Limiter) Check(ctx context.Context, tenantID string, dims map[Dimension
 		if err != nil {
 			return Result{}, fmt.Errorf("throttle: read bucket for dimension %s: %w", dim, err)
 		}
+		counters[dim] = Counter{Attempts: st.Attempts, Failures: st.Failures}
 		if st.Blocked(now) {
-			return blockedResult(dim, st, st.BlockedUntil.Sub(now)), nil
+			return withCounters(blockedResult(dim, st, st.BlockedUntil.Sub(now)), counters), nil
 		}
 		closest = keepClosest(closest, dim, st)
 	}
 
-	return closest, nil
+	return withCounters(closest, counters), nil
 }
 
 // Record counts one attempt against every supplied dimension and applies a
@@ -215,6 +247,10 @@ func (l *Limiter) Record(ctx context.Context, tenantID string, dims map[Dimensio
 
 	lockout := l.cfg.LockoutDuration.Duration
 	refused := Result{Allowed: true}
+	counters := make(map[Dimension]Counter, len(seen))
+	for _, o := range seen {
+		counters[o.dim] = Counter{Attempts: o.st.Attempts, Failures: o.st.Failures}
+	}
 
 	for _, o := range seen {
 		if o.st.Blocked(now) {
@@ -248,7 +284,19 @@ func (l *Limiter) Record(ctx context.Context, tenantID string, dims map[Dimensio
 		}
 	}
 
-	return refused, nil
+	return withCounters(refused, counters), nil
+}
+
+// withCounters attaches the per-dimension snapshot to a result.
+//
+// It is applied at each return rather than inside blockedResult and
+// keepClosest, because both of those build a fresh Result and would drop
+// whatever had been collected so far.
+func withCounters(res Result, counters map[Dimension]Counter) Result {
+	if len(counters) > 0 {
+		res.Counters = counters
+	}
+	return res
 }
 
 // ResetSubject clears every limit a subject is held under, which is what the
@@ -409,6 +457,12 @@ func (l *Limiter) limits(dim Dimension) (maxAttempts, maxFailures int, err error
 		// Volume only, and the volume is the point: the burst is what an
 		// operator is allowed to destroy before someone has to intervene.
 		return l.cfg.AdminRevokeBurst, 0, nil
+	case DimEnrolmentTicket:
+		// Lockout only, on the per-subject budget. A ticket belongs to exactly
+		// one subject, so the number of wrong attempts worth tolerating is the
+		// same number, and reusing the setting avoids a configuration key whose
+		// correct value nobody could reason about separately.
+		return 0, l.cfg.MaxFailuresPerSubject, nil
 	default:
 		return 0, 0, fmt.Errorf("throttle: unknown dimension %q", dim)
 	}

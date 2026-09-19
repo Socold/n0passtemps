@@ -41,11 +41,16 @@ import (
 // (replay refusal, lockout, tenant isolation, audit completeness) all live in
 // the interaction between them.
 type harness struct {
-	t      *testing.T
-	srv    *httptest.Server
-	store  store.Store
-	cfg    *config.Config
-	clock  *testClock
+	t     *testing.T
+	srv   *httptest.Server
+	store store.Store
+	cfg   *config.Config
+	clock *testClock
+
+	// sealer is exposed so a test can insert an envelope-encrypted record the
+	// way the service would, rather than reimplementing the sealing.
+	sealer *envelope.Sealer
+
 	apiKey string
 	admin  map[store.Role]string
 }
@@ -165,7 +170,7 @@ func newHarness(t *testing.T, tune ...func(*config.Config)) *harness {
 	t.Cleanup(ts.Close)
 
 	h := &harness{
-		t: t, srv: ts, store: st, cfg: &cfg, clock: clock,
+		t: t, srv: ts, store: st, cfg: &cfg, clock: clock, sealer: sealer,
 		admin: map[store.Role]string{},
 	}
 	h.apiKey = h.mintAPIKey("integration")

@@ -8,7 +8,7 @@ Throughout, `$ADMIN` is an administrative token and `$BASE` the service origin:
 
 ```bash
 export BASE="https://auth.example.com"
-export ADMIN="npa_3f9a2c1d8b7e6f5a.Zm9vYmFyYmF6cXV1eHF1dXhmb29iYXJiYXo"
+export ADMIN="npa_EXAMPLEONLY0000.EXAMPLE-NOT-A-REAL-TOKEN"
 ```
 
 The administrative surface is guarded by three layers, in this order: the
@@ -59,8 +59,8 @@ docker compose run --rm n0passtemps -bootstrap-admin -admins 2
 
 ```
 
-bootstrap-1  npa_3f9a2c1d8b7e6f5a.Zm9vYmFyYmF6cXV1eHF1dXhmb29iYXJiYXo
-bootstrap-2  npa_8d1c4b7a2e9f6035.cXV1eGZvb2JhcmJhenF1dXhmb29iYXJiYXo
+bootstrap-1  npa_EXAMPLEONLY0000.EXAMPLE-NOT-A-REAL-TOKEN
+bootstrap-2  npa_EXAMPLEONLY0001.EXAMPLE-NOT-A-REAL-TOKEN
 
 Each token is shown once. Only a digest is stored, so none can be displayed
 again. Put them in a password manager now, one per person.
@@ -171,7 +171,7 @@ curl -sS -X POST "$BASE/admin/v1/api-keys" \
     "created_by": "b71f...",
     "expires_at": "2027-09-17T08:14:02Z"
   },
-  "token": "npt_3f9a2c1d8b7e6f5a.Zm9vYmFyYmF6cXV1eHF1dXhmb29iYXJiYXo",
+  "token": "npt_EXAMPLEONLY0000.EXAMPLE-NOT-A-REAL-KEY",
   "warning": "this token is shown once and cannot be retrieved again",
   "no_expiry": false,
   "unrestricted": false
@@ -258,7 +258,7 @@ curl -sS -X POST "$BASE/admin/v1/api-keys/3f0c7e61-.../rotate" \
     "created_by": "b71f...",
     "expires_at": "2027-09-17T08:14:02Z"
   },
-  "token": "npt_8d1c4b7a2e9f6035.cXV1eGZvb2JhcmJhenF1dXhmb29iYXJiYXo",
+  "token": "npt_EXAMPLEONLY0001.EXAMPLE-NOT-A-REAL-KEY",
   "warning": "this token is shown once and cannot be retrieved again",
   "no_expiry": false,
   "unrestricted": false,
@@ -423,7 +423,7 @@ Mint the replacement first, in that order, always. The count is of usable
 tokens, so an unexpired unrevoked `admin_full` token whose holder has lost it
 still counts and still blocks the revocation of the other one.
 
-## The five things an operator actually does
+## The six things an operator actually does
 
 ### 1. A user cannot log in
 
@@ -504,11 +504,16 @@ Check `recovery_codes_remaining` first. If it is zero, the user has no way back
 in, so reissue codes, get them to the user out of band, and only then revoke
 with `{"reason":"...","allow_last":true}`.
 
-**The user has no authenticator and no codes.** There is no route back in from
-the outside. Re-enrol them: verify who they are by whatever means the
-organisation uses, reissue recovery codes, transmit them over a channel you
-trust, and have the user consume one and register a new authenticator in the
-same session.
+**The user has no authenticator and no codes.** Two ways back in, and they
+differ in what the user ends up holding. Reissuing recovery codes gives them a
+sheet of secrets, each of which authenticates; an enrolment ticket gives them one
+secret that enrols one authenticator and authenticates nothing. Prefer the
+ticket when the goal is to get the user back onto a key, which it usually is, and
+see [A user has lost every authenticator](#6-a-user-has-lost-every-authenticator)
+for the procedure.
+
+The recovery-code route is here for when the user needs codes as well, for
+instance because they are travelling without the new key:
 
 ```bash
 curl -sS -X POST "$BASE/admin/v1/subjects/$SUB/recovery/reissue" \
@@ -707,6 +712,106 @@ Reading the log is itself audited as `admin.subjects_listed` for a subject
 listing, and revealing a subject reference is audited separately as
 `admin.subject_ref_revealed`. Both are deliberate: the operations that turn a
 row back into a person are recorded.
+
+### 6. A user has lost every authenticator
+
+This is the case nothing else covers. The user holds no WebAuthn credential and
+no unused recovery code, so there is no secret they can present and no ceremony
+they can complete. An enrolment ticket is the way back in: a single-use,
+short-lived secret that permits exactly one WebAuthn registration and nothing
+else.
+
+It never produces a signed assertion. Redeeming a ticket gets the user onto a new
+authenticator; it does not log them in. That is what makes a ticket safer to
+send than a recovery code: the worst a stolen ticket achieves is an authenticator
+enrolled against the account, which is audited, alertable and revocable, rather
+than a session.
+
+**Before you issue one, establish who you are talking to.** Whoever receives the
+ticket can enrol an authenticator against this account until it expires. The
+service cannot help you here: it does not know your organisation's identity
+proofing and it has no view of the channel you are about to use. This step is
+the control. Everything below is mechanism.
+
+```bash
+curl -sS -X POST "$BASE/admin/v1/subjects/$SUB/enrolment-ticket" \
+  -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+  -d '{"reason":"telephone identity check passed, ref HD-4417"}'
+```
+
+```json
+{
+  "ticket_id": "9f2c...",
+  "subject_id": "0b71...",
+  "ticket": "MC4TK-B9YQZ-3HDWR-7FGNP",
+  "expires_at": "2026-09-18T11:14:03Z",
+  "warning": "this ticket is shown once and cannot be retrieved again; it permits one WebAuthn registration and never produces a signed assertion; deliver it over a channel you trust, because whoever holds it can enrol an authenticator until it expires; any live ticket the subject already had has been revoked"
+}
+```
+
+`reason` is not required by the route, and you should supply it anyway. It is the
+only place the audit trail records why an account was opened up.
+
+Needs `enrolment_ticket.issue`, held by `admin_operator` and `admin_full`.
+
+Then the user, in the application's own interface:
+
+1. The application calls `POST /v1/enrolment/register` with
+   `{"ticket": "MC4TK-..."}` and passes the returned `options` to
+   `navigator.credentials.create()`.
+2. It calls `POST /v1/enrolment/register/complete` with the ticket again, the
+   `challenge_id` and the credential the browser produced.
+3. The response carries the new credential. The ticket is now spent.
+
+The ticket is in the request body on both calls, never in a URL. A path reaches
+the access log of every proxy in front of the service; a body does not.
+
+Three things to know about the mechanics.
+
+**Starting the ceremony does not spend the ticket.** If the user's browser
+refuses the prompt, or they close the tab, the ticket still works until it
+expires. Only a completed registration consumes it, and the consumption records
+which credential it produced, so
+`GET /admin/v1/audit?event_type=enrolment_ticket.` tells you what each ticket
+was used for rather than only that it was used.
+
+**Issuing again revokes the previous ticket.** There is never more than one live
+ticket per subject; the schema enforces it with a partial unique index. So if a
+ticket went to the wrong mailbox, issuing a fresh one kills it. If you would
+rather not put a second secret into circulation, withdraw the first instead:
+
+```bash
+curl -sS -X POST "$BASE/admin/v1/enrolment-tickets/$TICKET_ID/revoke" \
+  -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json'
+```
+
+**Issuing over an existing factor needs an explicit override.** If the subject
+still holds an active authenticator or a confirmed TOTP secret, the call is
+refused:
+
+```
+the subject already holds an authenticator or a confirmed TOTP secret; send
+require_existing_factor=false to issue a ticket anyway
+```
+
+Read that refusal as a question: does this user really have no way in? A user
+whose TOTP secret is on a phone they no longer have does hold a factor as far as
+this service can tell, and the honest answer is to override. A user who has a
+working key and has forgotten about it does not, and issuing a ticket for them
+turns the delivery channel into an account-takeover route. Override with
+`{"reason":"...","require_existing_factor":false}`; the override is audited with
+`existing_factor_override: true` and raises the
+`enrolment_ticket.factor_override` alert, so a run of them is visible in
+`GET /admin/v1/alerts` whether or not anyone was watching at the time.
+
+A ticket for a subject who is locked or pending erasure is refused outright, and
+is not overridable. They could not redeem it, so issuing one would only put a
+live secret into a delivery channel for nothing. Lift the lock or cancel the
+erasure first.
+
+Finally, tell the user to issue themselves recovery codes once they are back on a
+key, through whatever your application exposes for it. Otherwise the next lost
+authenticator brings them back to this page.
 
 ## The dual-approval queue
 

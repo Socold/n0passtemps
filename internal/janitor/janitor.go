@@ -1,11 +1,11 @@
 // Package janitor runs the periodic maintenance the service needs in order not
 // to accumulate state it can never clear.
 //
-// Five things expire on their own and nothing on the request path removes them:
-// WebAuthn challenges whose ceremony was abandoned, throttle buckets whose
-// window has long passed, approval requests nobody decided, erasure requests
-// whose retention window has closed, and audit entries past the configured
-// retention.
+// Six things expire on their own and nothing on the request path removes them:
+// WebAuthn challenges whose ceremony was abandoned, enrolment tickets nobody
+// redeemed, throttle buckets whose window has long passed, approval requests
+// nobody decided, erasure requests whose retention window has closed, and audit
+// entries past the configured retention.
 //
 // Each sweep is independent and a failure in one must not stop the others. A
 // janitor that stops after its first error is a janitor that silently stops
@@ -112,6 +112,7 @@ func (j *Janitor) Run(ctx context.Context) {
 // Result counts what one pass removed.
 type Result struct {
 	Challenges  int64
+	Tickets     int64
 	Throttles   int64
 	Approvals   int64
 	Erasures    int64
@@ -127,7 +128,7 @@ type Result struct {
 // Every sweep runs regardless of whether an earlier one failed, and the errors
 // are collected rather than returned at the first sign of trouble. A database
 // that is briefly unavailable should produce one noisy interval, not a janitor
-// that has quietly given up on four of its five duties.
+// that has quietly given up on five of its six duties.
 func (j *Janitor) Sweep(ctx context.Context) Result {
 	ctx, cancel := context.WithTimeout(ctx, j.sweepTimeout)
 	defer cancel()
@@ -139,6 +140,18 @@ func (j *Janitor) Sweep(ctx context.Context) Result {
 		res.Errors = append(res.Errors, err)
 	} else {
 		res.Challenges = n
+	}
+
+	// Enrolment tickets are removed at their expiry, consumed and revoked ones
+	// included. A redemption arriving inside the original window has to be
+	// refused by the ticket's own state rather than by a missing row, so that a
+	// spent ticket and one that never existed are indistinguishable; past the
+	// expiry there is nothing left to be indistinguishable about, and the
+	// durable record of what happened is the audit log.
+	if n, err := j.store.DeleteExpiredEnrolmentTickets(ctx, now); err != nil {
+		res.Errors = append(res.Errors, err)
+	} else {
+		res.Tickets = n
 	}
 
 	// Throttle buckets are kept for a few windows past their expiry, so a
@@ -294,6 +307,7 @@ func (j *Janitor) checkKEK(ctx context.Context) {
 func (j *Janitor) report(ctx context.Context, res Result) {
 	attrs := []any{
 		slog.Int64("challenges", res.Challenges),
+		slog.Int64("tickets", res.Tickets),
 		slog.Int64("throttles", res.Throttles),
 		slog.Int64("approvals", res.Approvals),
 		slog.Int64("erasures", res.Erasures),
@@ -308,7 +322,7 @@ func (j *Janitor) report(ctx context.Context, res Result) {
 
 	// A pass that removed nothing is the normal case and should not produce a
 	// log line at info level every interval.
-	total := res.Challenges + res.Throttles + res.Approvals + res.Erasures + res.AuditPruned
+	total := res.Challenges + res.Tickets + res.Throttles + res.Approvals + res.Erasures + res.AuditPruned
 	if total == 0 {
 		j.log.DebugContext(ctx, "janitor pass completed", attrs...)
 		return

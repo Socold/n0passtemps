@@ -126,6 +126,7 @@ func TestRoleMatrix(t *testing.T) {
 			PermRecoveryReissue,
 			PermThrottleReset,
 			PermAlertAcknowledge,
+			PermEnrolmentTicketIssue,
 		},
 		store.RoleFull: AllPermissions,
 	}

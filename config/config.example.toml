@@ -281,6 +281,46 @@ low_watermark = 3
 
 
 # ---------------------------------------------------------------------------
+# Enrolment tickets
+# ---------------------------------------------------------------------------
+# A single-use secret that permits exactly one WebAuthn registration and never
+# produces a signed assertion. It is the way back in for a user who holds no
+# authenticator yet, or who has lost every one they had and every recovery
+# code.
+#
+# This service hands the ticket to the caller once, in the issuing response,
+# and never again. Delivering it is your application's job and your
+# application's risk: email, SMS, a printed letter, a helpdesk call reading it
+# out. That is deliberate, because the knowledge of the user and of the channel
+# lives with you and not here. Whoever controls that channel can enrol an
+# authenticator of their own until the ticket expires, which is what the two
+# settings below bound.
+[tickets]
+
+# How long a ticket may be redeemed for. Capped at 24h: a ticket meant to
+# outlive a working day is being used as a standing credential rather than as a
+# hand-off, and its lifetime is the whole window an intercepted one is good
+# for.
+ttl = "1h"
+
+# Refuse to issue a ticket for a subject who already holds an active
+# authenticator or a confirmed TOTP secret. That subject has a way in, and the
+# correct answer is to use it.
+#
+# Leave this true. A ticket issued silently for an account that already has
+# factors is an account-takeover primitive for whoever controls delivery. An
+# individual request may still override it by sending
+# require_existing_factor=false, which is the caller stating that the existing
+# factor is genuinely unusable; the override is audited and raises an alert
+# either way.
+#
+# Setting it false makes every such issuance an override. That is only
+# reasonable in a deployment that enrols users through tickets as a matter of
+# course and has accepted the consequence.
+require_existing_factor_default = true
+
+
+# ---------------------------------------------------------------------------
 # Signed assertions
 # ---------------------------------------------------------------------------
 # A successful ceremony returns a short-lived detached signature the calling
@@ -327,6 +367,53 @@ lockout_duration = "15m"
 # allowed to empty the table and be undone afterwards.
 admin_revoke_burst = 10
 
+
+# ---------------------------------------------------------------------------
+# Risk signals
+# ---------------------------------------------------------------------------
+# The service reports risk and never refuses an authentication on risk alone.
+# It knows how the subject proved themselves; the integrating application knows
+# what they are about to do, so the application decides whether to ask for
+# more.
+#
+# Nine signals, each with a weight, and two thresholds. No model, no training
+# data, no reputation feed, nothing that needs network access and nothing that
+# cannot be explained to a user who was asked for a second factor. Every signal
+# is derived from something the service already collected while completing the
+# ceremony. See docs/RISK.md for the table and the reasoning.
+[risk]
+# With this off the risk claim is omitted from the assertion entirely rather
+# than present and empty, so an application integrated against a deployment
+# that does not report risk sees the token it saw before the feature existed.
+enabled = true
+
+# The score thresholds, inclusive at the boundary. elevated_at is the weight of
+# the lightest single signal that says the ceremony proved less than a full
+# unphishable factor; high_at is double that, so it takes either one signal that
+# is evidence of an attack or the weakest factor plus the failures before it.
+elevated_at = 20
+high_at = 40
+
+# Ninety days. A spare security key is routinely unused for a quarter, so a
+# shorter window reports ordinary behaviour as a signal.
+dormant_after = "2160h"
+
+# An enrolment followed by a sign-in is one sitting, so the window only has to
+# cover one.
+new_credential_within = "1h"
+
+# Per-reason weight overrides, keyed on the reason strings. File only: the
+# weights are the policy, which belongs in the file that is committed and
+# reviewed rather than in one deployment's environment. An unknown key is
+# refused at startup, because a misspelled reason would sit here doing nothing.
+# A reason an operator wants ignored is given 0; it still appears in the claim,
+# because it did fire, and contributes nothing to the score. Negative is
+# refused: one signal cancelling another out is not something a threshold
+# policy should be able to express.
+#
+# [risk.weights]
+# totp_only = 20
+# credential_dormant = 0
 
 # ---------------------------------------------------------------------------
 # Audit log
