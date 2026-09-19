@@ -122,14 +122,19 @@ func newAdminUser(tok *store.AdminToken, creds []lib.Credential) (*subjectUser, 
 // use are one implementation serving both credential families.
 type adminCredentialWriter struct{ st store.Store }
 
+// TouchCredential records that the administrative credential was used.
 func (w adminCredentialWriter) TouchCredential(ctx context.Context, tenantID, id string, usedAt time.Time) error {
 	return w.st.TouchAdminCredential(ctx, tenantID, id, usedAt)
 }
 
+// MarkCloneWarning records a signature counter that failed to advance, which is
+// the documented signal for two copies of one private key in use.
 func (w adminCredentialWriter) MarkCloneWarning(ctx context.Context, tenantID, id string) error {
 	return w.st.MarkAdminCredentialCloneWarning(ctx, tenantID, id)
 }
 
+// AdvanceSignCount moves the counter forward, compare-and-swap against
+// expectedPrev so that two concurrent assertions cannot both advance it.
 func (w adminCredentialWriter) AdvanceSignCount(ctx context.Context, tenantID, id string, expectedPrev, next uint32,
 	usedAt time.Time) error {
 	return w.st.AdvanceAdminCredentialSignCount(ctx, tenantID, id, expectedPrev, next, usedAt)
@@ -253,6 +258,12 @@ func (s *Service) BeginAdminRegistration(ctx context.Context, tok *store.AdminTo
 }
 
 // CompleteAdminRegistration finishes an enrolment and stores the credential.
+//
+// The response has to have been collected at the console's own origin, which is
+// the one thing the library cannot check for this surface: it holds the relying
+// party's whole origin list, and that list is the integrating application's.
+// Enrolling a console passkey from a page served by the application would let
+// that page decide which key opens the console.
 func (s *Service) CompleteAdminRegistration(ctx context.Context, tok *store.AdminToken, challengeID string,
 	credentialJSON []byte, label string) (*store.AdminCredential, error) {
 	if !tok.Usable(s.now().UTC()) {
@@ -276,6 +287,9 @@ func (s *Service) CompleteAdminRegistration(ctx context.Context, tok *store.Admi
 	parsed, err := protocol.ParseCredentialCreationResponseBytes(credentialJSON)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrCeremonyFailed, err)
+	}
+	if err = s.checkAdminOrigin(parsed.Response.CollectedClientData.Origin); err != nil {
+		return nil, err
 	}
 
 	user, err := newAdminUser(tok, nil)
@@ -308,6 +322,19 @@ func (s *Service) CompleteAdminRegistration(ctx context.Context, tok *store.Admi
 		return nil, ErrCredentialExists
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return nil, fmt.Errorf("webauthn: look up credential: %w", err)
+	}
+
+	// The per-identity cap is re-read here for the reason CompleteRegistration
+	// re-reads it, and with the same limitation: it is not atomic, and the
+	// definitive form of it is a count taken inside the insert, which belongs
+	// to whoever owns the store.
+	held, listErr := s.store.ListAdminCredentials(ctx, tok.TenantID, tok.ID, false)
+	if listErr != nil {
+		return nil, fmt.Errorf("webauthn: list administrative credentials: %w", listErr)
+	}
+	if len(held) >= s.cfg.MaxCredentialsPerSubject {
+		return nil, fmt.Errorf("%w: %d of %d",
+			ErrTooManyCredentials, len(held), s.cfg.MaxCredentialsPerSubject)
 	}
 
 	rec := &store.AdminCredential{
@@ -399,6 +426,15 @@ type AdminAssertionResult struct {
 // service issued, and that comparison is also what refuses a subject's passkey
 // presented here, since a subject handle can never equal an administrative one.
 //
+// The response has to have been collected at the console's own origin, and not
+// merely at one of the relying party's. Both surfaces share a relying party
+// identifier, so an authenticator will happily produce an assertion for this
+// one on any page the application serves; without this check every origin
+// trusted to sign a user in would also be trusted to sign an administrator in,
+// and the phishing resistance the passkey was chosen for would be absent from
+// the surface that needs it most. The origin is taken from the collected client
+// data, which the authenticator signed over.
+//
 // Every refusal returns ErrCeremonyFailed, so an unknown credential, a
 // withdrawn one, a token that has expired and a token that has been revoked are
 // one answer from outside. The wrapped text names which of them it was, for the
@@ -421,6 +457,9 @@ func (s *Service) CompleteAdminAssertion(ctx context.Context, tenantID, challeng
 	parsed, err := protocol.ParseCredentialRequestResponseBytes(credentialJSON)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrCeremonyFailed, err)
+	}
+	if err = s.checkAdminOrigin(parsed.Response.CollectedClientData.Origin); err != nil {
+		return nil, err
 	}
 
 	var (

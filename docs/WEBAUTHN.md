@@ -32,9 +32,44 @@ The configuration validator enforces the relation WebAuthn actually checks:
 
 ```toml
 [webauthn]
-rp_id   = "example.com"
-origins = ["https://app.example.com", "https://admin.example.com"]
+rp_id         = "example.com"
+origins       = ["https://app.example.com", "https://admin.example.com"]
+admin_origins = ["https://admin.example.com"]
 ```
+
+## The administration console has its own origin
+
+`admin_origins` is the list the console's own ceremonies accept, and it is
+narrower than `origins` on purpose.
+
+Both surfaces are one relying party. They share `rp_id`, so an authenticator
+asked for an assertion by a page served from any origin in `origins` will
+produce one that is valid under it, and the library accepts the origin because
+it is one the relying party serves. Nothing about keeping the credentials in
+separate tables helps here: the key presented is the administrator's own. So
+without a list of its own, every origin trusted to sign a user in would also be
+trusted to sign an administrator in, and the phishing resistance the passkey was
+chosen for would be absent from the surface that needs it most.
+
+`CompleteAdminRegistration` and `CompleteAdminAssertion` therefore check the
+origin in the collected client data, which the authenticator signed over,
+against `admin_origins` and nothing else. The subject routes are unaffected and
+continue to accept every origin in `origins`.
+
+Resolution, and what happens when the setting is absent:
+
+| `origins` | `admin_origins` | Console accepts |
+|---|---|---|
+| One origin | Empty | That origin. There is no question to answer. |
+| Several | Set | Exactly what it names. The validator checks each entry is an origin under `rp_id`. |
+| Several | Empty | Nothing. Every console ceremony is refused. |
+
+The last row fails closed rather than falling back to `origins`, because
+falling back is the failure this exists to prevent and it would happen in
+silence. It is not the first thing an operator meets, either: with the interface
+enabled, the configuration validator refuses to start and says which setting to
+fill in. The server also logs the console's resolved origins when the interface
+comes up.
 
 The configured `rp_id` is written onto the challenge row and onto the credential
 it produces, so the value used at assertion is the value that was in force at
@@ -154,6 +189,42 @@ does persist the label it was given on the credential row, where it exists so an
 operator can tell one of a subject's keys from another; it takes part in no
 decision.
 
+## What the named flow tells an unauthenticated observer
+
+`POST /v1/webauthn/{subject_ref}/assert` answers differently depending on
+whether the subject exists and holds a usable credential. A subject with one
+gets a 200 and the options, which list the credential identifiers in
+`allowCredentials`. A subject that is unknown, locked, or enrolled with no
+WebAuthn credential gets a 401. Whoever can call the route can therefore
+enumerate enrolment, one reference at a time, and read back which credentials an
+enrolled subject holds.
+
+This is a deliberate trade and not an oversight, but it is worth being explicit
+about who it exposes:
+
+- The route is behind an API key. The caller is the integrating application's
+  server, not a browser, so the observer this discloses to is someone who
+  already holds that key, or the application itself.
+- The alternative, answering identically for an unknown subject, means
+  fabricating a challenge and an allow list for somebody who does not exist.
+  That is what large consumer deployments do; it costs a stored challenge per
+  probe, and it turns a refusal the application can act on into one it cannot
+  tell from a genuine failure.
+- `allowCredentials` is what the named flow is for. Removing it means the
+  browser cannot tell the user which key to present.
+
+A deployment that cannot accept the disclosure has usernameless sign-in, which
+names nobody and returns no allow list at all.
+
+`internal/webauthn` reports the three cases apart rather than deciding between
+them: `ErrNoCredentials` and `ErrSubjectInactive` say the named subject cannot
+begin a ceremony, and `ErrChallengeNotFound` says the challenge presented is not
+one this ceremony may spend, which is a statement about a value the caller
+supplied and about nothing the subject did. Which of them becomes which HTTP
+status, and which of them is charged to a subject's attempt counter, is the
+caller's decision. Charging a replayed or expired challenge to the subject is
+punishing them for somebody else's traffic.
+
 ## Usernameless sign-in
 
 A named assertion starts with the caller saying who is signing in. A
@@ -242,8 +313,36 @@ in its place.
 |---|---|
 | `attestation_preference = "none"` | The browser is asked not to convey an attestation statement. |
 | `attestation_preference = "direct"` or `"indirect"` | A statement is requested and recorded, but nothing is verified against a root unless `require_attestation` is on. |
-| `require_attestation = true` | A credential arriving with attestation type `none` or `self` is refused, and so is one that reports no model (an all-zero AAGUID). The validator refuses this setting unless `attestation_preference` is `direct` or `indirect`, and unless either `metadata_path` or `allowed_aaguids` is set, because with neither there is nothing to verify against. |
-| `metadata_path` | A FIDO Metadata Service (MDS3) BLOB on disk, loaded once at startup. The validator refuses a path it cannot read, and the loader refuses a file whose signature does not verify. Refreshing it is an operator duty. |
+| `require_attestation = true` | A credential arriving with attestation type `none` or `self` is refused, and so is one that reports no model (an all-zero AAGUID). The validator refuses this setting unless `attestation_preference` is `direct` or `indirect`, and unless `metadata_path` is set. |
+| `metadata_path` | A FIDO Metadata Service (MDS3) BLOB on disk, loaded once at startup. The validator refuses a path it cannot read; the loader refuses a file whose signature does not verify, and one long past its own `nextUpdate`. Refreshing it is an operator duty. |
+
+### Why `require_attestation` needs `metadata_path`
+
+It used to be satisfied by `allowed_aaguids` instead, and that combination
+checked nothing.
+
+Verifying an attestation statement means checking a certificate chain against
+trust anchors. The WebAuthn library's `protocol.VerifyAttestation` takes a
+metadata provider, and when it is `nil` the function returns as soon as the
+format-specific procedure has found the statement internally consistent: the
+trust path is never compared against anything, because there is nothing to
+compare it against. Software that mints an attestation certificate for itself,
+puts an allowed AAGUID in that certificate and in the authenticator data, and
+signs a well-formed `packed` statement is therefore reported as full basic
+attestation, and passes both checks this service makes. The registration
+succeeds and the operator believes a hardware key was proved.
+
+So the validator now refuses `require_attestation = true` without a
+`metadata_path`, and names the two ways out: point `metadata_path` at a BLOB, or
+turn the requirement off and keep the allow list as the inventory filter it is.
+
+**The AAGUID allow list is not a cryptographic control.** The AAGUID it matches
+on is a value carried in the response; until an attestation statement has been
+checked against a trust anchor, nothing has proved that the device reporting it
+is the model it names. The allow list keeps a fleet on the models an operator
+chose, and it stops nothing that is willing to declare an AAGUID it does not
+have. `internal/webauthn/webauthn_test.go` pins this: a forged statement with a
+borrowed AAGUID registers, and is meant to.
 
 ### The metadata BLOB
 
@@ -279,14 +378,63 @@ A stale file fails safe in one direction only. A model certified after the file
 was downloaded is unknown, and is refused under `require_attestation`. A model
 compromised after the download is still trusted, because the status report
 saying otherwise is in a newer file the service has not been given. Refreshing
-the BLOB is therefore an operator duty with a security consequence, and nothing
-in the service reminds you of it: put the refresh on the same calendar as
-certificate renewal.
+the BLOB is therefore an operator duty with a security consequence. The payload
+declares its own `nextUpdate`, and the loader reads it: a file more than 90 days
+past that date is refused at startup with a message naming the date, because
+past that point the status reports it carries are old enough that a withdrawn
+model would still be accepted as sound. The FIDO Alliance publishes monthly, so
+an ordinary maintenance cycle never comes near the limit; put the refresh on the
+same calendar as certificate renewal.
+
+Loading the BLOB makes no outbound request. While it verifies the signature
+chain, the library's decoder asks `github.com/go-webauthn/x/revoke` about each
+certificate, and that package would fetch the CRL distribution points and OCSP
+responders each certificate names. The service replaces the client it uses with
+one that refuses to dial. Two reasons: a deployment that drops outbound packets
+rather than rejecting them would wait for every one of those connections to time
+out before finishing startup, and the certificates whose URLs would be dialled
+come out of a file that has not yet been shown to chain to the FIDO root,
+because the revocation check runs before the chain is verified. The file would
+therefore choose the destination. Nothing is lost by refusing: the check already
+failed soft, so with egress denied every answer was "could not tell" and the
+BLOB loaded regardless. What replaces it is the signature over the payload, the
+status reports inside it, and the freshness bound above.
+
+### The attestation type, stored and read back
 
 The attestation type the library reports is normalised onto the six values the
 schema's `CHECK` constraint permits: `basic` and `basic_full` become `basic`,
 `self` and `basic_surrogate` become `self`, `attca` and `anonca` keep their
 names, `indirect` stays, and anything else becomes `none`.
+
+Reading it back has to undo that, and for a while it did not. With a BLOB
+loaded, `ValidateLogin` runs `protocol.ValidateMetadata` on **every** assertion,
+comparing the credential's attestation type against the `attestationTypes` of
+the model's entry. Those entries say `basic_full` and `basic_surrogate`; the
+column says `basic` and `self`. Handing the stored spelling straight back
+matched nothing, so a key registered successfully under a metadata BLOB and then
+could never sign in again, which is the sort of failure that ends with an
+operator turning metadata verification off altogether.
+
+`libAttestation` is now the inverse of `normaliseAttestation`, and the pair has
+to stay one. Nothing about what is written changed, so this needed no migration
+and a row written by an earlier build reads back exactly as one written today.
+
+The statement format is not stored, and there is no column for it. It is named
+as `none` for a credential stored as unattested, and left empty otherwise. That
+matters for the deployment that turns attestation on after people have enrolled:
+`ValidateMetadata` returns immediately for the `none` format, which is the right
+answer, because an attestation of none carries no proof and the AAGUID beside it
+is a claim rather than an identification. Without that, every credential
+enrolled while `attestation_preference` was `"none"` would be looked up in the
+BLOB and refused for having no entry.
+
+**The neighbouring case is deliberately left refusing.** Turning
+`require_attestation` on for a population that already holds *attested* keys
+will lock out every one whose model the BLOB does not describe, at sign-in
+rather than at startup. That is the setting doing what it says. Enrol a second
+factor for those users, or check the BLOB covers the models in use, before
+turning it on.
 
 ### The AAGUID allow list
 
@@ -360,6 +508,25 @@ Recording the use matters for the constant-zero case in particular. Most
 passkeys report zero for ever, and a review of dormant credentials that read
 `last_used_at` would otherwise list every one of them as never used.
 
+### Refusing a regression instead of recording it
+
+`webauthn.refuse_sign_count_regression` is off by default. With it on, a counter
+strictly **below** a stored value that is not zero refuses the assertion with
+`ErrCeremonyFailed`, after the clone warning has been written, so the durable
+record is the same as under the permissive behaviour.
+
+The case it covers is narrow on purpose. No correct authenticator produces a
+counter that moves backwards: a counter advances, or it is absent and stays at
+zero. A counter that merely stalled at its stored value is left alone, because
+that is what every counter-less passkey does on every assertion, and refusing it
+would lock out most of the population.
+
+The cost of turning it on is a user whose authenticator has been restored from a
+backup, or replaced under warranty with its secrets migrated. They are locked
+out until an operator revokes the credential and they enrol again. That is the
+trade the setting exists to let a deployment make; it is not the default because
+turning it on changes who can sign in.
+
 Replay of an assertion is prevented by the challenge, which is consumed
 atomically, so two concurrent completions of the same assertion have exactly one
 winner. Where the authenticator has a counter, the compare-and-swap on it is a
@@ -420,6 +587,19 @@ says so.
 `webauthn.max_credentials_per_subject` credentials, default 10, so a compromised
 API key cannot quietly add an unbounded number of authenticators. The refusal is
 a 409 with `the subject has reached the credential limit`.
+
+The count is read again at completion, immediately before the insert. On its own
+the check at `begin` is advisory: it is taken at the start of a ceremony the
+caller may hold open for as long as the challenge lives, so N ceremonies begun
+together all see the same count, all pass, and all N completions store a
+credential. Re-reading narrows the window to the gap between that read and the
+insert.
+
+**It is still not atomic**, and it cannot be made so from the ceremony layer.
+The guarantee wanted is a count taken inside the transaction that inserts, which
+means a conditional insert in the store; until that exists a determined caller
+can still exceed the cap by a small number. The same applies to the console's
+enrolment, which shares the setting.
 
 The subject's existing credentials are passed as `excludeCredentials`, so an
 authenticator already enrolled cannot be enrolled twice and the browser can tell

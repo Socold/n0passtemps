@@ -6,11 +6,16 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
+	"time"
 
 	"github.com/fxamacker/cbor/v2"
 )
@@ -86,6 +91,15 @@ type virtualAuthenticator struct {
 	// of a random one. A hostile client can submit any identifier it likes,
 	// including one it observed belonging to somebody else.
 	nextCredentialID []byte
+
+	// forgePackedAttestation makes create produce a packed attestation
+	// statement (section 8.2) signed by a certificate this device made up,
+	// instead of the empty "none" statement. The library reports such a
+	// statement as attestation type "basic_full", because the format-specific
+	// verifier only checks that the statement is internally consistent; that
+	// the certificate chains to nothing is a question only a trust anchor can
+	// ask. It is what software pretending to be a hardware key produces.
+	forgePackedAttestation bool
 
 	// last is the credential most recently created, so a test can compare
 	// what the service stored against what the device actually holds.
@@ -211,19 +225,26 @@ func (a *virtualAuthenticator) create(options any) ([]byte, error) {
 	// authenticatorGetAssertion moves it.
 	authData := a.authenticatorData(pk.RP.ID, flagAttestedData, a.currentCounter(), attested.Bytes())
 
-	// Attestation format "none", section 8.7: an empty statement, which is
-	// what a browser substitutes when the relying party asked for no
-	// attestation.
-	attObj, err := ctap2Encode(map[string]any{
-		"fmt":      "none",
-		"attStmt":  map[string]any{},
-		"authData": authData,
-	})
+	// The client data comes first because a packed statement signs over it.
+	clientData, err := a.clientDataJSON("webauthn.create", pk.Challenge)
 	if err != nil {
 		return nil, err
 	}
 
-	clientData, err := a.clientDataJSON("webauthn.create", pk.Challenge)
+	statement := map[string]any{
+		// Attestation format "none", section 8.7: an empty statement, which is
+		// what a browser substitutes when the relying party asked for no
+		// attestation.
+		"fmt":      "none",
+		"attStmt":  map[string]any{},
+		"authData": authData,
+	}
+	if a.forgePackedAttestation {
+		if statement, err = a.packedStatement(authData, clientData); err != nil {
+			return nil, err
+		}
+	}
+	attObj, err := ctap2Encode(statement)
 	if err != nil {
 		return nil, err
 	}
@@ -323,6 +344,80 @@ func (a *virtualAuthenticator) get(options any) ([]byte, error) {
 			"userHandle":        base64.RawURLEncoding.EncodeToString(cred.userHandle),
 		},
 	})
+}
+
+// oidFIDOGenCeAAGUID is id-fido-gen-ce-aaguid, the certificate extension
+// section 8.2.1 uses to name the authenticator model an attestation
+// certificate speaks for.
+var oidFIDOGenCeAAGUID = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 45724, 1, 1, 4}
+
+// packedStatement builds a packed attestation statement signed by a
+// certificate this device generated for itself.
+//
+// Everything section 8.2.1 requires of the certificate is present, including
+// the extension naming the AAGUID, and the signature over
+// authenticatorData || SHA-256(clientDataJSON) verifies against it. What is
+// absent is any reason to believe the certificate: it is self-signed and chains
+// to nothing. A relying party with no trust anchors cannot tell the difference,
+// which is the whole point of the test that uses this.
+func (a *virtualAuthenticator) packedStatement(authData, clientData []byte) (map[string]any, error) {
+	attestationKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("authenticator: generate attestation key: %w", err)
+	}
+
+	aaguidExtension, err := asn1.Marshal(a.aaguid[:])
+	if err != nil {
+		return nil, fmt.Errorf("authenticator: encode aaguid extension: %w", err)
+	}
+
+	// Section 8.2.1 requires four subject attributes, and they are written
+	// here as the object identifiers the certificate actually carries: a
+	// country, the vendor's legal name, the literal string "Authenticator
+	// Attestation" as the organisational unit, and a common name of the
+	// vendor's choosing.
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{ExtraNames: []pkix.AttributeTypeAndValue{
+			{Type: asn1.ObjectIdentifier{2, 5, 4, 6}, Value: "SE"},
+			{Type: asn1.ObjectIdentifier{2, 5, 4, 10}, Value: "Plausible Security AB"},
+			{Type: asn1.ObjectIdentifier{2, 5, 4, 11}, Value: "Authenticator Attestation"},
+			{Type: asn1.ObjectIdentifier{2, 5, 4, 3}, Value: "Plausible Security Attestation"},
+		}},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		BasicConstraintsValid: true,
+		IsCA:                  false,
+		ExtraExtensions: []pkix.Extension{{
+			Id:       oidFIDOGenCeAAGUID,
+			Critical: false,
+			Value:    aaguidExtension,
+		}},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template,
+		&attestationKey.PublicKey, attestationKey)
+	if err != nil {
+		return nil, fmt.Errorf("authenticator: create attestation certificate: %w", err)
+	}
+
+	clientDataHash := sha256.Sum256(clientData)
+	signed := append(append([]byte(nil), authData...), clientDataHash[:]...)
+	digest := sha256.Sum256(signed)
+	signature, err := ecdsa.SignASN1(rand.Reader, attestationKey, digest[:])
+	if err != nil {
+		return nil, fmt.Errorf("authenticator: sign attestation: %w", err)
+	}
+
+	return map[string]any{
+		"fmt": "packed",
+		"attStmt": map[string]any{
+			// -7 is ES256, RFC 9053 table 5.
+			"alg": -7,
+			"sig": signature,
+			"x5c": []any{der},
+		},
+		"authData": authData,
+	}, nil
 }
 
 // clientDataJSON is the browser's contribution (section 5.8.1). The origin is

@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Socold/n0passtemps/internal/config"
 	"github.com/Socold/n0passtemps/internal/store"
 	"github.com/Socold/n0passtemps/internal/webauthn"
 )
@@ -80,6 +81,132 @@ func (f *fixture) adminAssert(a *virtualAuthenticator) (*webauthn.AdminAssertion
 		f.t.Fatalf("authenticator get: %v", err)
 	}
 	return f.svc.CompleteAdminAssertion(f.ctx, testTenant, begin.ChallengeID, resp)
+}
+
+// testAppOrigin and testConsoleOrigin are the two surfaces of one relying
+// party: the origin the integrating application serves its front end from, and
+// the one the console is served from. Both are under testRPID, so an
+// authenticator will produce a response for either.
+const (
+	testAppOrigin     = "https://app.login.example.test"
+	testConsoleOrigin = "https://console.login.example.test"
+)
+
+// twoOriginFixture is a deployment whose relying party serves both surfaces,
+// with the console named as its own.
+func twoOriginFixture(t *testing.T, tune ...func(*config.WebAuthn)) *fixture {
+	t.Helper()
+	return newFixture(t, append([]func(*config.WebAuthn){func(c *config.WebAuthn) {
+		c.Origins = []string{testAppOrigin, testConsoleOrigin}
+		c.AdminOrigins = []string{testConsoleOrigin}
+	}}, tune...)...)
+}
+
+// TestTheConsoleIsHeldToItsOwnOrigin is the property a passkey is chosen for,
+// stated for the surface that needs it most.
+//
+// The two surfaces share a relying party identifier, so a page served by the
+// integrating application can ask an authenticator for an assertion that is
+// valid under it, and the library will accept the origin because it is one the
+// relying party serves. Nothing about the credential separation helps: the key
+// presented is the administrator's own. Only the console's own origin list
+// refuses it, and without that refusal any origin trusted to sign a user in
+// would be trusted to sign an administrator in.
+func TestTheConsoleIsHeldToItsOwnOrigin(t *testing.T) {
+	t.Run("an enrolment from the application's origin is refused", func(t *testing.T) {
+		f := twoOriginFixture(t)
+		tok := f.adminToken("Owner", store.RoleFull)
+
+		_, err := f.adminRegister(tok, f.authenticatorAt(testAppOrigin, modelA))
+		if !errors.Is(err, webauthn.ErrCeremonyFailed) {
+			t.Fatalf("enrolment from the application's origin returned %v, want ErrCeremonyFailed: "+
+				"the page enrolling the key would decide which key opens the console", err)
+		}
+		creds, err := f.store.ListAdminCredentials(f.ctx, testTenant, tok.ID, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(creds) != 0 {
+			t.Errorf("the refused enrolment stored %d credential(s)", len(creds))
+		}
+	})
+
+	t.Run("a sign-in from the application's origin is refused", func(t *testing.T) {
+		f := twoOriginFixture(t)
+		tok := f.adminToken("Owner", store.RoleFull)
+
+		// The key is enrolled properly, from the console, so the only thing
+		// wrong with the sign-in below is where it was collected.
+		key := f.authenticatorAt(testConsoleOrigin, modelA)
+		f.mustAdminRegister(tok, key)
+
+		relayed := f.authenticatorAt(testAppOrigin, modelA)
+		relayed.credentials = key.credentials
+
+		_, err := f.adminAssert(relayed)
+		if !errors.Is(err, webauthn.ErrCeremonyFailed) {
+			t.Fatalf("console sign-in from the application's origin returned %v, want "+
+				"ErrCeremonyFailed", err)
+		}
+		if !strings.Contains(err.Error(), testAppOrigin) {
+			t.Errorf("refusal reason = %q, want one naming the origin, for the audit entry", err)
+		}
+	})
+
+	t.Run("the console's own origin still works", func(t *testing.T) {
+		// Without this the two cases above would pass against a console that
+		// refuses everything.
+		f := twoOriginFixture(t)
+		tok := f.adminToken("Owner", store.RoleFull)
+		key := f.authenticatorAt(testConsoleOrigin, modelA)
+		f.mustAdminRegister(tok, key)
+
+		result, err := f.adminAssert(key)
+		if err != nil {
+			t.Fatalf("a sign-in from the console's own origin was refused: %v", err)
+		}
+		if result.Token.ID != tok.ID {
+			t.Errorf("resolved token = %q, want %q", result.Token.ID, tok.ID)
+		}
+	})
+}
+
+// TestAConsoleWithNoOriginOfItsOwnRefusesEveryCeremony pins the direction the
+// resolution fails in.
+//
+// A deployment serving several origins has to say which one the console is on.
+// Until it does, falling back to the relying party's whole list would be the
+// failure this exists to prevent, arrived at quietly; refusing is visible, and
+// the configuration validator has already said so at startup.
+func TestAConsoleWithNoOriginOfItsOwnRefusesEveryCeremony(t *testing.T) {
+	f := newFixture(t, func(c *config.WebAuthn) {
+		c.Origins = []string{testAppOrigin, testConsoleOrigin}
+	})
+	tok := f.adminToken("Owner", store.RoleFull)
+
+	_, err := f.adminRegister(tok, f.authenticatorAt(testConsoleOrigin, modelA))
+	if !errors.Is(err, webauthn.ErrCeremonyFailed) {
+		t.Fatalf("enrolment with no console origin configured returned %v, want ErrCeremonyFailed", err)
+	}
+	if !strings.Contains(err.Error(), "admin_origins") {
+		t.Errorf("refusal reason = %q, want the setting an operator has to fill in", err)
+	}
+}
+
+// TestASingleOriginDeploymentNeedsNoConsoleOriginSetting covers the common case.
+// With one origin there is no question to answer, and the console is held to it.
+func TestASingleOriginDeploymentNeedsNoConsoleOriginSetting(t *testing.T) {
+	f := newFixture(t)
+	if got := f.svc.AdminOrigins(); len(got) != 1 || got[0] != testOrigin {
+		t.Fatalf("console origins = %v, want the single configured origin %q", got, testOrigin)
+	}
+
+	tok := f.adminToken("Owner", store.RoleFull)
+	key := f.authenticator(modelA)
+	f.mustAdminRegister(tok, key)
+	if _, err := f.adminAssert(key); err != nil {
+		t.Fatalf("a console sign-in on a single-origin deployment was refused: %v", err)
+	}
 }
 
 func TestAdminEnrolmentThenSignInResolvesTheTokenAndItsRole(t *testing.T) {

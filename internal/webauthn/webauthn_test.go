@@ -133,6 +133,12 @@ func (f *fixture) authenticator(model uuid.UUID) *virtualAuthenticator {
 	return newVirtualAuthenticator(testOrigin, [16]byte(model))
 }
 
+// authenticatorAt is the same device behind a page served from somewhere else,
+// which is what a relying party with more than one origin has to reason about.
+func (f *fixture) authenticatorAt(origin string, model uuid.UUID) *virtualAuthenticator {
+	return newVirtualAuthenticator(origin, [16]byte(model))
+}
+
 // register runs a whole registration ceremony and returns its result.
 func (f *fixture) register(sub *store.Subject, a *virtualAuthenticator) (*store.Credential, error) {
 	f.t.Helper()
@@ -927,6 +933,47 @@ func TestRequiredAttestationRefusesFormatNone(t *testing.T) {
 	}
 }
 
+// TestAForgedAttestationWithABorrowedAAGUIDRegisters pins what the AAGUID allow
+// list is, so that nobody mistakes it for what it is not.
+//
+// The device here is software. It mints an attestation certificate for itself,
+// puts model A's AAGUID in the certificate and in the authenticator data, and
+// signs a well-formed packed statement. The library reports attestation type
+// "basic_full", because with no trust anchors the format's verification
+// procedure has nothing to compare the certificate against, and the allow list
+// sees a model it was told to accept. The registration succeeds, and it should:
+// an allow list filters an inventory, it does not authenticate one.
+//
+// The control that would refuse this is a metadata BLOB, which the
+// configuration validator now requires before require_attestation can be turned
+// on. Without one, a deployment that wants assurance about which devices are in
+// use has to get it from procurement rather than from this setting.
+func TestAForgedAttestationWithABorrowedAAGUIDRegisters(t *testing.T) {
+	f := newFixture(t, func(c *config.WebAuthn) {
+		c.AttestationPreference = "direct"
+		c.AllowedAAGUIDs = []string{modelA.String()}
+	})
+	sub := f.subject("alice@example.test", "Alice")
+
+	a := f.authenticator(modelA)
+	a.forgePackedAttestation = true
+
+	cred, err := f.register(sub, a)
+	if err != nil {
+		t.Fatalf("the forged attestation was refused by %v. If a check was added that refuses "+
+			"it without a metadata blob, this test is the one to rewrite: say what the new "+
+			"check is rather than deleting the record of what the allow list does not do", err)
+	}
+	if cred.AttestationType != store.AttestationBasic {
+		t.Errorf("stored attestation type = %q, want %q: the library reports a packed "+
+			"statement with a certificate chain as full basic attestation, whatever signed it",
+			cred.AttestationType, store.AttestationBasic)
+	}
+	if !bytes.Equal(cred.AAGUID, modelA[:]) {
+		t.Errorf("stored AAGUID = %x, want the borrowed %x", cred.AAGUID, modelA[:])
+	}
+}
+
 func TestCredentialLimitExcludeListAndCrossSubjectUniqueness(t *testing.T) {
 	f := newFixture(t, func(c *config.WebAuthn) { c.MaxCredentialsPerSubject = 2 })
 	alice := f.subject("alice@example.test", "Alice")
@@ -988,6 +1035,119 @@ func TestCredentialLimitExcludeListAndCrossSubjectUniqueness(t *testing.T) {
 	if stored := f.storedCredential(firstCred.ID); stored.SubjectID != alice.ID || !bytes.Equal(stored.PublicKey, firstCred.PublicKey) {
 		t.Error("the refused registration altered Alice's credential")
 	}
+}
+
+// TestCeremoniesBegunTogetherCannotAllStoreACredential covers the cap that
+// BeginRegistration alone does not enforce.
+//
+// The count it reads is taken at the start of a ceremony the caller may hold
+// open for as long as the challenge lives, so three ceremonies begun while the
+// subject holds nothing are all allowed, and three completions would leave the
+// subject holding three under a limit of two.
+func TestCeremoniesBegunTogetherCannotAllStoreACredential(t *testing.T) {
+	f := newFixture(t, func(c *config.WebAuthn) { c.MaxCredentialsPerSubject = 2 })
+	sub := f.subject("alice@example.test", "Alice")
+
+	type pending struct {
+		challengeID string
+		response    []byte
+	}
+	var open []pending
+	for i := 0; i < 3; i++ {
+		begin, err := f.svc.BeginRegistration(f.ctx, sub, "")
+		if err != nil {
+			t.Fatalf("ceremony %d was refused at begin: all three are begun while the subject "+
+				"holds nothing, so all three pass the check there: %v", i, err)
+		}
+		resp, err := f.authenticator(modelA).create(begin.Options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		open = append(open, pending{challengeID: begin.ChallengeID, response: resp})
+	}
+
+	for i, p := range open[:2] {
+		if _, err := f.svc.CompleteRegistration(f.ctx, sub, p.challengeID, p.response, ""); err != nil {
+			t.Fatalf("completion %d, within the limit of 2, was refused: %v", i, err)
+		}
+	}
+
+	_, err := f.svc.CompleteRegistration(f.ctx, sub, open[2].challengeID, open[2].response, "")
+	if !errors.Is(err, webauthn.ErrTooManyCredentials) {
+		t.Errorf("the third completion returned %v, want ErrTooManyCredentials", err)
+	}
+	creds, err := f.store.ListCredentials(f.ctx, testTenant, sub.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(creds) != 2 {
+		t.Errorf("the subject holds %d credentials under a limit of 2", len(creds))
+	}
+}
+
+// TestSignCountRegressionIsRefusedOnlyUnderThePolicy covers the optional
+// refusal and, as much as that, what it deliberately leaves alone.
+func TestSignCountRegressionIsRefusedOnlyUnderThePolicy(t *testing.T) {
+	t.Run("a counter that went backwards is refused", func(t *testing.T) {
+		f := newFixture(t, func(c *config.WebAuthn) { c.RefuseSignCountRegression = true })
+		sub := f.subject("alice@example.test", "Alice")
+		a := f.authenticator(modelA)
+		cred := f.mustRegister(sub, a)
+
+		a.forceCounter(50)
+		f.mustAssert(sub, a)
+
+		a.forceCounter(7)
+		if _, err := f.assert(sub, a); !errors.Is(err, webauthn.ErrCeremonyFailed) {
+			t.Fatalf("a counter that went from 50 to 7 returned %v, want ErrCeremonyFailed", err)
+		}
+
+		stored := f.storedCredential(cred.ID)
+		if !stored.CloneWarning {
+			t.Error("the refusal left no clone warning on the credential, so the only durable " +
+				"record of what happened is gone once the response is sent")
+		}
+		if stored.SignCount != 50 {
+			t.Errorf("stored counter is %d, want 50: a refused assertion must not move it", stored.SignCount)
+		}
+	})
+
+	t.Run("a counter that merely stalled still succeeds", func(t *testing.T) {
+		// This is what every counter-less passkey does on every assertion, and
+		// what a policy that refused it would lock out.
+		f := newFixture(t, func(c *config.WebAuthn) { c.RefuseSignCountRegression = true })
+		sub := f.subject("alice@example.test", "Alice")
+		a := f.authenticator(modelA)
+		f.mustRegister(sub, a)
+
+		a.forceCounter(50)
+		f.mustAssert(sub, a)
+
+		a.forceCounter(50)
+		out, err := f.assert(sub, a)
+		if err != nil {
+			t.Fatalf("an assertion whose counter stalled at its stored value was refused: %v", err)
+		}
+		if !out.CloneWarning {
+			t.Error("a stalled counter raised no clone warning")
+		}
+	})
+
+	t.Run("the default is unchanged", func(t *testing.T) {
+		f := newFixture(t)
+		sub := f.subject("alice@example.test", "Alice")
+		a := f.authenticator(modelA)
+		f.mustRegister(sub, a)
+
+		a.forceCounter(50)
+		f.mustAssert(sub, a)
+
+		a.forceCounter(7)
+		if _, err := f.assert(sub, a); err != nil {
+			t.Fatalf("a regressed counter was refused with the policy off (%v): turning the "+
+				"policy on has to be what changes the behaviour", err)
+		}
+	})
 }
 
 func TestRevokedCredentialCannotAssert(t *testing.T) {
@@ -1379,4 +1539,54 @@ func userHandleOf(t *testing.T, subjectID string) []byte {
 		t.Fatalf("subject identifier is not a uuid: %v", err)
 	}
 	return append([]byte(nil), id[:]...)
+}
+
+// revokingStore revokes a credential at the moment its clone warning is
+// recorded, which is the instant between the listing an assertion starts with
+// and the write it ends with.
+type revokingStore struct {
+	store.Store
+	now func() time.Time
+}
+
+func (r *revokingStore) MarkCloneWarning(ctx context.Context, tenantID, id string) error {
+	if err := r.Store.RevokeCredential(ctx, tenantID, id, "revoked mid-ceremony", r.now()); err != nil {
+		return err
+	}
+	return r.Store.MarkCloneWarning(ctx, tenantID, id)
+}
+
+// TestACredentialRevokedDuringAStuckCounterAssertionDoesNotAssert closes the
+// one branch that let a revocation go unnoticed.
+//
+// The counterless branch and the advancing branch both refuse a credential that
+// was revoked while the ceremony ran. The branch for a counter that did not
+// advance ignored it, and that is the branch a copied key lands in.
+func TestACredentialRevokedDuringAStuckCounterAssertionDoesNotAssert(t *testing.T) {
+	f := newFixture(t)
+	sub := f.subject("alice@example.test", "Alice")
+	a := f.authenticator(modelA)
+	f.mustRegister(sub, a)
+
+	// Establish a stored counter of 5, then answer a second challenge with the
+	// same value, which is what a copy of the key does.
+	a.forceCounter(5)
+	f.mustAssert(sub, a)
+	a.forceCounter(5)
+
+	svc, err := webauthn.New(f.cfg, &revokingStore{Store: f.store, now: f.clock.now}, f.clock.now)
+	if err != nil {
+		t.Fatalf("build service: %v", err)
+	}
+	begin, err := svc.BeginAssertion(f.ctx, sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := a.get(begin.Options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CompleteAssertion(f.ctx, sub, begin.ChallengeID, resp); !errors.Is(err, webauthn.ErrCeremonyFailed) {
+		t.Fatalf("assertion on a credential revoked mid-ceremony = %v, want ErrCeremonyFailed", err)
+	}
 }

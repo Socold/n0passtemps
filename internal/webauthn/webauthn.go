@@ -55,6 +55,19 @@ import (
 // ceremony did not complete, not which check refused it: telling an attacker
 // whether the challenge was unknown, the origin wrong or the signature invalid
 // turns the endpoint into an oracle for probing the configuration.
+//
+// Two of them are the exception, and the distinction is drawn on purpose so
+// that the decision belongs to the caller rather than to this package.
+// ErrChallengeNotFound says the challenge is not one this ceremony may spend,
+// which is a statement about a value the caller supplied and about nothing the
+// subject did; an attempt counter that charges it to the subject is punishing
+// them for somebody else's replay. ErrNoCredentials and ErrSubjectInactive say
+// the named subject cannot begin a ceremony at all, which is a fact about
+// enrolment: a caller that turns them into a different response from a
+// successful begin has told whoever asked whether that subject holds a key.
+// Which of the two matters more is a deployment's judgement, and both answers
+// are defensible; what this package owes the caller is the ability to choose,
+// so it reports them apart and decides nothing.
 var (
 	ErrCeremonyFailed     = errors.New("webauthn: ceremony failed")
 	ErrChallengeNotFound  = errors.New("webauthn: challenge is unknown, expired or already used")
@@ -74,21 +87,32 @@ type Service struct {
 
 	allowed map[string]struct{}
 	blocked map[string]struct{}
+
+	// adminOrigins is the console's own origin list, resolved once. See
+	// resolveAdminOrigins for how it is derived and why it is narrower than
+	// the relying party's.
+	adminOrigins []string
+
+	// metadataNextUpdate is the nextUpdate the loaded BLOB declares, or the
+	// zero time when none is configured.
+	metadataNextUpdate time.Time
 }
 
 // New builds a Service from the validated configuration.
 //
 // The AAGUID policy is compiled into sets here rather than being re-parsed on
-// every ceremony. An allow list is the offline-friendly alternative to full
-// attestation verification: it restricts registration to named authenticator
-// models without needing the FIDO Metadata Service, and therefore without
-// needing network egress.
+// every ceremony. Note what that policy is and is not: it filters on a value
+// the registration response declares, so it keeps a fleet on the models an
+// operator chose, and it stops nothing that is willing to declare an AAGUID it
+// does not have. The control that requires proof is a metadata BLOB, which is
+// why the configuration validator will not accept require_attestation without
+// one.
 func New(cfg config.WebAuthn, st store.Store, clock func() time.Time) (*Service, error) {
 	if clock == nil {
 		clock = time.Now
 	}
 
-	mds, err := loadMetadata(cfg)
+	mds, nextUpdate, err := loadMetadata(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -97,8 +121,10 @@ func New(cfg config.WebAuthn, st store.Store, clock func() time.Time) (*Service,
 		RPID:          cfg.RPID,
 		RPDisplayName: cfg.RPDisplayName,
 		RPOrigins:     cfg.Origins,
-		// Nil when no metadata file is configured, which leaves attestation
-		// statements checked for internal consistency only.
+		// Nil when no metadata file is configured. The library's
+		// VerifyAttestation returns as soon as the statement is internally
+		// consistent when this is nil, so with no BLOB nothing is checked
+		// against a trust anchor at all.
 		MDS: mds,
 		Timeouts: lib.TimeoutsConfig{
 			Login: lib.TimeoutConfig{
@@ -116,12 +142,14 @@ func New(cfg config.WebAuthn, st store.Store, clock func() time.Time) (*Service,
 	}
 
 	s := &Service{
-		rp:      rp,
-		cfg:     cfg,
-		store:   st,
-		now:     clock,
-		allowed: toAAGUIDSet(cfg.AllowedAAGUIDs),
-		blocked: toAAGUIDSet(cfg.BlockedAAGUIDs),
+		rp:                 rp,
+		cfg:                cfg,
+		store:              st,
+		now:                clock,
+		allowed:            toAAGUIDSet(cfg.AllowedAAGUIDs),
+		blocked:            toAAGUIDSet(cfg.BlockedAAGUIDs),
+		adminOrigins:       resolveAdminOrigins(cfg),
+		metadataNextUpdate: nextUpdate,
 	}
 	return s, nil
 }
@@ -129,6 +157,19 @@ func New(cfg config.WebAuthn, st store.Store, clock func() time.Time) (*Service,
 // RPID reports the configured relying party identifier, for the health report
 // and the admin interface.
 func (s *Service) RPID() string { return s.cfg.RPID }
+
+// AdminOrigins reports the origins a console ceremony will accept, so that an
+// operator can see which of the relying party's origins the administration
+// interface is held to without reading the configuration back.
+func (s *Service) AdminOrigins() []string { return slices.Clone(s.adminOrigins) }
+
+// MetadataNextUpdate reports the date the loaded metadata BLOB declares as the
+// latest it will be superseded, or the zero time when none is configured.
+//
+// It exists so a health report can say how old the trust anchors are. A BLOB
+// far enough past this date is refused at startup, so a service that is running
+// has one within the tolerance; what this reports is how much of it is left.
+func (s *Service) MetadataNextUpdate() time.Time { return s.metadataNextUpdate }
 
 // subjectUser adapts a store.Subject to the library's user interface.
 //
@@ -145,11 +186,25 @@ type subjectUser struct {
 	credentials []lib.Credential
 }
 
-func (u *subjectUser) WebAuthnID() []byte                    { return u.id }
-func (u *subjectUser) WebAuthnName() string                  { return u.name }
-func (u *subjectUser) WebAuthnDisplayName() string           { return u.displayName }
+// The five accessors of the library's user interface. See the type's comment
+// for why the name and display name carry no personal identifier.
+
+// WebAuthnID returns the opaque user handle the authenticator stores.
+func (u *subjectUser) WebAuthnID() []byte { return u.id }
+
+// WebAuthnName returns the account name shown by the authenticator.
+func (u *subjectUser) WebAuthnName() string { return u.name }
+
+// WebAuthnDisplayName returns the human-readable name shown beside it.
+func (u *subjectUser) WebAuthnDisplayName() string { return u.displayName }
+
+// WebAuthnCredentials returns the credentials already registered to the subject.
 func (u *subjectUser) WebAuthnCredentials() []lib.Credential { return u.credentials }
-func (u *subjectUser) WebAuthnIcon() string                  { return "" }
+
+// WebAuthnIcon is empty. The interface predates its removal from the
+// specification, and serving a URL here would tell the authenticator's vendor
+// which deployment a user belongs to.
+func (u *subjectUser) WebAuthnIcon() string { return "" }
 
 // newUser builds the library user for a subject.
 //
@@ -231,6 +286,9 @@ func (s *Service) BeginRegistration(ctx context.Context, subject *store.Subject,
 		return nil, fmt.Errorf("%w: %d of %d",
 			ErrTooManyCredentials, len(existing), s.cfg.MaxCredentialsPerSubject)
 	}
+	// CompleteRegistration checks the same thing again before it stores
+	// anything, because this count is read at the start of a ceremony the
+	// caller may hold open for as long as the challenge lives.
 
 	exclude := make([]protocol.CredentialDescriptor, 0, len(existing))
 	for _, c := range existing {
@@ -337,6 +395,22 @@ func (s *Service) CompleteRegistration(ctx context.Context, subject *store.Subje
 		return nil, ErrCredentialExists
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return nil, fmt.Errorf("webauthn: look up administrative credential: %w", err)
+	}
+
+	// The cap is checked again here, as close to the insertion as this package
+	// can get. BeginRegistration checks it too, and on its own that check is
+	// only advisory: N ceremonies begun together each see the same count and
+	// each are allowed, and the N completions that follow all store a
+	// credential. Re-reading now closes the window to the gap between this
+	// listing and the insert below rather than to the whole span of a ceremony.
+	//
+	// It is still not atomic, and cannot be made so from here: the guarantee
+	// wanted is a count taken inside the transaction that inserts, which means
+	// a conditional insert in the store. That belongs to whoever owns the
+	// store, and until it exists a determined caller can still exceed the cap
+	// by a small number.
+	if err := s.checkCredentialCap(ctx, subject.TenantID, subject.ID); err != nil {
+		return nil, err
 	}
 
 	rec := &store.Credential{
@@ -577,8 +651,33 @@ func (s *Service) recordAssertion(ctx context.Context, w credentialWriter, rec *
 		if err := w.MarkCloneWarning(ctx, rec.TenantID, rec.ID); err != nil {
 			return nil, fmt.Errorf("webauthn: record clone warning: %w", err)
 		}
-		err := w.TouchCredential(ctx, rec.TenantID, rec.ID, usedAt)
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
+		// A counter strictly below a stored value that is not zero is the one
+		// case no correct authenticator produces: a counter advances, or it is
+		// absent and stays at zero. An operator who has decided that the
+		// likeliest explanation is a copy of the key, rather than a device
+		// restored from a backup, may refuse it. The warning is written first,
+		// so the refusal leaves the same durable record the permissive
+		// behaviour does.
+		//
+		// The presented value is read from the authenticator data of this
+		// ceremony rather than from the credential the library returns, for
+		// the reason the user-verified flag is: the library declines to lower
+		// the counter it was given, so the record it hands back still holds
+		// the stored value and a regression is invisible in it.
+		presented := parsed.Response.AuthenticatorData.Counter
+		if s.cfg.RefuseSignCountRegression && rec.SignCount != 0 && presented < rec.SignCount {
+			return nil, fmt.Errorf("%w: the signature counter went from %d to %d, and "+
+				"webauthn.refuse_sign_count_regression is on",
+				ErrCeremonyFailed, rec.SignCount, presented)
+		}
+		if err := w.TouchCredential(ctx, rec.TenantID, rec.ID, usedAt); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				// Revoked between the listing and now, as in the branch above,
+				// and here of all places: a counter that did not advance is
+				// what a copy of the key produces, and revoking is what an
+				// operator does about one.
+				return nil, ErrCeremonyFailed
+			}
 			return nil, fmt.Errorf("webauthn: record credential use: %w", err)
 		}
 	} else {
@@ -832,6 +931,23 @@ func (s *Service) consumeChallenge(ctx context.Context, tenantID, challengeID st
 	return c, &session, nil
 }
 
+// checkCredentialCap re-reads how many credentials a subject holds and refuses
+// a further one.
+//
+// See the call site in CompleteRegistration for why the count is taken twice
+// and for what this still does not guarantee.
+func (s *Service) checkCredentialCap(ctx context.Context, tenantID, subjectID string) error {
+	held, err := s.store.ListCredentials(ctx, tenantID, subjectID, false)
+	if err != nil {
+		return fmt.Errorf("webauthn: list credentials: %w", err)
+	}
+	if len(held) >= s.cfg.MaxCredentialsPerSubject {
+		return fmt.Errorf("%w: %d of %d",
+			ErrTooManyCredentials, len(held), s.cfg.MaxCredentialsPerSubject)
+	}
+	return nil
+}
+
 // checkAuthenticatorModel applies the AAGUID policy.
 func (s *Service) checkAuthenticatorModel(c *lib.Credential) error {
 	id := formatAAGUID(c.Authenticator.AAGUID)
@@ -915,6 +1031,10 @@ func bindingHashFrom(c *lib.Credential, rpID string) []byte {
 
 // normaliseAttestation maps the library's attestation type vocabulary onto the
 // values the schema's CHECK constraint permits.
+//
+// libAttestation is its inverse and has to stay one. The pair is what lets a
+// credential be handed back to the library in the vocabulary the library
+// itself uses, which matters on every assertion; see that function.
 func normaliseAttestation(s string) store.AttestationType {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "basic", "basic_full":
@@ -932,6 +1052,55 @@ func normaliseAttestation(s string) store.AttestationType {
 	}
 }
 
+// libAttestation renders a stored attestation type in the vocabulary the
+// library uses, and names the statement format where the stored value
+// determines it.
+//
+// This is not cosmetic. With a metadata BLOB loaded, every assertion runs
+// protocol.ValidateMetadata, which compares the type it is given against the
+// attestationTypes of the model's MDS entry. Those entries say "basic_full"
+// and "basic_surrogate"; the column says "basic" and "self", because that is
+// what its CHECK constraint permits. Handing the stored spelling straight back
+// therefore matches nothing, and a key that registered successfully could never
+// sign in again, which is the sort of failure that ends with an operator
+// turning metadata verification off.
+//
+// The inverse is exact for everything the library produces. It only ever emits
+// the long forms; the short ones normaliseAttestation also accepts are there to
+// absorb a value that has already been through this service once. The storage
+// convention is unchanged by any of this, so a row written by an earlier build
+// reads back exactly as a row written today, and no migration is needed for
+// one.
+//
+// The format is not stored, and there is no column to put it in. It costs
+// nothing for the four attested types, where the library uses it only to
+// recognise a fido-u2f credential for the AppID extension. It is worth naming
+// for "none": ValidateMetadata returns immediately for that format, which is
+// the right answer, because an attestation of none carries no proof and the
+// AAGUID beside it is a claim rather than an identification. Without the format
+// the same credential is instead looked up in the BLOB, and under
+// require_attestation a model with no entry is refused, so credentials enrolled
+// before an operator turned attestation on would stop working at sign-in.
+func libAttestation(t store.AttestationType) (attestationType, attestationFormat string) {
+	switch t {
+	case store.AttestationBasic:
+		return "basic_full", ""
+	case store.AttestationSelf:
+		return "basic_surrogate", ""
+	case store.AttestationAttCA:
+		return "attca", ""
+	case store.AttestationAnonCA:
+		return "anonca", ""
+	case store.AttestationNone:
+		return "none", "none"
+	}
+	// store.AttestationIndirect, and anything a later schema adds. "indirect"
+	// is a conveyance preference rather than an attestation type and the
+	// library has no such type, so the honest answer is to claim nothing: an
+	// empty type skips the comparison instead of failing it.
+	return "", ""
+}
+
 // toLibCredential converts a stored credential for the library.
 //
 // Two stored values are deliberately NOT passed through, because the library
@@ -941,11 +1110,13 @@ func normaliseAttestation(s string) store.AttestationType {
 // stored values remain on the record for an operator to read; the outcome of a
 // ceremony describes that ceremony only.
 func toLibCredential(c *store.Credential) lib.Credential {
+	attestationType, attestationFormat := libAttestation(c.AttestationType)
 	return lib.Credential{
-		ID:              c.CredentialID,
-		PublicKey:       c.PublicKey,
-		AttestationType: string(c.AttestationType),
-		Transport:       toTransports(c.Transports),
+		ID:                c.CredentialID,
+		PublicKey:         c.PublicKey,
+		AttestationType:   attestationType,
+		AttestationFormat: attestationFormat,
+		Transport:         toTransports(c.Transports),
 		Flags: lib.CredentialFlags{
 			// Backup eligibility is a fixed property of the credential and
 			// the library checks that it never changes, so it is passed.
@@ -987,6 +1158,67 @@ func formatAAGUID(b []byte) string {
 	var id uuid.UUID
 	copy(id[:], b)
 	return id.String()
+}
+
+// resolveAdminOrigins decides which origins the console's own ceremonies
+// accept.
+//
+// The configured list wins when there is one. When there is not, a deployment
+// serving a single origin is unambiguous and that origin is used: the console
+// is served from it because there is nowhere else it could be served from.
+// Anything else resolves to nothing, and nothing means the console refuses
+// every ceremony rather than falling back to the relying party's whole list.
+// Falling back would be the failure this exists to prevent, quietly; refusing
+// is visible on the first sign-in attempt, and the configuration validator has
+// already said so at startup.
+func resolveAdminOrigins(cfg config.WebAuthn) []string {
+	if len(cfg.AdminOrigins) > 0 {
+		return normaliseOrigins(cfg.AdminOrigins)
+	}
+	if len(cfg.Origins) == 1 {
+		return normaliseOrigins(cfg.Origins)
+	}
+	return nil
+}
+
+// normaliseOrigins puts configured origins into the form a browser writes them
+// in the collected client data: lower case, and with no trailing slash.
+//
+// The configuration validator has already checked that each is a scheme, a host
+// and an optional port, so this is about the two differences a human writing
+// TOML introduces rather than about parsing.
+func normaliseOrigins(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, o := range in {
+		out = append(out, normaliseOrigin(o))
+	}
+	return out
+}
+
+func normaliseOrigin(o string) string {
+	return strings.ToLower(strings.TrimRight(strings.TrimSpace(o), "/"))
+}
+
+// checkAdminOrigin refuses a console ceremony whose response was collected
+// somewhere other than the console's own origin.
+//
+// The origin comes from the collected client data, which the authenticator
+// signed over, so a response relayed from another page carries that page's
+// origin and cannot be made to carry this one. The library has already checked
+// the same value against the relying party's whole origin list; this is the
+// narrower check the console needs and the library has no way to know about.
+func (s *Service) checkAdminOrigin(origin string) error {
+	if len(s.adminOrigins) == 0 {
+		// See resolveAdminOrigins: an unanswered question fails closed.
+		return fmt.Errorf("%w: the administration interface has no origin of its own "+
+			"configured, so no console ceremony can be completed; set webauthn.admin_origins",
+			ErrCeremonyFailed)
+	}
+	if slices.Contains(s.adminOrigins, normaliseOrigin(origin)) {
+		return nil
+	}
+	return fmt.Errorf("%w: the response was collected at %q, which is not an origin the "+
+		"administration interface is served from", ErrCeremonyFailed, origin)
 }
 
 func toAAGUIDSet(in []string) map[string]struct{} {
