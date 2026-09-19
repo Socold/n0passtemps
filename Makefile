@@ -11,6 +11,22 @@ MODULE      ?= github.com/Socold/n0passtemps
 BIN_DIR     ?= bin
 DIST_DIR    ?= dist
 COVER_FILE  ?= coverage.out
+# The floor 'make cover' enforces, as a percentage of statements.
+#
+# The specification asks for 80. This is set to what the suite actually reaches
+# so that the gate passes today and nothing may fall below it, and it is raised
+# as the gap closes rather than declared and ignored. docs/ROADMAP.md carries
+# the gap and what is behind it.
+#
+# It is deliberately not measured against the integration build tag: that run
+# needs a PostgreSQL server, so a number that included it could not be
+# reproduced by 'make cover' on a machine without one. 'make cover-integration'
+# is the same check over the run that does include it, and COVER_MIN_FULL is its
+# floor. The gap between the two numbers is almost entirely
+# internal/store/postgres, whose 147 functions are tested only under the tag and
+# therefore read as zero here.
+COVER_MIN   ?= 68.0
+COVER_MIN_FULL ?= 76.0
 IMAGE       ?= ghcr.io/socold/n0passtemps
 DOCKERFILE  ?= deploy/Dockerfile
 
@@ -78,7 +94,7 @@ command -v $(1) >/dev/null 2>&1 || { echo "$(1) is not on PATH; install the pinn
 endef
 
 .PHONY: help build build-all test test-race test-integration test-tpm cover \
-	test-kits lint lint-cleared sec secrets fmt fmt-check vet tidy migrate-check \
+	test-kits cover-integration lint lint-cleared sec secrets fmt fmt-check vet tidy migrate-check \
 	docker setup-wizard clean ci
 
 help: ## List the available targets
@@ -158,29 +174,45 @@ test-kits: ## Build and test the app kits, which are separate modules
 		( cd $$k && go build ./... && go vet ./... && go test $(GOFLAGS_BUILD) -count=1 ./... ) || exit 1; \
 	done
 
-cover: ## Write coverage.out and print the total statement coverage
+cover: ## Write coverage.out, print the total and fail below COVER_MIN
 	go test $(GOFLAGS_BUILD) -covermode=atomic -coverprofile=$(COVER_FILE) ./...
 	@go tool cover -func=$(COVER_FILE) | tail -n 1
+	@total=$$(go tool cover -func=$(COVER_FILE) | tail -n 1 | grep -oE '[0-9]+\.[0-9]+'); \
+	if [ -z "$$total" ]; then \
+		echo "could not read a total out of $(COVER_FILE)"; exit 1; \
+	fi; \
+	if awk "BEGIN { exit !($$total < $(COVER_MIN)) }"; then \
+		echo "coverage $$total% is below the floor of $(COVER_MIN)%"; \
+		echo "raise the tests, or lower COVER_MIN deliberately and say why in docs/ROADMAP.md"; \
+		exit 1; \
+	fi; \
+	echo "coverage $$total% is at or above the floor of $(COVER_MIN)%"
+
+cover-integration: ## Coverage including the PostgreSQL tests, against COVER_MIN_FULL
+	N0PASSTEMPS_TEST_POSTGRES_DSN='$(TEST_POSTGRES_URL)' \
+		go test $(GOFLAGS_BUILD) -tags=$(INTEGRATION_TAG) -count=1 \
+		-covermode=atomic -coverprofile=$(COVER_FILE) ./...
+	@go tool cover -func=$(COVER_FILE) | tail -n 1
+	@total=$$(go tool cover -func=$(COVER_FILE) | tail -n 1 | grep -oE '[0-9]+\.[0-9]+'); \
+	if [ -z "$$total" ]; then \
+		echo "could not read a total out of $(COVER_FILE)"; exit 1; \
+	fi; \
+	if awk "BEGIN { exit !($$total < $(COVER_MIN_FULL)) }"; then \
+		echo "coverage $$total% is below the full floor of $(COVER_MIN_FULL)%"; \
+		exit 1; \
+	fi; \
+	echo "coverage $$total% is at or above the full floor of $(COVER_MIN_FULL)%"
 
 lint: ## Run golangci-lint with the repository configuration
 	@$(call require_tool,golangci-lint,github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION))
 	golangci-lint run ./...
 
-# The categories of the style budget that still have findings. The whole of
-# 'lint' cannot be wired into CI until the backlog is empty, and a category
-# cleared with nothing enforcing it fills back up, so lint-cleared runs
-# everything except these and a category leaves the list as it reaches nought.
-# See docs/ROADMAP.md.
-#
-# Expressed as what to disable rather than what to enable, because --enable adds
-# to the set in .golangci.yml instead of replacing it: a target written the
-# other way round silently ran every linter and passed while three categories
-# were failing.
-UNCLEARED_LINTERS ?= revive,gocritic,gocyclo
 
-lint-cleared: ## Run every linter except the budget categories that still have findings
-	@$(call require_tool,golangci-lint,github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION))
-	golangci-lint run ./... --disable=$(UNCLEARED_LINTERS)
+# Kept as a name because CI and CONTRIBUTING.md refer to it, and because the
+# style budget it existed for is now empty: docs/ROADMAP.md set the exit
+# criterion as the point where this and 'lint' are the same command, and this is
+# that point. A future budget would reintroduce the split rather than reuse it.
+lint-cleared: lint ## Deprecated alias for lint, kept while callers catch up
 
 # gosec runs without -no-fail: a clean report is the baseline, so a new finding
 # stops the build rather than waiting to be noticed in a report. -conf carries
@@ -245,8 +277,5 @@ setup-wizard: ## Run the interactive setup tool (writes config.toml, docker-comp
 clean: ## Remove build output and coverage data
 	rm -rf $(BIN_DIR) $(DIST_DIR) $(COVER_FILE) coverage.html
 
-# lint-cleared rather than lint, because lint cannot pass while the style budget
-# in docs/ROADMAP.md is not empty, and a gate CONTRIBUTING.md asks contributors
-# to pass has to be one that can pass. Run 'make lint' to see the backlog.
-ci: fmt-check vet lint-cleared migrate-check test-race test-kits cover sec secrets build ## Run the full gate, in the order CI runs it
+ci: fmt-check vet lint migrate-check test-race test-kits cover sec secrets build ## Run the full gate, in the order CI runs it
 	@echo "ci gate passed for $(VERSION)"

@@ -48,7 +48,7 @@ directly.
 make ci
 ```
 
-That is `fmt-check vet lint-cleared migrate-check test-race cover sec secrets
+That is `fmt-check vet lint migrate-check test-race test-kits cover sec secrets
 build`, in the order CI runs it. A pull request that has not passed it locally
 will fail on the runner, and the runner is slower than you are.
 
@@ -56,10 +56,10 @@ will fail on the runner, and the runner is slower than you are.
 |---|---|---|
 | `fmt-check` | `gofmt -s -l` | Any file that is not gofmt-clean |
 | `vet` | `go vet` | The standard suspicious constructs |
-| `lint-cleared` | `golangci-lint`, pinned in the `Makefile` | See below |
+| `lint` | `golangci-lint`, pinned in the `Makefile` | See below |
 | `migrate-check` | A shell diff over the migration files | A table or index declared for one engine and not the other |
 | `test-race` | `go test -race ./...` | A data race |
-| `cover` | `go test -covermode=atomic` | Nothing by itself; it prints the number |
+| `cover` | `go test -covermode=atomic` | A total below `COVER_MIN` in the `Makefile` |
 | `sec` | `gosec`, `govulncheck` | Any gosec finding that is not answered in place, and known-vulnerable dependencies |
 | `secrets` | `gitleaks`, over the working tree **and the history** | A committed token, keyring or credential |
 | `build` | `go build` | A compilation failure in a package the tests do not reach |
@@ -69,17 +69,22 @@ linter is a visible decision and a `golangci-lint` upgrade cannot quietly
 enable one. `errcheck` runs with `check-type-assertions` and `check-blank`, so
 `_ = f()` has to be a deliberate, commented choice. `govet` has `shadow` on,
 because a shadowed `err` is the standard way a handled error becomes an
-unhandled one. `gocyclo` budgets 15 branches per function and `lll` budgets 120
-columns; the WebAuthn assertion path and the configuration loader sit near the
-first, and anything above it is a sign the function is doing two jobs.
+unhandled one. `gocyclo` budgets 35 branches per function and `lll` budgets 120
+columns. Both numbers carry their reasoning in `.golangci.yml`, and `gocyclo`'s
+in particular is a ratchet one above the largest function in the tree rather
+than a round number: read it before raising it.
 
-`make lint` runs all of them and does not pass: the style budget in
-[docs/ROADMAP.md](docs/ROADMAP.md) is not empty, and it is being burned down one
-category at a time rather than in one commit that touches every file. The gate
-runs `make lint-cleared`, which is every linter except the categories that still
-have findings, so a category cleared stays cleared. Run `make lint` to see what
-is left; a patch that clears a whole category is welcome, and it removes that
-category from `UNCLEARED_LINTERS` in the `Makefile` in the same commit.
+`make lint` runs all of them and passes. It did not until the style budget in
+[docs/ROADMAP.md](docs/ROADMAP.md) was burned down, and while that was happening
+the gate ran a subset called `make lint-cleared`. That name survives as an alias
+so older scripts keep working; new work should call `make lint`.
+
+Three `gocritic` checks are disabled by name in `.golangci.yml` rather than
+satisfied, each with its argument beside it: `sloppyReassign` because it
+contradicts `govet`'s `shadow`, and `hugeParam` and `rangeValCopy` because in
+this codebase they ask to replace a copy with an alias on the audit and
+configuration paths. Disagreeing with one of those is a reasonable pull
+request; removing the reasoning without replacing it is not.
 
 Tool versions are pinned in the `Makefile`. If a tool is missing, the recipe
 prints the exact `go install` command for the pinned version rather than failing

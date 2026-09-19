@@ -71,3 +71,11 @@ kek.txt
 # Python bytecode from the examples
 __pycache__/
 *.pyc
+
+# What building the SDKs for publication leaves behind. The release workflow
+# does this on a runner, but a maintainer checking a release locally runs the
+# same commands in the working tree.
+sdk/python/dist/
+sdk/python/build/
+*.egg-info/
+sdk/node/*.tgz
