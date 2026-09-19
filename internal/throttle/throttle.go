@@ -8,6 +8,11 @@
 // corporate NAT gateway the moment a single colleague fails twice. Only the
 // conjunction bounds both the attacker and the blast radius.
 //
+// The per-subject limit is kept per authentication factor as well. Anybody can
+// fail a ceremony on somebody else's behalf, since the subject reference is not
+// a secret, and one bucket for every factor would let wrong TOTP codes lock a
+// user out of the passkey nobody can forge. See Factor.
+//
 // Buckets are addressed by a key derived from a hash of the domain-separated
 // tuple (dimension, tenant, value) rather than by concatenating the three into
 // a readable string. A scheme such as "subject:" + id is forgeable whenever the
@@ -66,6 +71,31 @@ const (
 	DimEnrolmentTicket Dimension = "enrolment_ticket"
 )
 
+// Factor names the authentication factor a per-subject bucket counts for.
+//
+// A subject is identified by a reference that is not a secret, so anybody who
+// knows it can fail on the subject's behalf. With one bucket for every factor,
+// ten wrong TOTP codes would lock the subject out of WebAuthn as well, and the
+// factor that cannot be guessed would be switched off by failing at the one
+// that can. Each factor therefore has a budget of its own, and exhausting one
+// leaves the others usable.
+//
+// The enrolment ticket is not listed: it already has a dimension of its own,
+// keyed on the ticket selector rather than on the subject.
+type Factor string
+
+// The factors. The empty factor addresses the bucket releases before this type
+// existed wrote to, which ResetSubject still clears.
+const (
+	FactorWebAuthn Factor = "webauthn"
+	FactorTOTP     Factor = "totp"
+	FactorRecovery Factor = "recovery"
+)
+
+// subjectFactors lists every factor a subject may hold a bucket under, the
+// empty one included, so that ResetSubject can derive each key.
+var subjectFactors = []Factor{"", FactorWebAuthn, FactorTOTP, FactorRecovery}
+
 // dimensionOrder fixes the evaluation order.
 //
 // Ranging over the caller's map would report a different dimension on each
@@ -89,6 +119,10 @@ type Limiter struct {
 	store store.ThrottleStore
 	cfg   config.Throttle
 	now   func() time.Time
+
+	// factor selects which of a subject's buckets DimSubject addresses. It is
+	// set by ForFactor and empty on the Limiter New returns.
+	factor Factor
 }
 
 // New returns a Limiter reading its thresholds from cfg.
@@ -100,6 +134,19 @@ func New(s store.ThrottleStore, cfg config.Throttle, clock func() time.Time) *Li
 		clock = time.Now
 	}
 	return &Limiter{store: s, cfg: cfg, now: clock}
+}
+
+// ForFactor returns a Limiter whose per-subject dimension addresses the bucket
+// kept for factor. Every other dimension is unaffected.
+//
+// It is a view rather than a parameter of Check and Record because the factor
+// is a property of the route, fixed for the whole ceremony, and threading it
+// through every call would give each call site a chance to disagree with the
+// one before it about which bucket the ceremony is counted in.
+func (l *Limiter) ForFactor(factor Factor) *Limiter {
+	view := *l
+	view.factor = factor
+	return &view
 }
 
 // Result reports what a check or a record decided.
@@ -115,6 +162,12 @@ type Result struct {
 	Dimension  Dimension
 	Attempts   int
 	Failures   int
+
+	// Advisory says the budget named by Dimension was used up and deliberately
+	// not enforced. The attempt is allowed, and the caller reports the crossing
+	// as it reports a lockout, minus the lockout. See locksOut for the one case
+	// that sets it.
+	Advisory bool
 
 	// Counters reports what every dimension the call actually touched stood
 	// at, keyed by dimension. Dimension, Attempts and Failures above name one
@@ -195,6 +248,17 @@ func (l *Limiter) Check(ctx context.Context, tenantID string, dims map[Dimension
 // A successful attempt still counts towards the volume limits, since volume is
 // what bounds a leaked API key, but only a failure counts towards a lockout: a
 // user who authenticates fifty times in an afternoon has done nothing wrong.
+// A success therefore never applies a failure lockout, whatever the counter
+// stands at. It used to: a bucket the janitor had not swept yet, or one whose
+// lockout was shorter than its window, still held its failures, and the user
+// who finally got their code right was locked out by the request that proved
+// who they were.
+//
+// A success also clears the failures of the buckets that belong to the one
+// party that just authenticated, which are the per-subject bucket of the factor
+// and the enrolment ticket. It never clears a shared one: an attacker holding
+// one working account could otherwise wipe the count of their own network
+// between two rounds of guessing at somebody else's.
 //
 // Every dimension is recorded before any is judged. Returning as soon as the
 // first threshold trips would leave the remaining counters short, and an
@@ -212,11 +276,6 @@ func (l *Limiter) Record(ctx context.Context, tenantID string, dims map[Dimensio
 
 	now := l.now()
 
-	type observed struct {
-		dim Dimension
-		key string
-		st  *store.ThrottleState
-	}
 	seen := make([]observed, 0, len(dims))
 
 	for _, dim := range dimensionOrder {
@@ -246,7 +305,6 @@ func (l *Limiter) Record(ctx context.Context, tenantID string, dims map[Dimensio
 		seen = append(seen, observed{dim: dim, key: key, st: st})
 	}
 
-	lockout := l.cfg.LockoutDuration.Duration
 	refused := Result{Allowed: true}
 	counters := make(map[Dimension]Counter, len(seen))
 	for _, o := range seen {
@@ -254,38 +312,343 @@ func (l *Limiter) Record(ctx context.Context, tenantID string, dims map[Dimensio
 	}
 
 	for _, o := range seen {
-		if o.st.Blocked(now) {
-			// The bucket was already blocked when the attempt arrived. The
-			// attempt is still counted, so continued hammering stays visible
-			// in the bucket rather than disappearing behind the block.
-			if refused.Allowed {
-				refused = blockedResult(o.dim, o.st, o.st.BlockedUntil.Sub(now))
-			}
-			continue
-		}
-
-		maxAttempts, maxFailures, err := l.limits(o.dim)
+		verdict, err := l.judge(ctx, tenantID, o, now, failure)
 		if err != nil {
 			return Result{}, err
 		}
-		crossed := (maxFailures > 0 && o.st.Failures >= maxFailures) ||
-			(maxAttempts > 0 && o.st.Attempts >= maxAttempts)
-		if !crossed {
-			if refused.Allowed {
-				refused = keepClosest(refused, o.dim, o.st)
-			}
-			continue
-		}
-
-		if err := l.store.Block(ctx, tenantID, o.key, now.Add(lockout)); err != nil {
-			return Result{}, fmt.Errorf("throttle: block bucket for dimension %s: %w", o.dim, err)
-		}
-		if refused.Allowed {
-			refused = blockedResult(o.dim, o.st, lockout)
+		switch {
+		case !refused.Allowed:
+			// The first refusal is the one reported. The loop carries on so
+			// that every remaining bucket is still judged and blocked.
+		case !verdict.Allowed:
+			refused = verdict
+		case verdict.Advisory && !refused.Advisory:
+			// Allowed, and still the thing worth reporting. It outranks the
+			// nearest-threshold summary below, which describes a budget nobody
+			// has used up.
+			refused = verdict
+		case refused.Advisory:
+			// An advisory crossing is already held. Dimensions are judged in a
+			// fixed order, so the first one keeps the report.
+		default:
+			refused = keepClosest(refused, o.dim, o.st)
 		}
 	}
 
 	return withCounters(refused, counters), nil
+}
+
+// observed is one bucket as an attempt left it.
+type observed struct {
+	dim Dimension
+	key string
+	st  *store.ThrottleState
+}
+
+// judge decides what one recorded bucket means for the attempt that was just
+// counted in it, and applies the lockout when a threshold has been crossed.
+func (l *Limiter) judge(ctx context.Context, tenantID string, o observed, now time.Time, failure bool) (Result,
+	error) {
+	if o.st.Blocked(now) {
+		// The bucket was already blocked when the attempt arrived. The attempt
+		// is still counted, so continued hammering stays visible in the bucket
+		// rather than disappearing behind the block.
+		return blockedResult(o.dim, o.st, o.st.BlockedUntil.Sub(now)), nil
+	}
+
+	maxAttempts, maxFailures, err := l.limits(o.dim)
+	if err != nil {
+		return Result{}, err
+	}
+
+	if o.dim == DimAPIKey {
+		// A rate limit and not a lockout. The ceiling is there to bound what a
+		// leaked key achieves, and a block on top of it would make an
+		// integrating application that ran hot for one minute unavailable to
+		// every one of its users for a further lockout_duration. The refusal
+		// lasts until the window rolls and no longer, and the request that
+		// reaches the ceiling is served: a ceiling of N means N requests.
+		if maxAttempts > 0 && o.st.Attempts > maxAttempts {
+			return rateLimitedResult(o.dim, o.st, o.st.WindowStart.Add(l.cfg.Window.Duration).Sub(now)), nil
+		}
+		return Result{Allowed: true}, nil
+	}
+
+	// The failure threshold is read only when this attempt was a failure. See
+	// the doc comment on Record for what judging it on a success used to do.
+	crossed := (failure && maxFailures > 0 && o.st.Failures >= maxFailures) ||
+		(maxAttempts > 0 && o.st.Attempts >= maxAttempts)
+	if !crossed {
+		if !failure && ownedByOneParty(o.dim) && o.st.Failures > 0 {
+			err = l.clear(ctx, tenantID, o)
+		}
+		return Result{Allowed: true}, err
+	}
+
+	if !l.locksOut(o.dim) {
+		return advisoryResult(o.dim, o.st), nil
+	}
+
+	lockout := l.cfg.LockoutDuration.Duration
+	if err = l.store.Block(ctx, tenantID, o.key, now.Add(lockout)); err != nil {
+		return Result{}, fmt.Errorf("throttle: block bucket for dimension %s: %w", o.dim, err)
+	}
+	return blockedResult(o.dim, o.st, lockout), nil
+}
+
+// locksOut reports whether crossing the budget of this bucket should stop the
+// subject from authenticating, rather than only be counted and reported.
+//
+// Every bucket locks out except one: the per-subject budget of the WebAuthn
+// factor. Nothing in that ceremony is guessed. An assertion is refused unless
+// it carries a signature by a key the authenticator holds, so failing ten of
+// them proves only that somebody sent ten wrong answers, and anybody who knows
+// a subject reference can send them: beginning an assertion for a subject and
+// completing it with rubbish would lock that person out of the factor they use
+// every day, from a page they do not control, for as long as it was kept up.
+//
+// The failures are still counted, still reach internal/risk as a signal, and
+// still raise the same alert, because an operator does want to know somebody is
+// doing this. What is withheld is the refusal, which in this dimension only
+// ever served the attacker. Volume stays bounded by the per-address and per-key
+// limits, which apply here as everywhere.
+func (l *Limiter) locksOut(dim Dimension) bool {
+	return !(dim == DimSubject && l.factor == FactorWebAuthn)
+}
+
+// advisoryResult reports a budget crossed on a bucket that does not lock out.
+func advisoryResult(dim Dimension, st *store.ThrottleState) Result {
+	return Result{
+		Allowed: true, Advisory: true, Dimension: dim,
+		Attempts: st.Attempts, Failures: st.Failures,
+	}
+}
+
+// ownedByOneParty reports whether a bucket of this dimension counts the
+// attempts made in the name of exactly one party, so that a success by that
+// party may clear it.
+func ownedByOneParty(dim Dimension) bool {
+	return dim == DimSubject || dim == DimEnrolmentTicket
+}
+
+// clear forgets a bucket after a success.
+//
+// The row is removed rather than zeroed, which is the only clearing the store
+// offers. The counters reported to the caller are the ones read before the
+// removal, so risk reporting still sees the failures that preceded the success.
+func (l *Limiter) clear(ctx context.Context, tenantID string, o observed) error {
+	err := l.store.ResetThrottle(ctx, tenantID, o.key)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("throttle: clear bucket for dimension %s: %w", o.dim, err)
+	}
+	return nil
+}
+
+// Reservation is an attempt that has been counted before its outcome is known.
+//
+// See Reserve. Exactly one of Fail and Succeed is called on it, once.
+type Reservation struct {
+	limiter  *Limiter
+	tenantID string
+	now      time.Time
+
+	// held are the buckets the attempt was counted in as a failure.
+	held []observed
+
+	// shared are the dimensions that were only checked, and that are recorded
+	// once the outcome is known.
+	shared map[Dimension]string
+}
+
+// Reserve refuses an attempt that is over its budget and otherwise counts it,
+// as a failure, before the caller evaluates it.
+//
+// Check followed by Record leaves the evaluation of the secret between the two.
+// Every request of a parallel burst then passes Check before the first of them
+// has recorded anything, and a budget of ten guesses at a six-digit code
+// becomes a budget of however many connections the attacker opens. Counting the
+// attempt first closes that: the store's Hit is one atomic statement, so the
+// requests of a burst are handed consecutive counts, and only those whose count
+// is within the budget are evaluated. The pessimistic count is then confirmed
+// by Fail or taken back by Succeed.
+//
+// Only the buckets owned by one party are reserved, which are the per-subject
+// bucket of the factor and the enrolment ticket. Taking a reservation back
+// means clearing the bucket, since the store has no operation that subtracts
+// one failure, and clearing is only right where a success is supposed to clear
+// anyway. The address dimension is checked here and recorded when the outcome
+// is known, as Check and Record would do. A burst can therefore overshoot the
+// per-address budget by the number of requests in flight, but it cannot
+// overshoot the per-subject one, and that is the one which bounds guessing.
+//
+// An attempt that arrives while a block is in force is refused before it is
+// counted. Counting it would let anybody extend a lockout for as long as they
+// cared to keep sending requests into it.
+func (l *Limiter) Reserve(ctx context.Context, tenantID string, dims map[Dimension]string) (*Reservation, Result,
+	error) {
+	if !l.cfg.Enabled {
+		return &Reservation{}, Result{Allowed: true}, nil
+	}
+
+	checked, err := l.Check(ctx, tenantID, dims)
+	if err != nil {
+		return nil, Result{}, err
+	}
+	if !checked.Allowed {
+		return nil, checked, nil
+	}
+
+	rv := &Reservation{limiter: l, tenantID: tenantID, now: l.now(), shared: make(map[Dimension]string, len(dims))}
+	for _, dim := range dimensionOrder {
+		value, ok := dims[dim]
+		if !ok {
+			continue
+		}
+		if !ownedByOneParty(dim) {
+			rv.shared[dim] = value
+			continue
+		}
+		value = normaliseValue(dim, value)
+		if value == "" {
+			continue
+		}
+
+		key := l.BucketKey(dim, tenantID, value)
+		var owner string
+		if dim == DimSubject {
+			owner = value
+		}
+		st, hitErr := l.store.Hit(ctx, tenantID, key, owner, l.cfg.Window.Duration, rv.now, true)
+		if hitErr != nil {
+			return nil, Result{}, fmt.Errorf("throttle: reserve attempt for dimension %s: %w", dim, hitErr)
+		}
+		rv.held = append(rv.held, observed{dim: dim, key: key, st: st})
+	}
+
+	// Judged only once every bucket has been hit, for the reason Record gives.
+	refused := Result{Allowed: true}
+	for _, o := range rv.held {
+		verdict, judgeErr := l.judgeReserved(ctx, tenantID, o, rv.now)
+		if judgeErr != nil {
+			return nil, Result{}, judgeErr
+		}
+		if refused.Allowed && !verdict.Allowed {
+			refused = verdict
+		}
+	}
+	if !refused.Allowed {
+		return nil, withCounters(refused, checked.Counters), nil
+	}
+	return rv, withCounters(Result{Allowed: true}, checked.Counters), nil
+}
+
+// judgeReserved refuses a reservation whose count is past the budget.
+//
+// The comparison is strict where Record's is not. A budget of ten means ten
+// evaluated attempts, so the reservation that is handed the count of ten is
+// evaluated, and it is Fail that applies the lockout if it turns out wrong. The
+// one handed eleven is refused without being evaluated, and blocks the bucket
+// itself in case none of the ten in flight ever reports back.
+func (l *Limiter) judgeReserved(ctx context.Context, tenantID string, o observed, now time.Time) (Result, error) {
+	if o.st.Blocked(now) {
+		return blockedResult(o.dim, o.st, o.st.BlockedUntil.Sub(now)), nil
+	}
+	_, maxFailures, err := l.limits(o.dim)
+	if err != nil {
+		return Result{}, err
+	}
+	if maxFailures <= 0 || o.st.Failures <= maxFailures {
+		return Result{Allowed: true}, nil
+	}
+
+	if !l.locksOut(o.dim) {
+		return advisoryResult(o.dim, o.st), nil
+	}
+
+	lockout := l.cfg.LockoutDuration.Duration
+	if err = l.store.Block(ctx, tenantID, o.key, now.Add(lockout)); err != nil {
+		return Result{}, fmt.Errorf("throttle: block bucket for dimension %s: %w", o.dim, err)
+	}
+	return blockedResult(o.dim, o.st, lockout), nil
+}
+
+// Fail confirms the reservation: the attempt was evaluated and was wrong.
+//
+// The reserved buckets already hold the failure, so nothing is added to them.
+// What remains is to apply the lockout when this failure was the one that used
+// up the budget, and to record the failure against the shared dimensions. The
+// result reads as Record's does, so a refusal in it means a limit has just
+// tripped.
+func (rv *Reservation) Fail(ctx context.Context) (Result, error) {
+	if rv == nil || rv.limiter == nil {
+		return Result{Allowed: true}, nil
+	}
+	l := rv.limiter
+
+	res, err := l.Record(ctx, rv.tenantID, rv.shared, true)
+	if err != nil {
+		return Result{}, err
+	}
+
+	counters := make(map[Dimension]Counter, len(rv.held)+len(res.Counters))
+	for dim, c := range res.Counters {
+		counters[dim] = c
+	}
+	tripped := Result{Allowed: true}
+	for _, o := range rv.held {
+		counters[o.dim] = Counter{Attempts: o.st.Attempts, Failures: o.st.Failures}
+		verdict, judgeErr := l.judge(ctx, rv.tenantID, o, rv.now, true)
+		if judgeErr != nil {
+			return Result{}, judgeErr
+		}
+		switch {
+		case tripped.Allowed && !verdict.Allowed:
+			tripped = verdict
+		case tripped.Allowed && !tripped.Advisory && verdict.Advisory:
+			// Allowed and worth reporting; a refusal on a later bucket still
+			// replaces it.
+			tripped = verdict
+		}
+	}
+	if !tripped.Allowed || tripped.Advisory {
+		res = tripped
+	}
+	return withCounters(res, counters), nil
+}
+
+// Succeed takes the reservation back: the attempt was evaluated and was right.
+//
+// The reserved buckets are cleared, which both removes the pessimistic failure
+// and gives the party that just authenticated a fresh budget. The counters in
+// the result are those that preceded this attempt, the reserved failure taken
+// out, because that is what risk reporting asks about.
+//
+// Clearing also lifts a block that a request racing this one applied after it
+// found the budget spent. That is accepted: the attempt being confirmed here
+// was inside the budget and was right, and the party it authenticated should
+// not be locked out by the noise that surrounded it.
+func (rv *Reservation) Succeed(ctx context.Context) (Result, error) {
+	if rv == nil || rv.limiter == nil {
+		return Result{Allowed: true}, nil
+	}
+	l := rv.limiter
+
+	res, err := l.Record(ctx, rv.tenantID, rv.shared, false)
+	if err != nil {
+		return Result{}, err
+	}
+
+	counters := make(map[Dimension]Counter, len(rv.held)+len(res.Counters))
+	for dim, c := range res.Counters {
+		counters[dim] = c
+	}
+	for _, o := range rv.held {
+		counters[o.dim] = Counter{Attempts: o.st.Attempts, Failures: o.st.Failures - 1}
+		if err = l.clear(ctx, rv.tenantID, o); err != nil {
+			return Result{}, err
+		}
+	}
+	return withCounters(res, counters), nil
 }
 
 // withCounters attaches the per-dimension snapshot to a result.
@@ -303,8 +666,9 @@ func withCounters(res Result, counters map[Dimension]Counter) Result {
 // ResetSubject clears every limit a subject is held under, which is what the
 // administrative unlock performs.
 //
-// Two calls are needed. The subject bucket is addressed by a key only this
-// package can derive, so it is cleared explicitly. The store is then asked to
+// Two kinds of call are needed. The subject's buckets, one per factor, are
+// addressed by keys only this package can derive, so they are cleared
+// explicitly. The store is then asked to
 // clear anything else it associates with the subject through its own schema.
 // Neither call alone is sufficient: the store cannot recompute the derived key,
 // and this package does not know what else the store recorded.
@@ -314,9 +678,14 @@ func (l *Limiter) ResetSubject(ctx context.Context, tenantID, subjectID string) 
 	}
 
 	var errs []error
-	key := l.BucketKey(DimSubject, tenantID, subjectID)
-	if err := l.store.ResetThrottle(ctx, tenantID, key); err != nil && !errors.Is(err, store.ErrNotFound) {
-		errs = append(errs, fmt.Errorf("throttle: reset subject bucket: %w", err))
+	for _, factor := range subjectFactors {
+		// Every factor, whichever view of the Limiter this was called on. An
+		// operator unlocking a subject means all of it, and an unlock that
+		// left the TOTP bucket blocked would be reported as a bug.
+		key := l.ForFactor(factor).BucketKey(DimSubject, tenantID, subjectID)
+		if err := l.store.ResetThrottle(ctx, tenantID, key); err != nil && !errors.Is(err, store.ErrNotFound) {
+			errs = append(errs, fmt.Errorf("throttle: reset subject bucket: %w", err))
+		}
 	}
 	_, err := l.store.ResetSubjectThrottles(ctx, tenantID, subjectID)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -339,6 +708,14 @@ func (l *Limiter) BucketKey(dim Dimension, tenantID, value string) string {
 	writeField(h, string(dim))
 	writeField(h, tenantID)
 	writeField(h, normaliseValue(dim, value))
+	if dim == DimSubject && l.factor != "" {
+		// A fifth field, and only for the per-subject dimension. The fields
+		// are length-prefixed, so a five-field tuple cannot hash to the same
+		// input as any four-field one, and the factor-less key stays what it
+		// was. The factor is part of the hashed key and not a column, so the
+		// schema is unchanged and the row is still found by its subject_id.
+		writeField(h, string(l.factor))
+	}
 	return hex.EncodeToString(h.Sum(nil))[:bucketKeyHexLen]
 }
 
@@ -468,6 +845,15 @@ func (l *Limiter) limits(dim Dimension) (maxAttempts, maxFailures int, err error
 	default:
 		return 0, 0, fmt.Errorf("throttle: unknown dimension %q", dim)
 	}
+}
+
+// rateLimitedResult builds the refusal of a dimension that limits a rate and
+// never locks out. Blocked stays false: nothing was written that outlasts the
+// window, and RetryAfter is what is left of the window.
+func rateLimitedResult(dim Dimension, st *store.ThrottleState, remaining time.Duration) Result {
+	res := blockedResult(dim, st, remaining)
+	res.Blocked = false
+	return res
 }
 
 // blockedResult builds the refusal, rounding RetryAfter up to whole seconds.
