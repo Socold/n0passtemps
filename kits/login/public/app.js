@@ -133,6 +133,20 @@ async function enrol(subjectRef, label) {
   await passkeyFor(subjectRef);
 }
 
+// addPasskey enrols another authenticator for the account that is signed in.
+// No subject is sent: the backend takes it from the session and refuses a body
+// that names a different one.
+async function addPasskey(label) {
+  say("Waiting for your device…");
+  const result = await ceremony({
+    beginPath: "/api/register/begin",
+    completePath: "/api/register/complete",
+    body: { label },
+    act: create,
+  });
+  if (result) say("Passkey added. It will be offered the next time you sign in.");
+}
+
 async function totp(subjectRef, code) {
   say("Checking the code…");
   showSession(await call("/api/totp/verify", { subject_ref: subjectRef, code }));
@@ -184,11 +198,24 @@ function showSession(session) {
     after.append(note);
   }
 
+  // A session opened by a passkey alone carries the service's identifier and
+  // not the application's reference, and the backend adds a factor only to a
+  // session that names its subject.
+  const named = Boolean(session.subject_ref);
+  $("add-form").hidden = !named;
+  $("add-unnamed").hidden = named;
+
   ui.signedOut.hidden = true;
   ui.signedIn.hidden = false;
 }
 
+// openEnrolment is what the backend said about a first passkey with no session.
+// It is asked once, when the page loads, and does not change while it runs.
+let openEnrolment = false;
+
 function showSignedOut() {
+  $("enrol").hidden = !openEnrolment;
+  $("enrol-closed").hidden = openEnrolment;
   ui.signedIn.hidden = true;
   ui.signedOut.hidden = false;
 }
@@ -243,6 +270,9 @@ const enrolForm = $("enrol-form");
 enrolForm.addEventListener("submit", run(enrolForm, () =>
   enrol($("enrol-ref").value.trim(), $("enrol-label").value.trim())));
 
+const addForm = $("add-form");
+addForm.addEventListener("submit", run(addForm, () => addPasskey($("add-label").value.trim())));
+
 const logoutButton = $("logout");
 logoutButton.addEventListener("click", run(logoutButton, async () => {
   await call("/api/logout", {});
@@ -276,6 +306,9 @@ if (!window.PublicKeyCredential) {
 
 // What the page shows first depends on whether there is already a session.
 call("/api/session")
-  .then((session) => (session.signed_in ? showSession(session) : showSignedOut()))
+  .then((session) => {
+    openEnrolment = session.open_enrolment === true;
+    return session.signed_in ? showSession(session) : showSignedOut();
+  })
   .then(() => offerFromTheField())
   .catch(() => showSignedOut());

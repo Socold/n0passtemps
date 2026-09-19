@@ -33,7 +33,37 @@ secure context for WebAuthn, so trying it needs no certificate.
 Your browser's developer tools can provide a virtual authenticator if you have
 no security key to hand: in Chrome, More tools → WebAuthn.
 
-## The one thing to copy
+Set `N0PASSTEMPS_KIT_PUBLIC_URL` to the address people type when that is not the
+address this process listens on, which is the case behind a reverse proxy that
+ends the TLS. The session cookie is marked `Secure` when the request arrived
+over TLS or when this variable starts with `https://`. A forwarded header is not
+consulted, because whoever sends the request writes it.
+
+### The first passkey
+
+Enrolling needs a session, for the reason given below, and somebody with no
+factor yet cannot have one. A deployment lets them in with an enrolment ticket
+delivered out of band, or from its own sign-up flow, where it already knows who
+it is talking to. This kit has neither, so to try it from an empty database:
+
+```bash
+go run ./kits/login -addr 127.0.0.1:5173 -open-enrolment
+```
+
+With the flag, a visitor with no session may enrol a passkey or a TOTP secret
+for a subject that does not exist yet or has no factor at all. The first visitor
+to name such a subject owns it, so the flag is off by default, logs a warning at
+startup, and is for a demonstration on one machine. It never reaches a subject
+who has an authenticator, a TOTP secret or an unused recovery code, and it never
+issues recovery codes.
+
+The page follows the backend. It asks `/api/session` whether the flag is set and
+shows "I do not have a passkey yet" only when it is; without it, the signed-out
+page says to sign in another way first. Adding a passkey is on the signed-in
+side, in a form with no address field, because whose account it is comes from
+the session.
+
+## The two things to copy
 
 **The API key never reaches the browser.**
 
@@ -53,15 +83,30 @@ minted with: enrol an authenticator for any subject, issue recovery codes for
 any subject, learn whether a given person has an account. `kit_test.go` asserts
 that no served asset contains one.
 
+**A route that adds or replaces a factor takes its subject from the session,
+never from the request.**
+
+Keeping the key on the server is worth nothing if the server does whatever the
+page asks for whichever subject the page names. A proxy that relays `subject_ref`
+gives every visitor what the key allows, one request at a time: issue recovery
+codes for somebody else, consume one, and the session that comes back is theirs.
+So `register/begin`, `register/complete`, `totp/enrol`, `totp/confirm` and
+`recovery/issue` answer 401 without a session, and 403 when the body names a
+subject that is not the session's own; a refusal, not a silent substitution. The
+four routes that sign a person in stay open, because each of them proves
+something before it creates a session. `kit_test.go` asserts all of it, and that
+a refused request never reaches the service.
+
 ## What each file is
 
 | File | What it is |
 |---|---|
-| `main.go` | The backend. Eleven routes under `/api`, one API key, an in-memory session map |
+| `main.go` | The backend. Eleven routes under `/api`, five of them behind the session, one API key, an in-memory session map |
 | `public/index.html` | The page. A passkey first, the fallbacks behind a disclosure, enrolment behind another |
 | `public/app.js` | The browser half. Two round trips per ceremony, and nothing else |
 | `public/style.css` | No framework, no build step, no web font |
 | `public/webauthn.js` | A byte-for-byte copy of `sdk/node/src/browser.js`, kept identical by a test |
+| `kit_test.go` | The two things to copy, asserted: no key in a served asset, no factor without a session |
 
 ## Decisions worth knowing before you adapt it
 

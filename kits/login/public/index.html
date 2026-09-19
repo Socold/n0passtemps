@@ -67,7 +67,17 @@
 
     <hr>
 
-    <details id="enrol">
+    <!--
+      A first passkey with no session is something the backend refuses unless
+      it was started for a demonstration, so the form is shown only when the
+      backend says it would be honoured. Otherwise the way to a first passkey
+      is to sign in by another route and add one from there.
+    -->
+    <p class="hint" id="enrol-closed">
+      No passkey yet? Sign in another way above, then add one to your account.
+    </p>
+
+    <details id="enrol" hidden>
       <summary>I do not have a passkey yet</summary>
       <form id="enrol-form">
         <label for="enrol-ref">Email address</label>
@@ -92,6 +102,23 @@
       <dt>Factors</dt><dd id="factors"></dd>
     </dl>
     <div id="after"></div>
+
+    <!--
+      Adding a factor happens here, signed in. The form has no address field:
+      whose account it is comes from the session on the other side, and a page
+      that sent one would be inviting the backend to believe it.
+    -->
+    <form id="add-form">
+      <label for="add-label">Name this device <span class="optional">optional</span></label>
+      <input id="add-label" type="text" autocomplete="off" maxlength="60"
+             placeholder="Work laptop">
+      <button type="submit">Add a passkey to this account</button>
+    </form>
+    <p class="hint" id="add-unnamed" hidden>
+      This session was opened by a passkey alone, which does not tell this page
+      which account it is. Sign in by address to add another passkey.
+    </p>
+
     <button id="logout" type="button">Sign out</button>
   </section>
 
