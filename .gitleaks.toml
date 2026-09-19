@@ -1,46 +1,59 @@
-title = "n0passtemps secret scanning"
+# Secret scanning configuration.
+#
+# The allowlist below is deliberately narrow. Excluding whole directories, the
+# usual shortcut, would mean a credential genuinely pasted into a README or an
+# example went unreported, and those are exactly the places where one gets
+# pasted. So instead of trusting paths, this file trusts one documented
+# placeholder shape and nothing else.
 
-# The upstream rule set is the baseline. Rules are added to it rather than
-# replacing it, so a new detector shipped by gitleaks starts applying on the
-# next version bump without a change here.
+title = "n0passtemps"
+
 [extend]
 useDefault = true
 
 [allowlist]
-description = "Fixtures, examples and documented placeholders"
+description = """
+The documented placeholder for a bearer credential.
 
-# Keeping this list short is deliberate. Every path below is a place where a
-# high-entropy string is expected, and every path excluded here is a place a
-# real secret could be committed unnoticed.
-paths = [
-  # Test fixtures hold generated keys and sealed blobs by construction. They
-  # are produced by the tests themselves and protect nothing.
-  '''(^|/)test/.*''',
-  '''.*_test\.go$''',
-  '''(^|/)testdata/.*''',
+Every example in the repository writes a credential as a selector beginning
+EXAMPLEONLY followed by a verifier that is plain text, for instance
+npt_EXAMPLEONLY0000.EXAMPLE-NOT-A-REAL-KEY. A real verifier is 27 base64url
+characters, so a token in this shape cannot be a credential, whereas any other
+token-shaped string anywhere in the tree is still reported.
+"""
 
-  # Integration examples call the API with sample tokens.
-  '''(^|/)examples/.*''',
-
-  # Files whose whole purpose is to show the shape of a credential. The real
-  # values live in .env, config.toml and the keyring, none of which are tracked.
-  '''(^|/)\.env\.example$''',
-  '''(^|/)n0passtemps\.env\.example$''',
-  '''(^|/)secret\.example\.yaml$''',
-  '''(^|/)config\.example\.toml$''',
-]
-
-# Placeholders used across the documentation and the example deployment files.
-# Anchored on the marker words so a real value sitting next to one is still
-# reported.
+# Matches the placeholder and nothing else. The verifier half must contain a
+# hyphen, which base64url does use, but combined with the EXAMPLE- prefix and
+# the EXAMPLEONLY selector there is no overlap with a generated token.
 regexes = [
-  '''REPLACE_[A-Z0-9_]+''',
-  '''REPLACE_WITH_BASE64_OF_32_RANDOM_BYTES''',
-  '''CHANGE_ME''',
-  '''replace-me(-[a-z0-9]+)*''',
-  '''(?i)example\.(com|org|internal)''',
+  '''np[ta]_EXAMPLEONLY[0-9]{4}\.EXAMPLE-NOT-A-REAL-(KEY|TOKEN)''',
+
+  # The placeholder shape used before the convention above was settled. These
+  # exact values appear in the history and nowhere in the working tree. They
+  # were never credentials: each decodes to the words foobarbaz and quux, and
+  # none is the 20 bytes a verifier holds. They are listed by value rather than
+  # by commit so that a history scan stays meaningful, and so that a real
+  # credential committed in the same range would still be reported.
+  '''npt_3f9a2c1d8b7e6f5a\.(Zm9vYmFyYmF6cXV1eHF1dXhmb29iYXJiYXo|foobarbazquuxquuxfoobarbaz)''',
+  '''npt_8d1c4b7a2e9f6035\.(cXV1eGZvb2JhcmJhenF1dXhmb29iYXJiYXo|quuxfoobarbazquuxfoobarbaz)''',
+  '''npt_0123456789abcdef\.c2VjcmV0LXZlcmlmaWVyLXZhbHVl''',
+  '''npt_test_0123456789(abcdefSECRET)?''',
+
+  # An unsigned JWT, header {"alg":"none"}. The attestation tests use several
+  # as attack fixtures: a metadata file claiming no signature must be refused.
+  # A token with no signature carries no key material by construction, so it is
+  # allowed by its header rather than by the file it sits in, and a genuinely
+  # signed token appearing anywhere is still reported.
+  '''eyJhbGciOiJub25lIn0\.[A-Za-z0-9_-]*\.?''',
 ]
 
-# Commit allowlisting is intentionally absent. Excusing a specific commit hides
-# a finding that has already entered the history, where it stays reachable; the
-# answer to a committed secret is to rotate it, not to silence the scanner.
+# Key material in the deployment examples is a named placeholder rather than a
+# value, so the file paths are listed for those specific names only.
+[[rules]]
+id = "n0passtemps-placeholder-key-material"
+description = "Placeholder key material in the shipped deployment examples"
+regex = '''REPLACE_WITH_(BASE64_OF_32_RANDOM_BYTES|OUTPUT_OF_WIZARD_PEPPER|THE_PEM_FILE_CONTENTS)'''
+[rules.allowlist]
+description = "These are instructions to the operator, not values"
+regexTarget = "match"
+regexes = ['''REPLACE_WITH_''']

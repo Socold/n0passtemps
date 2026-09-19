@@ -17,7 +17,7 @@ import {
   UnavailableError,
 } from "../src/index.js";
 
-const API_KEY = "npt_0123456789abcdef.c2VjcmV0LXZlcmlmaWVyLXZhbHVl";
+const API_KEY = "npt_EXAMPLEONLY0002.EXAMPLE-NOT-A-REAL-KEY";
 const SECRET_HALF = API_KEY.slice(API_KEY.indexOf(".") + 1);
 
 // A reference chosen to break a naive path join: a slash, an at sign, spaces,

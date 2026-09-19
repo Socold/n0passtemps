@@ -41,7 +41,7 @@ from n0passtemps import (
 )
 from n0passtemps.client import MAX_RESPONSE_BYTES
 
-API_KEY = "npt_test_0123456789abcdefSECRET"
+API_KEY = "npt_EXAMPLEONLY0000.EXAMPLE-NOT-A-REAL-KEY"
 
 # A reference exercising the characters that break naive path building: "/"
 # would split the segment, "@" and the space need encoding, and "%" must not be

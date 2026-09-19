@@ -174,8 +174,8 @@ docker compose run --rm n0passtemps -bootstrap-admin -admins 2
 
 ```
 
-bootstrap-1  npa_3f9a2c1d8b7e6f5a.Zm9vYmFyYmF6cXV1eHF1dXhmb29iYXJiYXo
-bootstrap-2  npa_8d1c4b7a2e9f6035.cXV1eGZvb2JhcmJhenF1dXhmb29iYXJiYXo
+bootstrap-1  npa_EXAMPLEONLY0000.EXAMPLE-NOT-A-REAL-TOKEN
+bootstrap-2  npa_EXAMPLEONLY0001.EXAMPLE-NOT-A-REAL-TOKEN
 
 Each token is shown once. Only a digest is stored, so none can be displayed
 again. Put them in a password manager now, one per person.
@@ -251,7 +251,7 @@ is audited.
 ### Round trip one: get the options
 
 ```bash
-API_KEY="npt_3f9a2c1d8b7e6f5a.Zm9vYmFyYmF6cXV1eHF1dXhmb29iYXJiYXo"
+API_KEY="npt_EXAMPLEONLY0000.EXAMPLE-NOT-A-REAL-KEY"
 
 # Resolve your user reference to a subject. Idempotent, so call it on every
 # login rather than tracking whether you have registered the user here.

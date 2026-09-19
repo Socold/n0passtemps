@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const testAPIKey = "npt_test_0123456789"
+const testAPIKey = "npt_EXAMPLEONLY0000.EXAMPLE-NOT-A-REAL-KEY"
 
 // awkwardRef holds the characters that break a naive path join: a slash would
 // add a segment, a space is not legal in a path, and an at sign is what an

@@ -27,9 +27,14 @@
 //
 // A token is presented as:
 //
-//	npt_3f9a2c1d8b7e6f5a.Zm9vYmFyYmF6cXV1eHF1dXhmb29iYXJiYXo
-//	^^^^ prefix          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ verifier, 160 bits
-//	     ^^^^^^^^^^^^^^^^ selector, stored in clear and indexed
+//	npt_EXAMPLEONLY0000.EXAMPLE-NOT-A-REAL-KEY
+//	^^^^ prefix         ^^^^^^^^^^^^^^^^^^^^^^ verifier, 160 bits
+//	     ^^^^^^^^^^^^^^^ selector, stored in clear and indexed
+//
+// Every example in this repository uses that shape: a selector beginning
+// EXAMPLEONLY and a verifier that is plain text. A real verifier is 27
+// base64url characters, so nothing written down in the documentation can be
+// mistaken for a credential, by a reader or by a secret scanner.
 //
 // The selector makes authentication one indexed lookup followed by one hash,
 // instead of a scan that hashes every stored key. Without it, verifying a

@@ -159,7 +159,71 @@ jobs:
               docker pull ${IMAGE_NAME}:${GITHUB_REF_NAME#v}
           EOF
 
-      - name: Create the release
+      # The release is created as a draft, filled, verified and only then
+      # published. A partial upload is the failure this guards against: the
+      # first attempt at 1.0.0 left three of seven archives attached to a
+      # visible release, alongside a SHA256SUMS naming all seven, so anyone
+      # downloading during that window got a manifest referring to files that
+      # were not there. A draft is invisible until it is complete.
+      - name: Create a draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release edit "${GITHUB_REF_NAME}" --draft --notes-file RELEASE_NOTES.md
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --draft --title "${GITHUB_REF_NAME}" --notes-file RELEASE_NOTES.md
+          fi
+
+      - name: Upload the archives
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Uploaded one at a time with retries. The API rejected a parallel
+          # batch once, and the action that performed it had no retry.
+          for f in assets/*; do
+            for attempt in 1 2 3 4 5; do
+              if gh release upload "${GITHUB_REF_NAME}" "$f" --clobber; then
+                break
+              fi
+              if [ "$attempt" = 5 ]; then
+                echo "::error::giving up on $f after 5 attempts"
+                exit 1
+              fi
+              echo "upload of $f failed, retrying in $((attempt * 5))s"
+              sleep $((attempt * 5))
+            done
+          done
+
+      - name: Verify the release before publishing it
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          expected="$(ls assets | sort)"
+          attached="$(gh release view "${GITHUB_REF_NAME}" --json assets \
+            --jq '.assets[].name' | sort)"
+          if [ "${expected}" != "${attached}" ]; then
+            echo "::error::the release does not hold exactly the built archives"
+            diff <(echo "${expected}") <(echo "${attached}") || true
+            exit 1
+          fi
+          # Download what was actually attached and check it against the
+          # manifest, so a corrupted upload is caught here rather than by a
+          # user.
+          tmp="$(mktemp -d)"
+          gh release download "${GITHUB_REF_NAME}" --dir "${tmp}"
+          ( cd "${tmp}" && sha256sum -c SHA256SUMS )
+          echo "every archive is attached and matches its checksum"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${GITHUB_REF_NAME}" --draft=false
+
         uses: softprops/action-gh-release@c062e08bd532815e2082a85e87e3ef29c3e6d191 # v2.0.8
         with:
           body_path: RELEASE_NOTES.md

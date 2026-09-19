@@ -4,7 +4,7 @@
 #
 # Usage:
 #   N0PASSTEMPS_URL=http://127.0.0.1:8080 \
-#   N0PASSTEMPS_API_KEY=npt_REPLACE_WITH_YOUR_SELECTOR.REPLACE_WITH_YOUR_VERIFIER \
+#   N0PASSTEMPS_API_KEY=npt_EXAMPLEONLY0000.EXAMPLE-NOT-A-REAL-KEY \
 #   ./recovery.sh [subject-reference]
 #
 # The codes are printed to the terminal, which is appropriate for a

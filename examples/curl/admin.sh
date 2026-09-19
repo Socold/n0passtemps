@@ -4,7 +4,7 @@
 #
 # Usage:
 #   N0PASSTEMPS_URL=http://127.0.0.1:8080 \
-#   N0PASSTEMPS_ADMIN_TOKEN=npa_REPLACE_WITH_YOUR_SELECTOR.REPLACE_WITH_YOUR_VERIFIER \
+#   N0PASSTEMPS_ADMIN_TOKEN=npa_EXAMPLEONLY0000.EXAMPLE-NOT-A-REAL-TOKEN \
 #   ./admin.sh
 #
 # The administrative token is a different credential kind from an API key and
