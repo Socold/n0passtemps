@@ -230,7 +230,7 @@ func (s *Store) DeleteStaleThrottles(ctx context.Context, before time.Time) (int
 // subjectBucketPredicate builds the clause matching every bucket that names the
 // subject, together with its arguments. It is shared with PurgeSubject so that
 // a purge and a reset agree on which buckets belong to a subject.
-func subjectBucketPredicate(tenantID, subjectID string) (string, []any) {
+func subjectBucketPredicate(tenantID, subjectID string) (clause string, args []any) {
 	// Matching on the subject_id column rather than on the shape of the bucket
 	// key. The key is a SHA-256 digest by design, so it carries no recoverable
 	// structure and a LIKE pattern over it could never find a subject's rows.

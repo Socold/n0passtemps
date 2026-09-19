@@ -298,34 +298,34 @@ func (s *Store) RevokeCredential(ctx context.Context, tenantID, id, reason strin
 //
 // The tenant predicate is on both statements. A subject identifier from another
 // tenant matches nothing and yields two zero counts.
-func (s *Store) RevokeAllCredentials(ctx context.Context, tenantID, subjectID, reason string, at time.Time) (int64,
-	int64, error) {
+func (s *Store) RevokeAllCredentials(
+	ctx context.Context, tenantID, subjectID, reason string, at time.Time,
+) (credentials, totp int64, err error) {
 	if tenantID == "" || subjectID == "" {
 		return 0, 0, errors.New("sqlite: revoking all credentials requires a tenant and a subject")
 	}
 
-	var credentials, totp int64
-	err := s.inTx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, `
+	err = s.inTx(ctx, func(tx *sql.Tx) error {
+		res, txErr := tx.ExecContext(ctx, `
 			UPDATE webauthn_credentials SET revoked_at = ?, revoked_reason = ?
 			WHERE tenant_id = ? AND subject_id = ? AND revoked_at IS NULL`,
 			formatTime(at), nullString(reason), tenantID, subjectID)
-		if err != nil {
-			return mapError(err)
+		if txErr != nil {
+			return mapError(txErr)
 		}
-		if credentials, err = res.RowsAffected(); err != nil {
-			return fmt.Errorf("sqlite: count credential revocations: %w", err)
+		if credentials, txErr = res.RowsAffected(); txErr != nil {
+			return fmt.Errorf("sqlite: count credential revocations: %w", txErr)
 		}
 
-		res, err = tx.ExecContext(ctx, `
+		res, txErr = tx.ExecContext(ctx, `
 			UPDATE totp_secrets SET revoked_at = ?
 			WHERE tenant_id = ? AND subject_id = ? AND revoked_at IS NULL`,
 			formatTime(at), tenantID, subjectID)
-		if err != nil {
-			return mapError(err)
+		if txErr != nil {
+			return mapError(txErr)
 		}
-		if totp, err = res.RowsAffected(); err != nil {
-			return fmt.Errorf("sqlite: count totp revocations: %w", err)
+		if totp, txErr = res.RowsAffected(); txErr != nil {
+			return fmt.Errorf("sqlite: count totp revocations: %w", txErr)
 		}
 		return nil
 	})

@@ -94,13 +94,13 @@ func Load(engine string) ([]Migration, error) {
 }
 
 // parseName splits "0002_governance.sql" into 2 and "governance".
-func parseName(filename string) (int, string, error) {
+func parseName(filename string) (version int, name string, err error) {
 	base := strings.TrimSuffix(filename, ".sql")
 	idx := strings.IndexByte(base, '_')
 	if idx <= 0 {
 		return 0, "", fmt.Errorf("migrations: %q must be named NNNN_name.sql", filename)
 	}
-	version, err := strconv.Atoi(base[:idx])
+	version, err = strconv.Atoi(base[:idx])
 	if err != nil {
 		return 0, "", fmt.Errorf("migrations: %q does not start with a version number: %w", filename, err)
 	}

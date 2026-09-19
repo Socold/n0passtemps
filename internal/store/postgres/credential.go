@@ -272,29 +272,29 @@ func (s *Store) RevokeCredential(ctx context.Context, tenantID, id, reason strin
 //
 // The tenant predicate is on both statements. A subject identifier from another
 // tenant matches nothing and yields two zero counts.
-func (s *Store) RevokeAllCredentials(ctx context.Context, tenantID, subjectID, reason string, at time.Time) (int64,
-	int64, error) {
+func (s *Store) RevokeAllCredentials(
+	ctx context.Context, tenantID, subjectID, reason string, at time.Time,
+) (credentials, totp int64, err error) {
 	if tenantID == "" || subjectID == "" {
 		return 0, 0, errors.New("postgres: revoking all credentials requires a tenant and a subject")
 	}
 
-	var credentials, totp int64
-	err := s.inTx(ctx, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `
+	err = s.inTx(ctx, func(tx pgx.Tx) error {
+		tag, txErr := tx.Exec(ctx, `
 			UPDATE webauthn_credentials SET revoked_at = $1, revoked_reason = $2
 			WHERE tenant_id = $3 AND subject_id = $4 AND revoked_at IS NULL`,
 			at, nullString(reason), tenantID, subjectID)
-		if err != nil {
-			return mapError(err)
+		if txErr != nil {
+			return mapError(txErr)
 		}
 		credentials = tag.RowsAffected()
 
-		tag, err = tx.Exec(ctx, `
+		tag, txErr = tx.Exec(ctx, `
 			UPDATE totp_secrets SET revoked_at = $1
 			WHERE tenant_id = $2 AND subject_id = $3 AND revoked_at IS NULL`,
 			at, tenantID, subjectID)
-		if err != nil {
-			return mapError(err)
+		if txErr != nil {
+			return mapError(txErr)
 		}
 		totp = tag.RowsAffected()
 		return nil

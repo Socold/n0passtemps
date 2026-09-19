@@ -10,6 +10,8 @@ import (
 // role later does not renumber the existing ones.
 type Role string
 
+// The roles, in decreasing authority. docs/RBAC.md maps each to its
+// permissions, and that table rather than this list is the contract.
 const (
 	RoleFull     Role = "admin_full"
 	RoleOperator Role = "admin_operator"
@@ -28,6 +30,8 @@ func (r Role) Valid() bool {
 // SubjectStatus values mirror the subjects.status CHECK constraint.
 type SubjectStatus string
 
+// The statuses a subject can hold. Locked refuses authentication and keeps the
+// record; pending_deletion is the retention window of a requested erasure.
 const (
 	SubjectActive          SubjectStatus = "active"
 	SubjectLocked          SubjectStatus = "locked"
@@ -78,6 +82,7 @@ func (s *Subject) Active() bool {
 // AttestationType mirrors the webauthn_credentials.attestation_type constraint.
 type AttestationType string
 
+// The attestation conveyance types of the WebAuthn level 2 registry.
 const (
 	AttestationNone     AttestationType = "none"
 	AttestationSelf     AttestationType = "self"
@@ -213,6 +218,8 @@ func (t *EnrolmentTicket) Redeemable(now time.Time) bool {
 // Ceremony distinguishes the two WebAuthn flows.
 type Ceremony string
 
+// The two ceremonies. A challenge records which one it was issued for, so that
+// neither can be completed through the other's route.
 const (
 	CeremonyRegistration Ceremony = "registration"
 	CeremonyAssertion    Ceremony = "assertion"
@@ -240,6 +247,8 @@ type Challenge struct {
 // ActorType identifies who caused an audited event.
 type ActorType string
 
+// The actor types. system covers the janitor and the startup path, which act
+// with no caller to attribute an entry to.
 const (
 	ActorSystem  ActorType = "system"
 	ActorAPIKey  ActorType = "api_key"
@@ -250,6 +259,9 @@ const (
 // Outcome is the result recorded on an audit entry.
 type Outcome string
 
+// The outcomes. denied is an authorisation refusal and failure an
+// authentication one, which a SIEM rule needs to tell apart; error is a fault
+// in the service rather than a verdict about the caller.
 const (
 	OutcomeSuccess Outcome = "success"
 	OutcomeFailure Outcome = "failure"
@@ -451,6 +463,8 @@ func (t *ThrottleState) Blocked(now time.Time) bool {
 // Severity is an alert severity level.
 type Severity string
 
+// The severities. Severity is a property of the condition rather than of the
+// occurrence, so internal/alerts fixes it per type and a caller cannot choose.
 const (
 	SeverityInfo     Severity = "info"
 	SeverityWarning  Severity = "warning"
@@ -482,6 +496,8 @@ type Alert struct {
 // ApprovalStatus mirrors the approval_requests.status constraint.
 type ApprovalStatus string
 
+// The states of a queued operation. executed and failed are both terminal and
+// both mean the approval was spent, which is what makes redemption single-use.
 const (
 	ApprovalPending  ApprovalStatus = "pending"
 	ApprovalApproved ApprovalStatus = "approved"
@@ -512,6 +528,7 @@ type ApprovalRequest struct {
 // ErasureStatus mirrors the erasure_requests.status constraint.
 type ErasureStatus string
 
+// The states of an erasure request through its retention window.
 const (
 	ErasurePending   ErasureStatus = "pending"
 	ErasureCancelled ErasureStatus = "cancelled"

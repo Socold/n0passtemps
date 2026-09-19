@@ -1,8 +1,13 @@
 package recovery
 
 import (
+	"encoding/base64"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/argon2"
 )
 
 // TestGeneratedCodeVerifies is the property the whole feature rests on: a code
@@ -206,6 +211,108 @@ func TestVerifyRejectsMalformedStoredHash(t *testing.T) {
 				t.Error("a malformed stored hash verified")
 			}
 		})
+	}
+}
+
+// phc builds a stored hash by hand, under parameters of the test's choosing.
+func phc(verifier, salt []byte, m, t uint32, p uint8) string {
+	sum := argon2.IDKey(verifier, salt, t, m, p, argonKeyLen)
+	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s", argon2.Version, m, t, p,
+		base64.RawStdEncoding.EncodeToString(salt),
+		base64.RawStdEncoding.EncodeToString(sum))
+}
+
+// TestAHashWrittenUnderOtherParametersStillVerifies is the promise the PHC
+// format makes and that Verify once broke: it parsed m, t and p, discarded
+// them, and recomputed with the constants of the package. Every test passed,
+// because every hash in them had been written under those same constants. The
+// day the constants were raised, every recovery code and enrolment ticket
+// already issued would have stopped verifying, with no error to say why.
+//
+// The parameters below differ from the constants in all three positions, and
+// are small so the test stays quick.
+func TestAHashWrittenUnderOtherParametersStillVerifies(t *testing.T) {
+	const (
+		memory  = 64
+		time    = 1
+		threads = 2
+	)
+	if memory == argonMemory || time == argonTime || threads == argonThreads {
+		t.Fatal("the parameters of this test match the constants, so it proves nothing")
+	}
+
+	verifier := []byte("3HDWR7FGNPB9YQ")
+	stored := phc(verifier, []byte("0123456789abcdef"), memory, time, threads)
+
+	ok, err := Verify(verifier, stored)
+	if err != nil {
+		t.Fatalf("verify returned an error: %v", err)
+	}
+	if !ok {
+		t.Error("a hash written under other parameters does not verify, so raising the " +
+			"constants would invalidate every row already stored")
+	}
+
+	// The stored parameters are used, not merely tolerated.
+	ok, err = Verify([]byte("3HDWR7FGNPB9YR"), stored)
+	if err != nil {
+		t.Fatalf("verify returned an error: %v", err)
+	}
+	if ok {
+		t.Error("a wrong verifier matched a hash written under other parameters")
+	}
+}
+
+// TestVerifyRefusesParametersNoRowShouldCarry checks the other side of reading
+// the parameters from the row: a row is input, and a forged one must not be
+// able to ask for gigabytes of memory, or reach the panics argon2 keeps for a
+// time or a parallelism of zero.
+//
+// Every case is a well-formed PHC string, so the refusal can only come from the
+// bounds. None of them may reach argon2, which the largest would show by taking
+// the test machine's memory with it.
+func TestVerifyRefusesParametersNoRowShouldCarry(t *testing.T) {
+	const tail = "$MDEyMzQ1Njc4OWFiY2RlZg$MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY"
+
+	for name, hash := range map[string]string{
+		"memory above the ceiling":      "$argon2id$v=19$m=262145,t=2,p=1" + tail,
+		"memory at the uint32 limit":    "$argon2id$v=19$m=4294967295,t=2,p=1" + tail,
+		"memory of zero":                "$argon2id$v=19$m=0,t=2,p=1" + tail,
+		"time above the ceiling":        "$argon2id$v=19$m=19456,t=17,p=1" + tail,
+		"time of zero":                  "$argon2id$v=19$m=19456,t=0,p=1" + tail,
+		"parallelism above the ceiling": "$argon2id$v=19$m=19456,t=2,p=17" + tail,
+		"parallelism of zero":           "$argon2id$v=19$m=19456,t=2,p=0" + tail,
+		"parallelism beyond a byte":     "$argon2id$v=19$m=19456,t=2,p=256" + tail,
+		"negative memory":               "$argon2id$v=19$m=-1,t=2,p=1" + tail,
+		"salt of seven bytes": "$argon2id$v=19$m=19456,t=2,p=1$MDEyMzQ1Ng" +
+			"$MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY",
+	} {
+		t.Run(name, func(t *testing.T) {
+			ok, err := Verify([]byte("whatever"), hash)
+			if !errors.Is(err, ErrBadHash) {
+				t.Errorf("err = %v, want ErrBadHash", err)
+			}
+			if ok {
+				t.Error("a stored hash with refused parameters verified")
+			}
+		})
+	}
+}
+
+// TestVerifyAcceptsParametersAtTheirBounds keeps the ceilings honest from the
+// inside: the largest time and parallelism a row may carry, and the shortest
+// salt, are accepted. Memory is left small, since 256 MiB under the race
+// detector is a slow way to learn that a comparison is not off by one.
+func TestVerifyAcceptsParametersAtTheirBounds(t *testing.T) {
+	verifier := []byte("3HDWR7FGNPB9YQ")
+	stored := phc(verifier, []byte("01234567"), 8*maxStoredThreads, maxStoredTime, maxStoredThreads)
+
+	ok, err := Verify(verifier, stored)
+	if err != nil {
+		t.Fatalf("parameters at their bounds were refused: %v", err)
+	}
+	if !ok {
+		t.Error("a hash with parameters at their bounds does not verify")
 	}
 }
 

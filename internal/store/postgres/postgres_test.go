@@ -29,6 +29,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Socold/n0passtemps/internal/audit"
+	"github.com/Socold/n0passtemps/internal/auditsink"
 	"github.com/Socold/n0passtemps/internal/store"
 	"github.com/Socold/n0passtemps/internal/store/migrations"
 )
@@ -485,6 +486,227 @@ func TestPruneKeepsRemainderVerifiable(t *testing.T) {
 
 	// Verification has to resume from the checkpoint hash rather than from
 	// genesis, otherwise a trimmed log would look tampered with.
+	_, broken, err := s.VerifyChain(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if broken != 0 {
+		t.Fatalf("chain broke at %d after pruning", broken)
+	}
+}
+
+// TestAPruneIsAttestedByTheChain covers what a checkpoint is worth.
+//
+// The marker the trim appends carries the hash of the entry it stopped at, and
+// the chain covers the marker, so the boundary a checkpoint claims is a
+// boundary the chain agrees with. Verification asks for exactly that, so the
+// two have to be written to match.
+func TestAPruneIsAttestedByTheChain(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	entries := appendN(t, s, "tenant-1", 20)
+	boundary := entries[9]
+
+	cut := time.Date(2026, 1, 1, 0, 0, 10, 0, time.UTC)
+	if _, err := s.PruneAuditLog(ctx, "tenant-1", cut, time.Now()); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+
+	var (
+		prunedSeq  int64
+		prunedHash []byte
+		markerSeq  int64
+	)
+	if err := s.pool.QueryRow(ctx, `
+		SELECT pruned_through_seq, pruned_through_hash, audit_seq
+		FROM audit_checkpoints ORDER BY pruned_through_seq DESC LIMIT 1`).
+		Scan(&prunedSeq, &prunedHash, &markerSeq); err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	if prunedSeq != boundary.Seq || !bytes.Equal(prunedHash, boundary.EntryHash) {
+		t.Fatalf("checkpoint names (%d, %x), want the tenth entry (%d, %x)",
+			prunedSeq, prunedHash, boundary.Seq, boundary.EntryHash)
+	}
+
+	// The document comes back in the server's own spelling, keys reordered and
+	// a space after every colon, which is why the marker is parsed rather than
+	// compared as text.
+	var detail []byte
+	if err := s.pool.QueryRow(ctx,
+		`SELECT detail FROM audit_log WHERE seq = $1`, markerSeq).Scan(&detail); err != nil {
+		t.Fatalf("read the retention marker: %v", err)
+	}
+	if !audit.MarkerAttestsCheckpoint(detail, prunedSeq, prunedHash) {
+		t.Errorf("the marker at seq %d does not attest the checkpoint: %s", markerSeq, detail)
+	}
+
+	_, broken, err := s.VerifyChain(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if broken != 0 {
+		t.Fatalf("an attested trim reported a break at %d", broken)
+	}
+}
+
+// TestAForgedCheckpointAndATrimmedPrefixAreDetected is the attack the binding
+// exists for.
+//
+// Whoever can write to the database inserts a checkpoint naming entry ten and
+// its real hash, and then deletes entries one to ten, which the delete guard
+// allows because a checkpoint now exists. Nothing in the chain ever said the
+// log had been trimmed, and verification used to resume from the checkpoint and
+// report a log in perfect order.
+func TestAForgedCheckpointAndATrimmedPrefixAreDetected(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	entries := appendN(t, s, "tenant-1", 20)
+	boundary := entries[9]
+
+	forge := func() error {
+		_, err := s.pool.Exec(ctx, `
+			INSERT INTO audit_checkpoints (
+				id, tenant_id, pruned_through_seq, pruned_through_hash,
+				entries_removed, audit_seq, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			"forged-checkpoint", "tenant-1", boundary.Seq, boundary.EntryHash,
+			10, entries[10].Seq, time.Now())
+		return err
+	}
+
+	// The insert guard refuses it outright: the entry the row names is an
+	// ordinary one and not the marker of a trim.
+	if err := forge(); err == nil {
+		t.Fatal("expected the insert guard to refuse a checkpoint no marker attests")
+	}
+
+	// A guard is a trigger and the attacker is inside the cluster, so the
+	// interesting question is what verification says once the trigger is gone.
+	if _, err := s.pool.Exec(ctx,
+		`DROP TRIGGER audit_checkpoints_insert_guard ON audit_checkpoints`); err != nil {
+		t.Fatal(err)
+	}
+	if err := forge(); err != nil {
+		t.Fatalf("insert the forged checkpoint: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx,
+		`DELETE FROM audit_log WHERE seq <= $1`, boundary.Seq); err != nil {
+		t.Fatalf("the delete guard let the prefix go, as it does once a checkpoint exists: %v", err)
+	}
+
+	_, broken, err := s.VerifyChain(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if broken != boundary.Seq {
+		t.Fatalf("a forged checkpoint and a deleted prefix reported a break at %d, want %d",
+			broken, boundary.Seq)
+	}
+}
+
+// TestASequenceGapDoesNotBreakTheChain is the engine difference the receiver
+// contract turns on.
+//
+// seq comes from a sequence, so a rolled back append spends a number no entry
+// will ever carry. The entries on either side chain onto each other, the log is
+// whole, and nothing about it should read as tampering.
+func TestASequenceGapDoesNotBreakTheChain(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	appendN(t, s, "tenant-1", 3)
+
+	// An append that fails after drawing its number, which is what a cancelled
+	// request or a refused insert does.
+	failed := s.inTx(ctx, func(tx pgx.Tx) error {
+		e := &store.AuditEntry{
+			TenantID:  "tenant-1",
+			EventType: audit.EventAssertionCompleted,
+			ActorType: store.ActorSubject,
+			Outcome:   store.OutcomeSuccess,
+		}
+		if err := prepareAppend(ctx, tx, e); err != nil {
+			return err
+		}
+		return errors.New("this transaction is rolled back on purpose")
+	})
+	if failed == nil {
+		t.Fatal("the rolled back append reported success")
+	}
+
+	after := appendN(t, s, "tenant-1", 2)
+	if after[0].Seq != 5 {
+		t.Fatalf("the entry after the rolled back append has seq %d, want 5: the sequence must have skipped one",
+			after[0].Seq)
+	}
+
+	checked, broken, err := s.VerifyChain(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if broken != 0 {
+		t.Fatalf("a gap the sequence left reported a break at %d", broken)
+	}
+	if checked != 5 {
+		t.Errorf("checked %d entries, want the 5 that exist", checked)
+	}
+
+	// And the same run, seen as a receiver sees it: the numbering skips 4 and
+	// the chain does not.
+	entries, err := s.ReadAuditRange(ctx, 1, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := make([]auditsink.Record, 0, len(entries))
+	for _, e := range entries {
+		records = append(records, auditsink.Project(e))
+	}
+	if brokenAt := auditsink.CheckSequence(records, audit.Genesis()); brokenAt != 0 {
+		t.Errorf("a receiver reported the delivered run as broken at %d", brokenAt)
+	}
+}
+
+func TestPruneStopsAtTheFirstRecentEntry(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Three old entries, a recent one, and then one written by a clock that had
+	// fallen behind: old by its timestamp, newest by its position.
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	recent := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	stamps := []time.Time{old, old.Add(time.Second), old.Add(2 * time.Second), recent, old.Add(3 * time.Second)}
+	for i, at := range stamps {
+		if _, err := s.Append(ctx, &store.AuditEntry{
+			TenantID:   "tenant-1",
+			EventType:  audit.EventAssertionCompleted,
+			ActorType:  store.ActorSubject,
+			SubjectID:  "subject-1",
+			Outcome:    store.OutcomeSuccess,
+			OccurredAt: at,
+		}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+
+	// Timestamps come from the process clock and are not monotonic in the
+	// sequence number. Cutting at the newest entry that looks old would take
+	// the recent one with it, and the checkpoint would make the loss verify.
+	cut := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	removed, err := s.PruneAuditLog(ctx, "tenant-1", cut, time.Now())
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if removed != 3 {
+		t.Fatalf("removed %d entries, want only the 3 that precede the first recent one", removed)
+	}
+
+	left, err := s.ReadAuditRange(ctx, 1, 100)
+	if err != nil {
+		t.Fatalf("read what is left: %v", err)
+	}
+	if len(left) == 0 || left[0].Seq != 4 || !left[0].OccurredAt.Equal(recent) {
+		t.Fatalf("the log no longer starts at the recent entry, seq 4: a backdated entry pruned it")
+	}
+
 	_, broken, err := s.VerifyChain(ctx, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -1471,6 +1693,9 @@ func TestPurgeSubjectRemovesDependents(t *testing.T) {
 		}
 	}
 
+	if err := s.SoftDeleteSubject(ctx, "tenant-a", sub.ID, time.Now()); err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
 	if err := s.PurgeSubject(ctx, "tenant-a", sub.ID); err != nil {
 		t.Fatalf("purge: %v", err)
 	}
@@ -1560,5 +1785,36 @@ func TestEngineAndPing(t *testing.T) {
 	}
 	if err := s.Ping(context.Background()); err != nil {
 		t.Errorf("Ping: %v", err)
+	}
+}
+
+// TestARestoredSubjectIsNotPurged is the erasure that was cancelled while the
+// sweep that would have completed it was already running.
+//
+// The sweep purges from a list of due requests it read earlier. Cancelling
+// restores the subject, and a purge that only asked whether the row existed
+// removed the restored subject and every factor they had.
+func TestARestoredSubjectIsNotPurged(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedTenant(t, s, "tenant-a")
+	sub := seedSubject(t, s, "tenant-a", "subject-1", "ref-1")
+	at := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+
+	if err := s.PurgeSubject(ctx, "tenant-a", sub.ID); !errors.Is(err, store.ErrStaleWrite) {
+		t.Fatalf("purging a live subject = %v, want store.ErrStaleWrite", err)
+	}
+
+	if err := s.SoftDeleteSubject(ctx, "tenant-a", sub.ID, at); err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
+	if err := s.RestoreSubject(ctx, "tenant-a", sub.ID, at.Add(time.Minute)); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if err := s.PurgeSubject(ctx, "tenant-a", sub.ID); !errors.Is(err, store.ErrStaleWrite) {
+		t.Fatalf("purging a restored subject = %v, want store.ErrStaleWrite", err)
+	}
+	if _, err := s.GetSubject(ctx, "tenant-a", sub.ID); err != nil {
+		t.Fatalf("the restored subject is gone: %v", err)
 	}
 }

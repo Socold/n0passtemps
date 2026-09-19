@@ -360,6 +360,9 @@ func TestPurgingASubjectRemovesItsTickets(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if err := s.SoftDeleteSubject(ctx, "tenant-a", "subject-1", ticketNow); err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
 	if err := s.PurgeSubject(ctx, "tenant-a", "subject-1"); err != nil {
 		t.Fatalf("purge: %v", err)
 	}

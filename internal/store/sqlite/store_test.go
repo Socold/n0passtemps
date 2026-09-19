@@ -999,6 +999,9 @@ func TestPurgeSubjectRemovesDependents(t *testing.T) {
 		}
 	}
 
+	if err := s.SoftDeleteSubject(ctx, "tenant-a", sub.ID, time.Now()); err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
 	if err := s.PurgeSubject(ctx, "tenant-a", sub.ID); err != nil {
 		t.Fatalf("purge: %v", err)
 	}
@@ -1225,5 +1228,36 @@ func TestErasureLifecycle(t *testing.T) {
 	}
 	if err := s.MarkErasurePurged(ctx, "tenant-a", "missing", base); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("purging an unknown request = %v, want ErrNotFound", err)
+	}
+}
+
+// TestARestoredSubjectIsNotPurged is the erasure that was cancelled while the
+// sweep that would have completed it was already running.
+//
+// The sweep purges from a list of due requests it read earlier. Cancelling
+// restores the subject, and a purge that only asked whether the row existed
+// removed the restored subject and every factor they had.
+func TestARestoredSubjectIsNotPurged(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	seedTenant(t, s, "tenant-a")
+	sub := seedSubject(t, s, "tenant-a", "subject-1", "ref-1")
+	at := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+
+	if err := s.PurgeSubject(ctx, "tenant-a", sub.ID); !errors.Is(err, store.ErrStaleWrite) {
+		t.Fatalf("purging a live subject = %v, want store.ErrStaleWrite", err)
+	}
+
+	if err := s.SoftDeleteSubject(ctx, "tenant-a", sub.ID, at); err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
+	if err := s.RestoreSubject(ctx, "tenant-a", sub.ID, at.Add(time.Minute)); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if err := s.PurgeSubject(ctx, "tenant-a", sub.ID); !errors.Is(err, store.ErrStaleWrite) {
+		t.Fatalf("purging a restored subject = %v, want store.ErrStaleWrite", err)
+	}
+	if _, err := s.GetSubject(ctx, "tenant-a", sub.ID); err != nil {
+		t.Fatalf("the restored subject is gone: %v", err)
 	}
 }

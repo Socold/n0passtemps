@@ -17,6 +17,28 @@
 // Argon2id evaluation. Hashing every stored code on each attempt would cost one
 // evaluation per issued code, which is both slow and a denial-of-service
 // vector.
+//
+// # Why the selector stays at thirty bits
+//
+// The selector is unique per tenant, enforced by an index, so issuing a batch
+// into a tenant that already holds n codes has roughly n/2^30 chance per code
+// of colliding and being refused. That is negligible for as long as n stays
+// bounded, and it did not: consumed codes used to be kept for the life of the
+// account, so n only ever grew and a tenant with a long history would start
+// seeing refusals on ordinary reissues.
+//
+// The answer is to bound n, which the janitor now does by removing codes spent
+// longer ago than its retention window. Widening the selector was the obvious
+// alternative and is the wrong one. The width is in the code the user holds:
+// every printed sheet in circulation carries twenty significant characters,
+// Split would refuse them the moment the constant moved, and an upgrade would
+// invalidate exactly the codes people keep for the day they cannot sign in.
+// Any change here has to accept both lengths for as long as the old sheets
+// exist, which is a real design and not a constant.
+//
+// Enrolment tickets share the format and the same index, and are already
+// bounded: the janitor deletes them at their expiry, consumed and revoked ones
+// included, so nothing accumulates there to collide with.
 package recovery
 
 import (
@@ -37,7 +59,10 @@ import (
 const (
 	alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
-	selectorLen = 6  // 30 bits, enough to keep collisions negligible
+	// 30 bits. Collisions stay negligible as long as the number of stored
+	// codes per tenant stays bounded, which is the janitor's job; see the
+	// package comment on why this is not simply made wider.
+	selectorLen = 6
 	verifierLen = 14 // 70 bits, far beyond any offline search
 	groupLen    = 5
 
@@ -63,8 +88,30 @@ const (
 	// digest width this package has written or would write, and refusing more
 	// keeps a damaged or crafted row from asking argon2 for a huge output.
 	maxStoredHashLen = 64
+
+	// Bounds on the cost parameters a stored PHC string may carry. Verify
+	// recomputes with the parameters of the row, not with the constants above,
+	// so without a ceiling a forged or damaged row could ask for gigabytes of
+	// memory or minutes of work on an unauthenticated request. The ceilings sit
+	// far above the baseline, which leaves room to raise it, and far below
+	// anything that would hurt the host. The salt floor is the RFC 9106
+	// minimum; this package has only ever written saltLen.
+	maxStoredMemory  = 256 * 1024 // KiB, that is 256 MiB
+	maxStoredTime    = 16
+	maxStoredThreads = 16
+	minStoredSaltLen = 8
 )
 
+// argonParams are the cost parameters read back from a stored PHC string.
+type argonParams struct {
+	memory  uint32 // KiB
+	time    uint32
+	threads uint8
+}
+
+// The errors this package reports. Both are deliberately coarse at the API
+// boundary: which half of a code was wrong is exactly what an attacker is
+// asking, and the caller answers a single generic refusal either way.
 var (
 	ErrMalformedCode = errors.New("recovery: malformed code")
 	ErrBadHash       = errors.New("recovery: malformed stored hash")
@@ -164,19 +211,20 @@ func Split(input string) (selector string, verifier []byte, err error) {
 // rather than false, so a corrupted row is not silently read as a failed
 // attempt.
 func Verify(verifier []byte, storedHash string) (bool, error) {
-	salt, want, err := decodeHash(storedHash)
+	params, salt, want, err := decodeHash(storedHash)
 	if err != nil {
 		return false, err
 	}
 	defer zeroize.Bytes(salt)
 	defer zeroize.Bytes(want)
 
-	// The recomputation uses the stored digest length, so a row written under
-	// a different argonKeyLen still verifies. decodeHash bounds that length by
-	// maxStoredHashLen, which is what keeps the conversion in range and stops
-	// a crafted row from asking argon2 for an absurd output.
+	// The recomputation uses the cost parameters and the digest length of the
+	// row, not the constants of this package, so a row written before the
+	// constants were raised still verifies. decodeHash has bounded all of them
+	// by this point: that is what keeps the conversion in range and stops a
+	// crafted row from asking argon2 for an absurd amount of work or output.
 	// #nosec G115 -- decodeHash rejects a stored hash longer than maxStoredHashLen (64 bytes)
-	got := argon2.IDKey(verifier, salt, argonTime, argonMemory, argonThreads, uint32(len(want)))
+	got := argon2.IDKey(verifier, salt, params.time, params.memory, params.threads, uint32(len(want)))
 	defer zeroize.Bytes(got)
 
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
@@ -192,8 +240,10 @@ func hashVerifier(verifier []byte) (string, error) {
 	sum := argon2.IDKey(verifier, salt, argonTime, argonMemory, argonThreads, argonKeyLen)
 	defer zeroize.Bytes(sum)
 
-	// PHC string format, so the parameters travel with the hash and can be
-	// raised later without invalidating existing rows.
+	// PHC string format, so the parameters travel with the hash. Verify reads
+	// them back and recomputes with them, which is what allows the constants to
+	// be raised later without invalidating existing rows. Such rows keep the
+	// cost they were written under: nothing here rehashes them.
 	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
 		argon2.Version, argonMemory, argonTime, argonThreads,
 		base64.RawStdEncoding.EncodeToString(salt),
@@ -201,43 +251,76 @@ func hashVerifier(verifier []byte) (string, error) {
 	), nil
 }
 
-func decodeHash(s string) (salt, sum []byte, err error) {
+// decodeHash parses a stored PHC string and bounds everything in it that
+// reaches argon2: the cost parameters, the salt and the digest length. Verify
+// relies on that, and does no hashing work until this has returned.
+func decodeHash(s string) (params argonParams, salt, sum []byte, err error) {
 	parts := strings.Split(s, "$")
 	if len(parts) != 6 || parts[0] != "" || parts[1] != "argon2id" {
-		return nil, nil, fmt.Errorf("%w: not an argon2id PHC string", ErrBadHash)
+		return argonParams{}, nil, nil, fmt.Errorf("%w: not an argon2id PHC string", ErrBadHash)
 	}
 
 	var version int
 	if _, err = fmt.Sscanf(parts[2], "v=%d", &version); err != nil {
-		return nil, nil, fmt.Errorf("%w: version: %v", ErrBadHash, err)
+		return argonParams{}, nil, nil, fmt.Errorf("%w: version: %v", ErrBadHash, err)
 	}
 	if version != argon2.Version {
-		return nil, nil, fmt.Errorf("%w: unsupported argon2 version %d", ErrBadHash, version)
+		return argonParams{}, nil, nil, fmt.Errorf("%w: unsupported argon2 version %d", ErrBadHash, version)
 	}
 
-	var m, t uint32
-	var p uint8
-	if _, err = fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &m, &t, &p); err != nil {
-		return nil, nil, fmt.Errorf("%w: parameters: %v", ErrBadHash, err)
+	if params, err = decodeParams(parts[3]); err != nil {
+		return argonParams{}, nil, nil, err
 	}
 
 	if salt, err = base64.RawStdEncoding.DecodeString(parts[4]); err != nil {
-		return nil, nil, fmt.Errorf("%w: salt: %v", ErrBadHash, err)
+		return argonParams{}, nil, nil, fmt.Errorf("%w: salt: %v", ErrBadHash, err)
+	}
+	if len(salt) < minStoredSaltLen {
+		zeroize.Bytes(salt)
+		return argonParams{}, nil, nil,
+			fmt.Errorf("%w: salt of %d bytes is shorter than %d", ErrBadHash, len(salt), minStoredSaltLen)
 	}
 	if sum, err = base64.RawStdEncoding.DecodeString(parts[5]); err != nil {
 		zeroize.Bytes(salt)
-		return nil, nil, fmt.Errorf("%w: hash: %v", ErrBadHash, err)
+		return argonParams{}, nil, nil, fmt.Errorf("%w: hash: %v", ErrBadHash, err)
 	}
 	if len(sum) == 0 {
 		zeroize.Bytes(salt)
-		return nil, nil, fmt.Errorf("%w: empty hash", ErrBadHash)
+		return argonParams{}, nil, nil, fmt.Errorf("%w: empty hash", ErrBadHash)
 	}
 	if len(sum) > maxStoredHashLen {
 		zeroize.Bytes(salt)
 		zeroize.Bytes(sum)
-		return nil, nil, fmt.Errorf("%w: hash of %d bytes exceeds %d", ErrBadHash, len(sum), maxStoredHashLen)
+		return argonParams{}, nil, nil,
+			fmt.Errorf("%w: hash of %d bytes exceeds %d", ErrBadHash, len(sum), maxStoredHashLen)
 	}
-	return salt, sum, nil
+	return params, salt, sum, nil
+}
+
+// decodeParams reads the m, t and p of a PHC string and refuses values no
+// version of this package would have written.
+//
+// Zero is refused as well as the excess. argon2 panics on a time or a
+// parallelism of zero, so a damaged row would otherwise take the request down
+// with it instead of being reported.
+func decodeParams(s string) (argonParams, error) {
+	var p argonParams
+	if _, err := fmt.Sscanf(s, "m=%d,t=%d,p=%d", &p.memory, &p.time, &p.threads); err != nil {
+		return argonParams{}, fmt.Errorf("%w: parameters: %v", ErrBadHash, err)
+	}
+	if p.memory == 0 || p.memory > maxStoredMemory {
+		return argonParams{},
+			fmt.Errorf("%w: memory of %d KiB is outside 1..%d", ErrBadHash, p.memory, maxStoredMemory)
+	}
+	if p.time == 0 || p.time > maxStoredTime {
+		return argonParams{},
+			fmt.Errorf("%w: time of %d is outside 1..%d", ErrBadHash, p.time, maxStoredTime)
+	}
+	if p.threads == 0 || p.threads > maxStoredThreads {
+		return argonParams{},
+			fmt.Errorf("%w: parallelism of %d is outside 1..%d", ErrBadHash, p.threads, maxStoredThreads)
+	}
+	return p, nil
 }
 
 // randomChars draws n characters uniformly from the alphabet.

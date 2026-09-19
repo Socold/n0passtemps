@@ -1,11 +1,12 @@
 // Package janitor runs the periodic maintenance the service needs in order not
 // to accumulate state it can never clear.
 //
-// Six things expire on their own and nothing on the request path removes them:
-// WebAuthn challenges whose ceremony was abandoned, enrolment tickets nobody
-// redeemed, throttle buckets whose window has long passed, approval requests
-// nobody decided, erasure requests whose retention window has closed, and audit
-// entries past the configured retention.
+// Seven things expire on their own and nothing on the request path removes
+// them: WebAuthn challenges whose ceremony was abandoned, enrolment tickets
+// nobody redeemed, throttle buckets whose window has long passed, approval
+// requests nobody decided, erasure requests whose retention window has closed,
+// recovery codes spent long enough ago that they answer no remaining question,
+// and audit entries past the configured retention.
 //
 // Each sweep is independent and a failure in one must not stop the others. A
 // janitor that stops after its first error is a janitor that silently stops
@@ -41,10 +42,12 @@ package janitor
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -113,18 +116,27 @@ const releaseTimeout = 5 * time.Second
 
 // replicaOwner names this process in the sweep lock.
 //
-// The host and the process identifier together, because neither is enough
-// alone: two replicas of one deployment share neither, while two processes on
-// one host share the host and two pods restarted in turn can be given the same
-// name. A hostname that cannot be read is not worth refusing to sweep over, so
-// it degrades to the identifier; the owner is a label for an operator and the
-// condition on a release, never a credential.
+// Three parts, because the first two are not distinctive on their own. Two
+// replicas of one deployment share neither the host nor the process identifier
+// in the ordinary case, but two containers of the same image are routinely
+// given the same hostname and both run their service as process 1, and on that
+// deployment every replica would call itself the same thing. The lease release
+// is conditional on the owner, so two replicas answering to one name can each
+// delete the lease the other is relying on, and both then sweep the same
+// interval. The third part is drawn once per process and settles it.
+//
+// A hostname that cannot be read is not worth refusing to sweep over, so it
+// degrades to the rest; the owner is a label for an operator and the condition
+// on a release, never a credential.
 func replicaOwner() string {
 	host, err := os.Hostname()
 	if err != nil || host == "" {
 		host = "unknown"
 	}
-	return host + "/" + strconv.Itoa(os.Getpid())
+	// Forty bits of randomness: far more than enough to separate two processes
+	// that start in the same second, and short enough to read in a log line.
+	nonce := strings.ToLower(rand.Text()[:8])
+	return host + "/" + strconv.Itoa(os.Getpid()) + "/" + nonce
 }
 
 // SetKEKProbe wires in the keyring status, so an overdue rotation raises an
@@ -164,14 +176,41 @@ func (j *Janitor) Run(ctx context.Context) {
 	}
 }
 
+// consumedRecoveryCodeRetention is how long a spent recovery code is kept
+// before the sweep removes it.
+//
+// A spent code is evidence of an authentication, and the question it answers,
+// which code was used and when, is asked while an incident is being looked
+// into rather than years later; past that the audit log is the durable record
+// and the row is a copy of what the log already says. Ninety days is chosen to
+// outlast the month an investigation is opened in and the one after it.
+//
+// It is a constant rather than a setting because it is not a decision an
+// operator has to weigh: the retention that matters for the audit trail is
+// audit.retention_days, which is separate, defaults to keeping everything, and
+// is where an obligation to retain authentication records is expressed.
+const consumedRecoveryCodeRetention = 90 * 24 * time.Hour
+
+// consumedRecoveryCodePruner is the part of a store that can remove spent
+// recovery codes.
+//
+// It is declared here, next to the only caller, rather than in the store
+// contract, because it is a maintenance capability and not something any other
+// part of the service asks a store for. A store that does not offer it is used
+// unchanged and that sweep does nothing; both engines do offer it.
+type consumedRecoveryCodePruner interface {
+	DeleteConsumedRecoveryCodes(ctx context.Context, before time.Time) (int64, error)
+}
+
 // Result counts what one pass removed.
 type Result struct {
-	Challenges  int64
-	Tickets     int64
-	Throttles   int64
-	Approvals   int64
-	Erasures    int64
-	AuditPruned int64
+	Challenges    int64
+	Tickets       int64
+	Throttles     int64
+	Approvals     int64
+	Erasures      int64
+	RecoveryCodes int64
+	AuditPruned   int64
 
 	// Skipped is true when the pass did not run because another replica held
 	// the sweep lock. It is the normal outcome on every replica but one, so a
@@ -285,6 +324,13 @@ func (j *Janitor) Sweep(ctx context.Context) Result {
 		res.Errors = append(res.Errors, err)
 	}
 
+	n, err = j.pruneConsumedRecoveryCodes(ctx, now)
+	if err != nil {
+		res.Errors = append(res.Errors, err)
+	} else {
+		res.RecoveryCodes = n
+	}
+
 	n, err = j.pruneAudit(ctx, now)
 	if err != nil {
 		res.Errors = append(res.Errors, err)
@@ -328,6 +374,15 @@ func (j *Janitor) purgeDueErasures(ctx context.Context, now time.Time) (int64, e
 		}
 
 		err = j.store.PurgeSubject(ctx, er.TenantID, er.SubjectID)
+		if errors.Is(err, store.ErrStaleWrite) {
+			// The erasure was cancelled and the subject restored after the
+			// list above was read. Not a failure of the sweep, and not
+			// something to mark purged: the request is no longer pending and
+			// will not be listed again.
+			j.log.WarnContext(ctx, "due erasure skipped, the subject is no longer pending deletion",
+				slog.String("erasure_id", er.ID))
+			continue
+		}
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			errs = append(errs, err)
 			j.log.ErrorContext(ctx, "subject not purged for due erasure",
@@ -362,6 +417,37 @@ func (j *Janitor) purgeDueErasures(ctx context.Context, now time.Time) (int64, e
 	}
 
 	return purged, errors.Join(errs...)
+}
+
+// pruneConsumedRecoveryCodes removes the codes spent longer ago than the
+// retention above.
+//
+// Unused codes are never touched here. A code the user still holds is theirs
+// until they spend it or print a new sheet, and removing one would leave them
+// with a sheet that no longer works and no way to know which line failed.
+//
+// Keeping spent codes for ever was not only untidy. The selector half of a code
+// is thirty bits and has to be unique within the tenant, so every code that
+// stays is one more chance for the next batch to collide with it and be
+// refused; a tenant that never loses a row eventually reissues codes for a
+// living. See internal/crypto/recovery on why the answer is here rather than a
+// wider selector.
+func (j *Janitor) pruneConsumedRecoveryCodes(ctx context.Context, now time.Time) (int64, error) {
+	pruner, ok := j.store.(consumedRecoveryCodePruner)
+	if !ok {
+		return 0, nil
+	}
+
+	n, err := pruner.DeleteConsumedRecoveryCodes(ctx, now.Add(-consumedRecoveryCodeRetention))
+	if err != nil {
+		return 0, err
+	}
+	if n > 0 {
+		j.log.InfoContext(ctx, "spent recovery codes removed",
+			slog.Int64("removed", n),
+			slog.Duration("retention", consumedRecoveryCodeRetention))
+	}
+	return n, nil
 }
 
 // pruneAudit trims the audit log to the configured retention.
@@ -416,6 +502,7 @@ func (j *Janitor) report(ctx context.Context, res Result) {
 		slog.Int64("throttles", res.Throttles),
 		slog.Int64("approvals", res.Approvals),
 		slog.Int64("erasures", res.Erasures),
+		slog.Int64("recovery_codes", res.RecoveryCodes),
 		slog.Int64("audit_pruned", res.AuditPruned),
 	}
 
@@ -427,7 +514,8 @@ func (j *Janitor) report(ctx context.Context, res Result) {
 
 	// A pass that removed nothing is the normal case and should not produce a
 	// log line at info level every interval.
-	total := res.Challenges + res.Tickets + res.Throttles + res.Approvals + res.Erasures + res.AuditPruned
+	total := res.Challenges + res.Tickets + res.Throttles + res.Approvals + res.Erasures +
+		res.RecoveryCodes + res.AuditPruned
 	if total == 0 {
 		j.log.DebugContext(ctx, "janitor pass completed", attrs...)
 		return

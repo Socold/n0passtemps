@@ -263,6 +263,25 @@ func (s *Store) RestoreSubject(ctx context.Context, tenantID, id string, at time
 // second because a bucket is addressed by an opaque key rather than by a row
 // reference. Both are therefore deleted explicitly.
 //
+// alerts and erasure_requests are the two tables that name a subject and
+// outlive it, and each is dealt with according to what it is for. An alert is
+// an operational signal about something that happened to one account: it
+// carries the subject's identifier, a summary written for an operator and a
+// free-form detail document, none of which has any reason to survive the person
+// it is about, so the alerts raised about this subject are deleted. An erasure
+// request is the record that the erasure was asked for and carried out, so the
+// row stays; what goes is the reason, the one field in it an operator fills in
+// prose and the one that can therefore name the person, quote their message or
+// give the ticket they wrote from. Every request ever filed against this
+// subject is cleared, not only the one being completed, because a cancelled
+// request from last year carries a reason written the same way.
+//
+// What is left of the request is the proof: who asked, when, when it fell due,
+// and that it ended in a purge. The subject identifier stays with it. It is
+// opaque, the row it referred to has just been deleted, and it is what makes
+// the record answer the question the record exists for, which is which account
+// this erasure was.
+//
 // audit_log is deliberately untouched. Erasure of audit entries rewrites them in
 // place through EraseSubjectAuditEntries, which keeps the hash chain verifiable;
 // deleting them here would break verification for every entry that follows, and
@@ -277,14 +296,27 @@ func (s *Store) PurgeSubject(ctx context.Context, tenantID, id string) error {
 		// removed, so a purge aimed at another tenant's identifier deletes
 		// nothing at all rather than the rows that happen to match on
 		// subject_id alone.
-		var found string
+		var pending bool
 		err := tx.QueryRow(ctx,
-			`SELECT id FROM subjects WHERE tenant_id = $1 AND id = $2`, tenantID, id).Scan(&found)
+			`SELECT deleted_at IS NOT NULL FROM subjects WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+			tenantID, id).Scan(&pending)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return store.ErrNotFound
 		}
 		if err != nil {
 			return fmt.Errorf("postgres: read subject: %w", err)
+		}
+
+		// A subject that is not pending deletion is not purged. Cancelling an
+		// erasure restores the subject, and the sweep that purges works from a
+		// list read earlier: without this, a subject restored in between was
+		// purged all the same, factors and all, under a request marked
+		// cancelled. Checked here, in the transaction that deletes, because
+		// nowhere earlier can know.
+		// The row is locked by the read above, so a restore cannot land between
+		// this check and the delete.
+		if !pending {
+			return fmt.Errorf("%w: the subject is not pending deletion", store.ErrStaleWrite)
 		}
 
 		if _, err := tx.Exec(ctx,
@@ -300,13 +332,28 @@ func (s *Store) PurgeSubject(ctx context.Context, tenantID, id string) error {
 		}
 
 		if _, err := tx.Exec(ctx,
+			`DELETE FROM alerts WHERE tenant_id = $1 AND subject_id = $2`,
+			tenantID, id); err != nil {
+			return mapError(err)
+		}
+
+		// The request itself survives; only the operator's prose goes. See the
+		// comment above this function.
+		if _, err := tx.Exec(ctx, `
+			UPDATE erasure_requests SET reason = NULL
+			WHERE tenant_id = $1 AND subject_id = $2 AND reason IS NOT NULL`,
+			tenantID, id); err != nil {
+			return mapError(err)
+		}
+
+		if _, err := tx.Exec(ctx,
 			`DELETE FROM subjects WHERE tenant_id = $1 AND id = $2`, tenantID, id); err != nil {
 			return mapError(err)
 		}
 		return nil
 	})
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrStaleWrite) {
 			return err
 		}
 		return fmt.Errorf("postgres: purge subject: %w", err)

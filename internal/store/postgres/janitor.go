@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -61,6 +62,33 @@ const janitorSweepLockKey int64 = 7731116966443686148
 // worked when the sixth failed and hold a snapshot open for minutes on the
 // tables the sweep is there to keep small.
 //
+// # The one deployment this cannot work in
+//
+// A session-level lock assumes that a connection checked out of the pool is one
+// server session for as long as it is held. A connection pooler in transaction
+// mode breaks that assumption by design: it hands a server connection back
+// after every transaction, so the statement that unlocks may reach a different
+// backend from the one that locked. The unlock then reports that this session
+// never held the lock, while the backend that did holds it until the pooler
+// recycles it, and every replica skips every pass in the meantime. That is the
+// one failure mode where the lock stops being free: it would cost the erasure
+// purges, not just some duplicated work.
+//
+// So the pinning is checked rather than assumed, by asking the same checked-out
+// connection for its backend identifier twice. Two different answers can only
+// mean the session moved, which is proof; two identical answers prove nothing,
+// because a pooler with an idle pool will happily hand back the same server
+// connection. The check is therefore sound when it fires and best-effort when
+// it does not, and it runs before the lock is taken so that a deployment it
+// fires on never leaves a lock behind on a backend nobody can reach.
+//
+// What happens when it fires is that this deployment sweeps without the lock.
+// The janitor package states the property that allows it: every sweep is an
+// idempotent conditional delete, so two replicas sweeping one interval leave
+// the same database behind, and the lock removes waste rather than taking on a
+// correctness duty. Refusing to sweep would be the one answer that turns a
+// deployment topology into a compliance failure.
+//
 // now and lease are ignored, which store.JanitorLockStore allows and this
 // comment is the required notice: the lock lives on the connection rather than
 // on a clock, so there is no expiry to compute and no clock skew between
@@ -70,10 +98,32 @@ func (s *Store) TryAcquireJanitorLock(ctx context.Context, owner string, _ time.
 	if owner == "" {
 		return nil, errors.New("postgres: janitor lock requires an owner")
 	}
+	if s.sessionsPooled.Load() {
+		return unpinnedSession{}, nil
+	}
 
 	conn, err := s.pool.Acquire(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: take a connection for the janitor lock: %w", err)
+	}
+
+	pinned, err := sessionIsPinned(ctx, conn)
+	if err != nil {
+		conn.Release()
+		return nil, fmt.Errorf("postgres: check the janitor lock connection: %w", mapError(err))
+	}
+	if !pinned {
+		conn.Release()
+		s.sessionsPooled.Store(true)
+		s.log.WarnContext(ctx,
+			"janitor sweep lock disabled: the database connection is not a session, so a "+
+				"session-level advisory lock cannot be held across one pass. This deployment "+
+				"reaches PostgreSQL through a connection pooler in transaction mode. Every "+
+				"replica will now sweep every interval, which duplicates work and changes no "+
+				"outcome; point the janitor at the database directly, or use session pooling, "+
+				"to have one replica sweep per interval",
+			slog.String("owner", owner))
+		return unpinnedSession{}, nil
 	}
 
 	var taken bool
@@ -89,6 +139,35 @@ func (s *Store) TryAcquireJanitorLock(ctx context.Context, owner string, _ time.
 	}
 	return &janitorLock{conn: conn}, nil
 }
+
+// sessionIsPinned reports whether two statements on one checked-out connection
+// reach the same backend.
+//
+// Two statements rather than one: a single statement cannot tell, since it runs
+// wherever it runs and reports one identifier either way. Outside a
+// transaction, which is deliberate, because a transaction is exactly what a
+// transaction-mode pooler does pin and the question here is what happens
+// between two of them, which is where the unlock would land.
+func sessionIsPinned(ctx context.Context, conn *pgxpool.Conn) (bool, error) {
+	var first, second int32
+	if err := conn.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&first); err != nil {
+		return false, err
+	}
+	if err := conn.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&second); err != nil {
+		return false, err
+	}
+	return first == second, nil
+}
+
+// unpinnedSession stands in for a lock in the deployment that cannot hold one.
+//
+// It grants every pass, because the alternative is a deployment that never
+// sweeps, and it releases nothing, because it took nothing. See the argument
+// above TryAcquireJanitorLock.
+type unpinnedSession struct{}
+
+// Release implements store.JanitorLock.
+func (unpinnedSession) Release(context.Context) error { return nil }
 
 // janitorLock is a held advisory lock and the connection its session belongs to.
 // The two cannot be separated: returning the connection without unlocking would

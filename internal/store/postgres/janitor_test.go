@@ -134,6 +134,76 @@ func TestJanitorLockDiesWithTheConnection(t *testing.T) {
 	}
 }
 
+// TestJanitorLockChecksThatTheSessionIsPinned covers the deployment this lock
+// cannot work in, and the deployment it can.
+//
+// A session-level advisory lock assumes that a connection checked out of the
+// pool is one server session until it is handed back. A connection pooler in
+// transaction mode breaks that by design, and the unlock then reaches a
+// different backend from the one that locked: the lock stays held until the
+// pooler recycles the connection, and every replica skips every pass in the
+// meantime, erasure purges included.
+//
+// The check runs before the lock is taken, so a deployment it fires on never
+// leaves a lock behind that nobody can reach. Against the cluster this suite
+// points at, which is a direct connection, it must never fire: a false positive
+// would turn the coordination off on a deployment that has it.
+func TestJanitorLockChecksThatTheSessionIsPinned(t *testing.T) {
+	ctx := context.Background()
+	s := replica(t)
+
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("take a connection: %v", err)
+	}
+	defer conn.Release()
+
+	pinned, err := sessionIsPinned(ctx, conn)
+	if err != nil {
+		t.Fatalf("check the connection: %v", err)
+	}
+	if !pinned {
+		t.Error("a direct connection to the cluster reported two different backends: the janitor " +
+			"lock would be turned off on a deployment that can hold it")
+	}
+}
+
+// TestJanitorLockFallsBackWhenTheSessionIsNotPinned states what happens on the
+// deployment where the check does fire.
+//
+// The pass goes on without the lock rather than not going on. The janitor
+// package states the property that allows it: every sweep is an idempotent
+// conditional delete, so two replicas sweeping one interval leave the same
+// database behind, and the lock removes waste rather than taking on a
+// correctness duty. Refusing to sweep would turn a connection topology into a
+// compliance failure, which is the one outcome that is not allowed.
+func TestJanitorLockFallsBackWhenTheSessionIsNotPinned(t *testing.T) {
+	ctx := context.Background()
+	s := replica(t)
+	s.sessionsPooled.Store(true)
+
+	first, err := s.TryAcquireJanitorLock(ctx, "replica-a", janitorNow, janitorLease)
+	if err != nil {
+		t.Fatalf("the pass was refused: %v", err)
+	}
+
+	// And a second pass at the same moment is granted too, which is the cost
+	// being accepted: duplicated work, and nothing else.
+	second, err := s.TryAcquireJanitorLock(ctx, "replica-b", janitorNow, janitorLease)
+	if err != nil {
+		t.Fatalf("the second pass was refused: %v", err)
+	}
+
+	for _, lock := range []store.JanitorLock{first, second} {
+		if _, ok := lock.(unpinnedSession); !ok {
+			t.Fatalf("the lock is a %T, want the stand-in that holds nothing", lock)
+		}
+		if err := lock.Release(ctx); err != nil {
+			t.Errorf("release: %v", err)
+		}
+	}
+}
+
 func TestJanitorLockRefusesAnEmptyOwner(t *testing.T) {
 	// The owner names the replica in the log an operator reads. A pass that
 	// cannot say who is sweeping is a misuse of the interface, not a lost race,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -13,6 +14,23 @@ import (
 
 const recoveryColumns = `id, tenant_id, subject_id, batch_id, selector, verifier_hash,
 	created_at, consumed_at`
+
+// recoveryBatchLockKey derives the advisory key that one subject's batch
+// replacement holds.
+//
+// The literal below is part of the derivation and must not be reworded: two
+// replicas that hashed different strings would compute different keys for the
+// same subject and would not exclude each other, which is the whole point of
+// the lock. It names this project so the key cannot collide with an advisory
+// lock some other part of a deployment takes, in the same way
+// auditAppendLockKey does, and the tenant and the subject are separated by a
+// NUL so that two different pairs cannot concatenate to the same string.
+func recoveryBatchLockKey(tenantID, subjectID string) int64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte("n0passtemps/recovery_codes\x00" + tenantID + "\x00" + subjectID))
+	// #nosec G115 -- an advisory key is an opaque 64 bit value and the server's parameter is signed
+	return int64(h.Sum64())
+}
 
 // ReplaceRecoveryCodes implements store.RecoveryStore.
 //
@@ -27,6 +45,19 @@ const recoveryColumns = `id, tenant_id, subject_id, batch_id, selector, verifier
 // counters and the audit trail would then disagree about how many codes the
 // subject actually used. Codes that have genuinely been consumed are left in
 // place: they are evidence of an authentication and belong in the trail.
+//
+// The transaction opens by taking an advisory lock on the subject, and that is
+// the one place this implementation needs more than the SQLite one. The
+// statements above exclude nothing on their own: under READ COMMITTED each of
+// two concurrent replacements deletes the codes it can see, which are the ones
+// committed before it started, and then inserts a batch the other cannot see
+// either. Both commit, and the subject is left holding two live sheets when
+// they were told the first was dead. There is no row to lock, because the rows
+// that would conflict have not been written yet, so the lock is taken on the
+// subject's name instead. It is per subject rather than global, so two users
+// reprinting their sheets at the same moment do not queue behind each other,
+// and it is a transaction-level lock, so it is released at commit or rollback
+// whatever happens next.
 func (s *Store) ReplaceRecoveryCodes(ctx context.Context, tenantID, subjectID, batchID string,
 	codes []*store.RecoveryCode) error {
 	if tenantID == "" || subjectID == "" || batchID == "" {
@@ -47,6 +78,11 @@ func (s *Store) ReplaceRecoveryCodes(ctx context.Context, tenantID, subjectID, b
 	now := time.Now().UTC()
 
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`,
+			recoveryBatchLockKey(tenantID, subjectID)); err != nil {
+			return fmt.Errorf("take the recovery batch lock: %w", err)
+		}
+
 		if _, err := tx.Exec(ctx, `
 			DELETE FROM recovery_codes
 			WHERE tenant_id = $1 AND subject_id = $2 AND consumed_at IS NULL AND batch_id <> $3`,
@@ -140,6 +176,30 @@ func (s *Store) ConsumeRecoveryCode(ctx context.Context, tenantID, id string, at
 		return fmt.Errorf("postgres: consume recovery code: read code: %w", err)
 	}
 	return store.ErrStaleWrite
+}
+
+// DeleteConsumedRecoveryCodes removes the codes spent before the given instant.
+//
+// It is the counterpart of the enrolment ticket sweep, and it exists for the
+// same two reasons. A spent code is evidence of an authentication, so it is
+// kept for long enough to answer a question about that authentication, and the
+// durable record past that point is the audit log. And a code that stays
+// keeps its selector, which is 30 bits and has to be unique within the tenant:
+// a table nothing ever shrinks is one whose next batch is a little more likely
+// to collide with something spent years ago and be refused. See
+// internal/crypto/recovery on why the selector is that wide and why widening it
+// is not the answer.
+//
+// The sweep spans every tenant, because the janitor acts on behalf of none of
+// them, and the janitor is what chooses the retention window.
+func (s *Store) DeleteConsumedRecoveryCodes(ctx context.Context, before time.Time) (int64, error) {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM recovery_codes WHERE consumed_at IS NOT NULL AND consumed_at < $1`,
+		before)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: delete consumed recovery codes: %w", mapError(err))
+	}
+	return tag.RowsAffected(), nil
 }
 
 // CountUnusedRecoveryCodes implements store.RecoveryStore.

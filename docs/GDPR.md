@@ -69,8 +69,8 @@ account.
 | Authenticator model, flags, transports, counter | `webauthn_credentials.aaguid` and the flag columns | Clear | Database access controls. The AAGUID reveals which authenticator models are in use, which is inventory information | Until purge, cascaded |
 | Credential label | `webauthn_credentials.label` | Clear | Database access controls. Supplied by the caller, so it holds whatever the caller put there | Until purge, cascaded |
 | TOTP shared secret | `totp_secrets.secret_sealed` | Envelope-encrypted | The KEK. This is a symmetric secret the server must read back, which is what genuinely requires encryption rather than hashing | Until purge, cascaded |
-| Recovery code verifiers | `recovery_codes.verifier_hash` | Argon2id PHC string, `m=19456` KiB, `t=2`, `p=1` | Not reversible. A stolen database yields no usable code even to an attacker holding the KEK; see [ADR 0005](adr/0005-hash-recovery-codes-do-not-encrypt-them.md) | Until purge, cascaded |
-| Recovery code selectors | `recovery_codes.selector` | Clear, 30 bits | Not personal data on its own; it is a lookup key for a code, not for a person | Until purge, cascaded |
+| Recovery code verifiers | `recovery_codes.verifier_hash` | Argon2id PHC string, `m=19456` KiB, `t=2`, `p=1` | Not reversible. A stolen database yields no usable code even to an attacker holding the KEK; see [ADR 0005](adr/0005-hash-recovery-codes-do-not-encrypt-them.md) | Until purge, cascaded, or 90 days after the code is spent |
+| Recovery code selectors | `recovery_codes.selector` | Clear, 30 bits | Not personal data on its own; it is a lookup key for a code, not for a person | Until purge, cascaded, or 90 days after the code is spent |
 | Ceremony state | `webauthn_challenges` | Opaque session blob plus `subject_id` | Swept by the janitor once `expires_at` passes | `webauthn.challenge_ttl`, default 5 minutes, then the next janitor pass |
 | Source IP address, in the audit log | `audit_log.source_ip` | Clear, committed through the salted digest | Cleared and its salt destroyed on erasure | `audit.retention_days`, default 0, meaning kept indefinitely |
 | Source IP address, in rate-limiting state | `throttle_buckets.bucket_key` | Not stored. The bucket key is a truncated SHA-256 over a domain separator, the dimension, the tenant and the normalised network | The address itself never reaches the table. IPv6 is bucketed by `/64`, IPv4 by the address | Swept by the janitor once the window has long passed |
@@ -78,8 +78,8 @@ account.
 | Subject reference, in logs | Log field `subject_ref` | Replaced with `ref:` plus six bytes of a domain-separated digest when `logging.redact_subject_refs` is true, which is the default | Redaction is enforced in the log handler, not at the call site, so a new call site cannot forget it | Operator's log retention |
 | Subject identifier, in the audit log | `audit_log.subject_id` | Clear, committed through the salted digest | Cleared and its salt destroyed on erasure | `audit.retention_days` |
 | Audit event detail | `audit_log.detail` | JSON, clear | Cleared on erasure. Holds counts, reasons and identifiers, and specifically not secrets | `audit.retention_days` |
-| Alert rows | `alerts.subject_id`, `.resource_id`, `.summary`, `.detail` | Clear | Database access controls. An alert summary never carries a secret: a secret in an alert row is a secret in a screenshot | No automatic expiry. Acknowledged alerts remain |
-| Erasure request | `erasure_requests` | Clear, including the reason the operator typed | Database access controls. Survives the purge of the subject it refers to, as the record that the erasure happened | No automatic expiry |
+| Alert rows | `alerts.subject_id`, `.resource_id`, `.summary`, `.detail` | Clear | Database access controls. An alert summary never carries a secret: a secret in an alert row is a secret in a screenshot | No automatic expiry, acknowledged alerts included. The alerts raised about a subject are deleted when that subject is purged |
+| Erasure request | `erasure_requests`, without the reason once the purge has run | Clear. The reason the operator typed is cleared by the purge, on every request ever filed against that subject | Database access controls. The rest of the row survives the purge of the subject it refers to, as the record that the erasure happened | No automatic expiry |
 
 Two things the service never stores in any form: a password, because there are
 none, and a recovery code in a readable form.
@@ -219,13 +219,28 @@ entries were redacted.
 - deletes the subject's `throttle_buckets` rows, found through the
   `subject_id` column that exists for exactly this reason, since the bucket key
   is an opaque hash no predicate could otherwise match,
+- deletes the `alerts` rows raised about the subject. An alert carries the
+  subject identifier, a summary and a detail document, all written about one
+  account, and none of it has any reason to outlive the person it is about.
+  Alerts about the deployment rather than about anyone carry no `subject_id`
+  and are untouched,
+- clears the `reason` from every `erasure_requests` row naming the subject,
+  including requests cancelled long ago. It is the one field in that table an
+  operator fills in prose, so it is where a name, a quoted message or a support
+  ticket ends up,
 - deletes the `subjects` row, which cascades to `webauthn_credentials`,
   `totp_secrets` and `recovery_codes` through `ON DELETE CASCADE`,
-- confirms the subject belongs to the tenant before removing anything, so a
-  purge aimed at another tenant's identifier deletes nothing at all.
+- confirms the subject belongs to the tenant and is still pending deletion
+  before removing anything, so a purge aimed at another tenant's identifier
+  deletes nothing at all, and a subject restored while the sweep was running is
+  not purged under a request that has been cancelled.
 
 The erasure request itself is then marked `purged` and survives, as the record
-that the erasure happened and who asked for it.
+that the erasure happened and who asked for it: its identifier, the
+administrator who requested it, when it was requested, when it fell due and
+that it ended in a purge. The subject identifier stays with it, which is what
+makes the record answer the question it exists for, and refers to a row that no
+longer exists.
 
 The audit entries are handled separately, and that is the next section.
 
@@ -382,13 +397,14 @@ outside it.
 
 | Data | Default | Setting |
 |---|---|---|
-| Subject, credentials, TOTP secret, recovery codes | Kept until erasure | None. A record is kept while the account exists |
+| Subject, credentials, TOTP secret, unused recovery codes | Kept until erasure | None. A record is kept while the account exists |
+| Spent recovery codes | 90 days from the moment the code was used | None. The code is evidence of one authentication, and the durable record past that is the audit log |
 | Audit log | Kept indefinitely | `audit.retention_days`, default 0 |
 | Ceremony state | 5 minutes | `webauthn.challenge_ttl` |
 | Throttle counters | Swept once stale | `throttle.window`, and the janitor |
 | Approval requests | 24 hours from the request to decide and to redeem, then `expired` or unredeemable | `features.approval_ttl` |
 | Pending erasure | 30 days, then purged | `features.erasure_retention` |
-| Alerts | Kept indefinitely | None |
+| Alerts | Kept indefinitely, except that the alerts about a subject go when that subject is purged | None |
 | Logs | Not the service's concern | The operator's log pipeline |
 
 `audit.retention_days = 0` is the default because silently discarding audit

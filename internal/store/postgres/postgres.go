@@ -58,6 +58,19 @@
 // concurrent appends under READ COMMITTED can both read the same head. That is
 // resolved with an advisory lock; see audit.go for why an advisory lock rather
 // than LOCK TABLE, and why not SERIALIZABLE with a retry.
+//
+// READ COMMITTED is not assumed, it is asked for: every transaction is opened
+// with the level named, so a cluster whose default_transaction_isolation has
+// been raised does not quietly give these transactions a snapshot they are not
+// written for. The argument is at inTx.
+//
+// Two operations need more than one statement and more than the row locks the
+// statements themselves take, because the rows they have to exclude do not
+// exist yet: replacing a subject's recovery codes, and creating a TOTP secret
+// for them. The first takes an advisory lock for the length of its transaction,
+// argued in recovery.go. The second is left to the schema, which since
+// migration 0008 admits one pending secret per subject, in the same way the
+// enrolment tickets have been since 0003.
 package postgres
 
 import (
@@ -68,6 +81,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -83,6 +97,17 @@ type Store struct {
 	pool *pgxpool.Pool
 	log  *slog.Logger
 	dsn  string
+
+	// sessionsPooled records that a connection taken out of the pool has been
+	// seen to move from one server session to another between two statements,
+	// which is what a connection pooler in transaction mode does. Nothing here
+	// depends on a session outliving a statement except the janitor lock, so
+	// the flag is read there and nowhere else; see janitor.go.
+	//
+	// It is only ever set, never cleared: a deployment does not stop being
+	// pooled, and one observation is proof while no number of observations to
+	// the contrary is.
+	sessionsPooled atomic.Bool
 }
 
 // Options configure Open.
@@ -259,11 +284,19 @@ func (s *Store) appliedMigrations(ctx context.Context) (map[int]string, error) {
 // inTx runs fn inside a transaction and commits, or rolls back if fn returns an
 // error.
 //
-// The default isolation level is used throughout. READ COMMITTED is enough for
-// every transaction here, because the operations that need more than statement
-// atomicity take an explicit lock instead; see the package comment.
+// READ COMMITTED is asked for explicitly rather than taken from the server.
+// It is the level every transaction here is written against: each one either
+// re-reads what it is about to change or takes a lock, and neither works the
+// same way under a snapshot held for the whole transaction. A cluster
+// configured with default_transaction_isolation = repeatable read, which some
+// deployments do set, would give the audit append a snapshot taken at its first
+// statement, which is the very statement that waits for the chain's advisory
+// lock: the appender that waited would then read the chain head as it stood
+// before the holder committed, and the two entries would both claim the same
+// predecessor. Naming the level costs nothing and takes the question away from
+// the server's configuration.
 func (s *Store) inTx(ctx context.Context, fn func(pgx.Tx) error) error {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
@@ -471,12 +504,12 @@ func truncate(s string, n int) string {
 
 // clampLimit bounds a caller-supplied page size. A zero or negative limit means
 // the caller did not choose, and gets the default rather than everything.
-func clampLimit(limit, def, max int) int {
+func clampLimit(limit, def, maxLimit int) int {
 	if limit <= 0 {
 		return def
 	}
-	if limit > max {
-		return max
+	if limit > maxLimit {
+		return maxLimit
 	}
 	return limit
 }

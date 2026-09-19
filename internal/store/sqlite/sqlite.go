@@ -25,6 +25,31 @@
 // UTC with nine fractional digits. The width matters: time.RFC3339Nano removes
 // trailing zeros, which breaks the lexicographic ordering that every ORDER BY
 // and every range index on these columns depends on.
+//
+// # Durability
+//
+// The write pool commits with synchronous FULL, so a transaction that has
+// returned has been fsynced to the write-ahead log. NORMAL, the usual advice
+// under WAL, cannot corrupt the database but can lose the tail of the most
+// recent transactions after a power loss, and every single-use record this
+// schema holds is a record whose loss un-spends it: a recovery code becomes
+// unused again, a TOTP timestep can be replayed, a consumed enrolment ticket
+// can be redeemed a second time. Audit entries are worse still, because an
+// entry already sent to an external witness would come back with a different
+// sequence number and the witness would disagree with the log for ever. The
+// cost is one fsync per commit on a path that already computes an Argon2id
+// hash or verifies a signature, which is not where the time goes.
+//
+// # File permissions
+//
+// The database holds sealed secrets, the reference HMACs, the Argon2id hashes
+// of the recovery codes and the personal fields of the audit log, so nothing in
+// it is readable by another local account if this package can help it. Open
+// narrows the data directory to 0700 and the database file and its -wal and
+// -shm companions to 0600 whenever it finds them wider, says so in the log, and
+// refuses to start only when the narrowing itself fails, which means the paths
+// belong to another account and the operator has to act. The argument is at
+// ensureParentDir and at tightenFileModes.
 package sqlite
 
 import (
@@ -48,6 +73,13 @@ import (
 // timeLayout is fixed width so that string comparison orders instants
 // correctly. See the package comment.
 const timeLayout = "2006-01-02T15:04:05.000000000Z"
+
+// The widest permissions the database is allowed to sit behind. See the package
+// comment on what is in it.
+const (
+	dataDirMode  os.FileMode = 0o700
+	dataFileMode os.FileMode = 0o600
+)
 
 // Store is the SQLite implementation of store.Store.
 type Store struct {
@@ -96,7 +128,7 @@ func Open(opts Options) (*Store, error) {
 
 	memory := isMemoryDSN(opts.DSN)
 	if !memory {
-		if err := ensureParentDir(opts.DSN); err != nil {
+		if err := ensureParentDir(opts.DSN, opts.Logger); err != nil {
 			return nil, err
 		}
 	}
@@ -143,6 +175,16 @@ func Open(opts Options) (*Store, error) {
 		_ = s.Close()
 		return nil, err
 	}
+
+	// After the pragmas, because reading journal_mode on both pools is what
+	// makes SQLite create the -wal and -shm files, and they are two thirds of
+	// what has to be narrowed.
+	if !memory {
+		if err := s.tightenFileModes(ctx); err != nil {
+			_ = s.Close()
+			return nil, err
+		}
+	}
 	return s, nil
 }
 
@@ -173,10 +215,17 @@ func buildDSN(dsn string, busy time.Duration, writer bool) string {
 	// setting it on every connection is harmless and covers a fresh file.
 	add("journal_mode(WAL)")
 
-	// NORMAL is safe under WAL: a crash can lose the tail of the most recent
-	// transactions but cannot corrupt the database. FULL costs an fsync per
-	// commit, which on an authentication hot path is not worth the difference.
-	add("synchronous(NORMAL)")
+	// FULL on the connection that commits, NORMAL on the ones that only read.
+	// Under WAL, NORMAL cannot corrupt the database but can lose the tail of
+	// the most recent transactions after a power loss, and losing a commit here
+	// un-spends a single-use record: see the package comment on durability.
+	// Nothing on the read pool commits, so the setting there costs nothing
+	// either way and is left at the value the engine would choose.
+	if writer {
+		add("synchronous(FULL)")
+	} else {
+		add("synchronous(NORMAL)")
+	}
 
 	add(fmt.Sprintf("busy_timeout(%d)", busy.Milliseconds()))
 
@@ -224,19 +273,95 @@ func isMemoryDSN(dsn string) bool {
 	return base == ":memory:" || base == "file::memory:" || strings.Contains(dsn, "mode=memory")
 }
 
-// ensureParentDir creates the directory holding the database file, with
-// permissions that exclude group and other. The database contains sealed
-// secrets and personal data, so a world-readable parent directory is a
-// misconfiguration worth preventing rather than documenting.
-func ensureParentDir(dsn string) error {
+// ensureParentDir creates the directory holding the database file, narrows it
+// to 0700 if it is wider, and refuses to go on if it cannot.
+//
+// MkdirAll sets the mode only on a directory it creates. A data directory that
+// is already there keeps whatever mode it was given, and 0755 is what a Docker
+// volume, a system package and an operator running mkdir all produce, so the
+// mode passed below decides nothing at all in the case that matters. The Stat
+// afterwards is the check that does.
+//
+// Narrowing rather than refusing outright, because a wide data directory is a
+// condition this process can end, and a service that refuses to start leaves
+// the database exactly as exposed as it found it while also being down. What is
+// refused is the case that cannot be ended: a directory owned by another
+// account, which is where the operator has to act, and the error names the
+// command. Neither outcome is silent, which is the property that matters: the
+// repair is logged with the mode that was found.
+func ensureParentDir(dsn string, log *slog.Logger) error {
 	base, _ := splitDSN(dsn)
 	base = strings.TrimPrefix(base, "file:")
 	dir := filepath.Dir(base)
 	if dir == "" || dir == "." {
 		return nil
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(dir, dataDirMode); err != nil {
 		return fmt.Errorf("sqlite: create %q: %w", dir, err)
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("sqlite: read the mode of %q: %w", dir, err)
+	}
+	mode := info.Mode().Perm()
+	if mode&^dataDirMode == 0 {
+		return nil
+	}
+	if err := os.Chmod(dir, dataDirMode); err != nil {
+		return fmt.Errorf(
+			"sqlite: the data directory %q is mode %04o and could not be narrowed to %04o, so "+
+				"other local accounts can read the database: it holds sealed secrets, the "+
+				"reference HMACs and the personal fields of the audit log. Run: chmod %04o %s: %w",
+			dir, mode, dataDirMode, dataDirMode, dir, err)
+	}
+	log.Warn("data directory permissions narrowed",
+		slog.String("path", dir),
+		slog.String("was", fmt.Sprintf("%04o", mode)),
+		slog.String("now", fmt.Sprintf("%04o", dataDirMode)))
+	return nil
+}
+
+// tightenFileModes narrows the database file and the two files WAL keeps beside
+// it to 0600.
+//
+// Unlike the directory, these are ours. SQLite creates them at 0644 less the
+// umask and offers no setting for it, so refusing a wide mode would refuse
+// every first start under the default umask of a distribution, on a deployment
+// that has done nothing wrong. Narrowing them is therefore the correct answer
+// here, and it is not silent: each one that had to be changed is logged with
+// the mode it had.
+//
+// The -wal and -shm files may not exist yet on a database that has never been
+// written, and they are recreated by the engine after a checkpoint. SQLite
+// gives a recreated one the mode of the database file, so narrowing that one is
+// what keeps the other two narrow afterwards.
+func (s *Store) tightenFileModes(ctx context.Context) error {
+	base, _ := splitDSN(s.path)
+	base = strings.TrimPrefix(base, "file:")
+
+	for _, path := range []string{base, base + "-wal", base + "-shm"} {
+		info, err := os.Stat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("sqlite: read the mode of %q: %w", path, err)
+		}
+		mode := info.Mode().Perm()
+		if mode&^dataFileMode == 0 {
+			continue
+		}
+		if err := os.Chmod(path, dataFileMode); err != nil {
+			return fmt.Errorf(
+				"sqlite: %q is mode %04o and could not be narrowed to %04o, so another local "+
+					"account can read it: %w",
+				path, mode, dataFileMode, err)
+		}
+		s.log.InfoContext(ctx, "database file permissions narrowed",
+			slog.String("path", path),
+			slog.String("was", fmt.Sprintf("%04o", mode)),
+			slog.String("now", fmt.Sprintf("%04o", dataFileMode)))
 	}
 	return nil
 }
@@ -266,6 +391,21 @@ func (s *Store) verifyPragmas(ctx context.Context) error {
 					c.pragma, got, c.want, c.why)
 			}
 		}
+	}
+
+	// synchronous is checked on the write pool alone, because that is the pool
+	// whose value decides anything: it is the only one that commits. PRAGMA
+	// synchronous answers with the numeric level, and 2 is FULL.
+	var sync string
+	if err := s.write.QueryRowContext(ctx, "PRAGMA synchronous").Scan(&sync); err != nil {
+		return fmt.Errorf("sqlite: read pragma synchronous: %w", err)
+	}
+	if sync != "2" {
+		return fmt.Errorf(
+			"sqlite: pragma synchronous is %q on the write pool, expected \"2\" (FULL): "+
+				"a power loss could then un-spend a recovery code, a TOTP timestep or an "+
+				"enrolment ticket that has already been reported as consumed",
+			sync)
 	}
 	return nil
 }
@@ -507,12 +647,12 @@ func truncate(s string, n int) string {
 
 // clampLimit bounds a caller-supplied page size. A zero or negative limit means
 // the caller did not choose, and gets the default rather than everything.
-func clampLimit(limit, def, max int) int {
+func clampLimit(limit, def, maxLimit int) int {
 	if limit <= 0 {
 		return def
 	}
-	if limit > max {
-		return max
+	if limit > maxLimit {
+		return maxLimit
 	}
 	return limit
 }

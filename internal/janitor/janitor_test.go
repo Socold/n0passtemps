@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -50,6 +52,7 @@ type fakeStore struct {
 	ticketsBefore    time.Time
 	throttlesBefore  time.Time
 	approvalsBefore  time.Time
+	recoveryBefore   time.Time
 	dueBefore        time.Time
 	dueLimit         int
 
@@ -205,6 +208,15 @@ func (f *fakeStore) MarkErasurePurged(_ context.Context, _, id string, at time.T
 	return f.note("mark-purged:" + id)
 }
 
+// DeleteConsumedRecoveryCodes satisfies the optional interface the sweep looks
+// for. It is optional because it is a maintenance capability rather than part
+// of the store contract, and TestSweepWithoutARecoveryCodePruner covers the
+// store that does not offer it.
+func (f *fakeStore) DeleteConsumedRecoveryCodes(_ context.Context, before time.Time) (int64, error) {
+	f.recoveryBefore = before
+	return 6, f.note("recovery-codes")
+}
+
 func (f *fakeStore) PruneAuditLog(_ context.Context, tenantID string, before, now time.Time) (int64, error) {
 	f.pruneTenant, f.pruneBefore, f.pruneNow = tenantID, before, now
 	return f.pruned, f.note("prune-audit")
@@ -253,9 +265,22 @@ func TestSweepCounts(t *testing.T) {
 	if len(res.Errors) != 0 {
 		t.Fatalf("errors = %v, want none", res.Errors)
 	}
-	want := Result{Challenges: 3, Tickets: 4, Throttles: 5, Approvals: 2, Erasures: 1, AuditPruned: 7}
+	want := Result{
+		Challenges: 3, Tickets: 4, Throttles: 5, Approvals: 2, Erasures: 1,
+		RecoveryCodes: 6, AuditPruned: 7,
+	}
 	if !reflect.DeepEqual(res, want) {
 		t.Errorf("result = %+v, want %+v", res, want)
+	}
+
+	// Spent recovery codes are swept behind a retention window rather than at
+	// the pass's own instant: a code spent this morning is still the evidence
+	// of that authentication, and only a code nobody will ask about again is
+	// worth removing. What the sweep buys is a bounded table, since the
+	// selector is unique per tenant and a table that only grows eventually
+	// refuses a reissue.
+	if wantCutoff := testNow.Add(-consumedRecoveryCodeRetention); !st.recoveryBefore.Equal(wantCutoff) {
+		t.Errorf("spent recovery codes were removed before %v, want %v", st.recoveryBefore, wantCutoff)
 	}
 
 	if !st.challengesBefore.Equal(testNow) {
@@ -281,12 +306,76 @@ func TestSweepCounts(t *testing.T) {
 	}
 }
 
+// withoutPruner presents a store through the contract alone, so that the
+// optional sweep is not visible on it. Embedding the interface rather than the
+// concrete type is what hides the extra method, and every other call forwards.
+type withoutPruner struct {
+	store.Store
+}
+
+// TestSweepWithoutARecoveryCodePruner covers a store that does not offer the
+// recovery code sweep.
+//
+// The capability is looked for on the store rather than declared in the
+// contract, so the pass has to go on without it rather than fail or panic. Both
+// engines do offer it; this is about the shape of the arrangement, and about
+// any store a test or an embedder hands the janitor.
+func TestSweepWithoutARecoveryCodePruner(t *testing.T) {
+	st := &fakeStore{}
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	j := New(testConfig(), withoutPruner{Store: st}, audit.NewRecorder(st, log), nil, log,
+		func() time.Time { return testNow })
+
+	res := j.Sweep(context.Background())
+
+	if len(res.Errors) != 0 {
+		t.Fatalf("errors = %v, want none: a store without the sweep is not a broken store", res.Errors)
+	}
+	if res.RecoveryCodes != 0 {
+		t.Errorf("recovery codes removed = %d, want 0", res.RecoveryCodes)
+	}
+	if n := st.called("recovery-codes"); n != 0 {
+		t.Errorf("the sweep reached the store %d times through an interface that does not offer it", n)
+	}
+	if n := st.called("challenges"); n != 1 {
+		t.Errorf("challenges swept %d times, want 1: the rest of the pass must be unaffected", n)
+	}
+}
+
+// TestReplicaOwnerSeparatesTwoProcessesThatLookAlike covers the name a replica
+// gives itself in the sweep lock.
+//
+// The name used to be the hostname and the process identifier. Two containers
+// started from one image are routinely given the same hostname and both run
+// their service as process 1, so on that deployment every replica called itself
+// the same thing. Releasing a lease is conditional on the owner, so two
+// replicas answering to one name each delete the lease the other is holding and
+// both sweep the same interval, which is the situation the lock exists to
+// prevent.
+func TestReplicaOwnerSeparatesTwoProcessesThatLookAlike(t *testing.T) {
+	first, second := replicaOwner(), replicaOwner()
+
+	if first == second {
+		t.Errorf("two owners are both %q: a replica cannot tell its own lease from another's", first)
+	}
+
+	// Still readable, and still says where to look. The owner is a label for an
+	// operator and the condition on a release, never a credential.
+	host, err := os.Hostname()
+	if err == nil && host != "" {
+		if !strings.HasPrefix(first, host+"/"+strconv.Itoa(os.Getpid())+"/") {
+			t.Errorf("owner = %q, want it to start with the host and the process identifier", first)
+		}
+	}
+}
+
 func TestSweepRunsEverySweepDespiteErrors(t *testing.T) {
 	errChallenges := errors.New("challenges failed")
 	errTickets := errors.New("tickets failed")
 	errThrottles := errors.New("throttles failed")
 	errApprovals := errors.New("approvals failed")
 	errList := errors.New("list failed")
+	errRecovery := errors.New("recovery codes failed")
 	errPrune := errors.New("prune failed")
 
 	t.Run("first sweep fails", func(t *testing.T) {
@@ -300,7 +389,7 @@ func TestSweepRunsEverySweepDespiteErrors(t *testing.T) {
 
 		res := newJanitor(cfg, st).Sweep(context.Background())
 
-		for _, call := range []string{"challenges", "tickets", "throttles", "approvals", "list-erasures", "erase-audit", "prune-audit"} {
+		for _, call := range []string{"challenges", "tickets", "throttles", "approvals", "list-erasures", "erase-audit", "recovery-codes", "prune-audit"} {
 			if st.called(call) != 1 {
 				t.Errorf("%s ran %d times, want 1: a janitor that stops at its first error has silently given up its other duties", call, st.called(call))
 			}
@@ -311,38 +400,44 @@ func TestSweepRunsEverySweepDespiteErrors(t *testing.T) {
 		if res.Challenges != 0 {
 			t.Errorf("challenges = %d for a sweep that failed", res.Challenges)
 		}
-		if res.Tickets != 4 || res.Throttles != 5 || res.Approvals != 2 || res.Erasures != 1 || res.AuditPruned != 7 {
+		if res.Tickets != 4 || res.Throttles != 5 || res.Approvals != 2 || res.Erasures != 1 ||
+			res.RecoveryCodes != 6 || res.AuditPruned != 7 {
 			t.Errorf("result = %+v: the sweeps after the failure did not report their work", res)
 		}
 	})
 
 	t.Run("every sweep fails", func(t *testing.T) {
 		st := &fakeStore{errs: map[string]error{
-			"challenges":    errChallenges,
-			"tickets":       errTickets,
-			"throttles":     errThrottles,
-			"approvals":     errApprovals,
-			"list-erasures": errList,
-			"prune-audit":   errPrune,
+			"challenges":     errChallenges,
+			"tickets":        errTickets,
+			"throttles":      errThrottles,
+			"approvals":      errApprovals,
+			"list-erasures":  errList,
+			"recovery-codes": errRecovery,
+			"prune-audit":    errPrune,
 		}}
 		cfg := testConfig()
 		cfg.Audit.RetentionDays = 30
 
 		res := newJanitor(cfg, st).Sweep(context.Background())
 
-		wantCalls := []string{"challenges", "tickets", "throttles", "approvals", "list-erasures", "prune-audit"}
+		wantCalls := []string{
+			"challenges", "tickets", "throttles", "approvals", "list-erasures",
+			"recovery-codes", "prune-audit",
+		}
 		if !reflect.DeepEqual(st.calls, wantCalls) {
 			t.Errorf("calls = %v, want %v", st.calls, wantCalls)
 		}
-		if len(res.Errors) != 6 {
-			t.Fatalf("collected %d errors, want 6: the operator must see every problem from one pass, not only the first", len(res.Errors))
+		if len(res.Errors) != 7 {
+			t.Fatalf("collected %d errors, want 7: the operator must see every problem from one pass, not only the first", len(res.Errors))
 		}
-		for _, want := range []error{errChallenges, errTickets, errThrottles, errApprovals, errList, errPrune} {
+		for _, want := range []error{errChallenges, errTickets, errThrottles, errApprovals, errList, errRecovery, errPrune} {
 			if !errors.Is(errors.Join(res.Errors...), want) {
 				t.Errorf("%q is missing from the collected errors", want)
 			}
 		}
-		if res.Challenges+res.Tickets+res.Throttles+res.Approvals+res.Erasures+res.AuditPruned != 0 {
+		if res.Challenges+res.Tickets+res.Throttles+res.Approvals+res.Erasures+
+			res.RecoveryCodes+res.AuditPruned != 0 {
 			t.Errorf("result = %+v: failed sweeps reported work", res)
 		}
 	})
@@ -903,4 +998,28 @@ func (s *signallingStore) ListDueErasures(ctx context.Context, before time.Time,
 	default:
 	}
 	return out, err
+}
+
+// TestARestoredSubjectIsSkippedAndNotMarkedPurged is an erasure cancelled after
+// the sweep read its list. The store refuses the purge, and the sweep must
+// neither report a failure nor record a purge that did not happen.
+func TestARestoredSubjectIsSkippedAndNotMarkedPurged(t *testing.T) {
+	st := &fakeStore{
+		errs: map[string]error{"purge-subject:sub-1": fmt.Errorf("sqlite: %w", store.ErrStaleWrite)},
+		due: []*store.ErasureRequest{
+			erasure("er-1", "sub-1"),
+			erasure("er-2", "sub-2"),
+		},
+	}
+	res := newJanitor(testConfig(), st).Sweep(context.Background())
+
+	if len(res.Errors) != 0 {
+		t.Errorf("errors = %v, want none: a cancelled erasure is not a failed sweep", res.Errors)
+	}
+	if st.called("mark-purged:er-1") != 0 {
+		t.Error("the cancelled request was marked purged")
+	}
+	if st.called("purge-subject:sub-2") != 1 || st.called("mark-purged:er-2") != 1 {
+		t.Error("the request after it was not completed")
+	}
 }

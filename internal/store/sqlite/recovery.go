@@ -150,6 +150,34 @@ func (s *Store) ConsumeRecoveryCode(ctx context.Context, tenantID, id string, at
 	return nil
 }
 
+// DeleteConsumedRecoveryCodes removes the codes spent before the given instant.
+//
+// It is the counterpart of the enrolment ticket sweep, and it exists for the
+// same two reasons. A spent code is evidence of an authentication, so it is
+// kept for long enough to answer a question about that authentication, and the
+// durable record past that point is the audit log. And a code that stays
+// keeps its selector, which is 30 bits and has to be unique within the tenant:
+// a table nothing ever shrinks is one whose next batch is a little more likely
+// to collide with something spent years ago and be refused. See
+// internal/crypto/recovery on why the selector is that wide and why widening it
+// is not the answer.
+//
+// The sweep spans every tenant, because the janitor acts on behalf of none of
+// them, and the janitor is what chooses the retention window.
+func (s *Store) DeleteConsumedRecoveryCodes(ctx context.Context, before time.Time) (int64, error) {
+	res, err := s.write.ExecContext(ctx,
+		`DELETE FROM recovery_codes WHERE consumed_at IS NOT NULL AND consumed_at < ?`,
+		formatTime(before))
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: delete consumed recovery codes: %w", mapError(err))
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: count deleted recovery codes: %w", err)
+	}
+	return n, nil
+}
+
 // CountUnusedRecoveryCodes implements store.RecoveryStore.
 //
 // The count drives the warning that tells a user to print a fresh sheet. A

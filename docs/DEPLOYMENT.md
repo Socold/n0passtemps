@@ -28,7 +28,7 @@ a refusal the service will otherwise produce, and the refusals are in
 | 7 | `admin.ip_allow_list` is set, or `admin.ui_enabled` is false, on a non-loopback listener | The validator refuses the combination |
 | 8 | With PostgreSQL, the DSN carries an explicit `sslmode`, and it is `require` or stronger for anything that crosses a network | The validator refuses a DSN with none, and refuses `allow` and `prefer` always. `disable` is accepted towards loopback, a Unix socket directory or an empty host, and towards any other host only with `database.allow_plaintext` |
 | 9 | The host clock is synchronised | A 60 second assertion lifetime and a one-period TOTP skew do not survive drift |
-| 10 | The listener port is free, and the data directory is writable by the service account | |
+| 10 | The listener port is free, and the data directory is writable by the service account and owned by it | With SQLite the service narrows a data directory wider than 0700, and the database file and its write-ahead log wider than 0600, and refuses to start if it cannot. See [File permissions on the data directory](#file-permissions-on-the-data-directory) |
 | 11 | You know how you will run `-bootstrap-admin` in this form, and who receives the second token when dual approval is on | The running service never prints an administrative token, and one administrator cannot mint a second under dual approval. See [Post-install](#post-install-the-first-credentials) |
 
 A dry run, without starting a listener:
@@ -139,6 +139,41 @@ With `kek.provider = "env"` there is no keyring mount at all: the orchestrator
 injects the document into the variable named by `kek.env_var`, and the provider
 unsets it once parsed. It is the weaker of the two providers, for the reasons
 ADR 0009 records.
+
+### File permissions on the data directory
+
+With SQLite, the data directory and the three files in it are checked at every
+start, and narrowed if they are wider than they should be:
+
+| Path | Required | What the service does |
+|---|---|---|
+| The directory holding the database | `0700` | Creates it at `0700`; narrows an existing one and logs a warning naming the mode it found |
+| `n0passtemps.db`, `-wal`, `-shm` | `0600` | Narrows each one it finds wider and logs it. SQLite creates them at `0644` less the umask and offers no setting for it |
+
+The service refuses to start only when the narrowing itself fails, which means
+the paths belong to another account. The error names the `chmod` to run. Fixing
+the ownership is the operator's job: a service that could widen its own
+directory back could also be made to.
+
+Why it matters: the database holds the sealed TOTP secrets, the sealed subject
+references, the HMACs those references are looked up by, the Argon2id hashes of
+the recovery codes and the personal fields of the audit log. A data directory
+left at `0755`, which is what a Docker volume, a distribution package and a
+plain `mkdir` all produce, makes every one of those readable by any local
+account on the host. The write-ahead log is part of the same check and not an
+afterthought: it holds the most recent transactions in the same form as the
+database itself.
+
+Three deployment notes:
+
+- The systemd unit sets `UMask=0077`, so files created under it are already
+  narrow and nothing is ever narrowed at start.
+- A backup agent that reads the database needs to run as the service account,
+  or as root. Widening the directory so that a group can traverse it is undone
+  on the next start.
+- PostgreSQL deployments are not covered by any of this. The files belong to
+  the database server, and their permissions are its business and the
+  operator's.
 
 ## The command line, and the variable names in `deploy/`
 
@@ -754,10 +789,15 @@ says so in its first line.
 
 The shipped `configmap.yaml` parses and validates as it stands. Edit the values
 that are yours: `tenant.id`, `webauthn.rp_id`, `webauthn.origins`,
-`assertion.issuer` and `admin.ip_allow_list`. It sets
+`assertion.issuer` and `admin.ip_allow_list`. The allow list ships as
+`192.0.2.0/24`, a documentation range no host lives in, so the administration
+surface answers nobody until you replace it with the networks your
+administrators connect from. It sets
 `server.allow_plaintext = true`, because the pod binds every interface and
 reachability is constrained by the Service and the NetworkPolicy, which the
-binary cannot see. When an ingress controller terminates TLS and forwards the
+binary cannot see. The container image does not set that flag itself: it is
+only true where something outside the process bounds access, and here that
+something is the NetworkPolicy. When an ingress controller terminates TLS and forwards the
 client address, set `trust_proxy` and `trusted_proxy_cidrs` as well, which the
 file carries as comments; without them every request is attributed to the
 controller's address. `database.dsn` comes from the secret and is not in the
@@ -782,8 +822,17 @@ Secret key `subject-pepper`, and mounts `keyring.json` and `assertion-key.pem`
 from the same Secret, side by side, at `/etc/n0passtemps/kek`, which is where the
 ConfigMap's `assertion.signing_key_path` points.
 
-`defaultMode: 0400` is what satisfies the mode check on both files, and
-`fsGroup: 65532` in the pod security context is what lets uid 65532 read them.
+The Secret volume has a limit the manifest states and does not solve. The server
+refuses a key file whose mode grants anything to group or other, and it runs as
+uid 65532. The kubelet writes Secret files owned by root; with `fsGroup: 65532`
+it changes their group and ORs `0440` into the mode, so `defaultMode: 0400`
+arrives as `root:65532 0440` and the server refuses it, and without `fsGroup`
+the files stay `root 0400` and cannot be read. Kubernetes has no field for the
+owning uid of a Secret volume. Deliver the two files through something that
+writes them as uid 65532 with mode `0400`: a secrets CSI driver, an agent
+sidecar, or an init container that copies them into a memory-backed `emptyDir`
+mounted at the same path. The comment on the `kek` volume in `deployment.yaml`
+has the detail.
 The volume mounts at `/etc/n0passtemps/kek`, outside the `/var/lib/n0passtemps` data
 volume, for the reason above.
 
@@ -813,18 +862,26 @@ the pod network the ingress controller runs on, or every request will be
 attributed to the controller's address, and the rate limiter and the audit log
 will key on it.
 
-The `restricted` profile and the default-deny NetworkPolicy mean the ingress
-rule has to be narrowed by hand. The shipped policy admits any pod in the
-cluster:
+The default-deny NetworkPolicy means the ingress path has to be opened by hand.
+The shipped policy admits port 8080 from namespaces carrying one label, and no
+namespace carries it until you set it:
 
 ```yaml
 ingress:
   - from:
-      - namespaceSelector: {}
+      - namespaceSelector:
+          matchLabels:
+            n0passtemps/ingress: "true"
 ```
 
-Replace `{}` with a selector naming the namespace the ingress controller runs
-in.
+```bash
+kubectl label namespace ingress-nginx n0passtemps/ingress=true
+```
+
+Use the namespace your ingress controller runs in. Until then nothing but the
+kubelet probes reaches the pods, which is the safe way for this to be wrong:
+the server speaks plain HTTP inside the cluster, so this rule is what keeps
+other workloads from talking to it around the ingress.
 
 ### Backup and restore
 

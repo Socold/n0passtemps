@@ -2,12 +2,122 @@ package sqlite
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/Socold/n0passtemps/internal/store"
 )
+
+// TestPurgeSubjectClearsTheIdentifiersItUsedToLeaveBehind covers the two tables
+// that named an erased subject and outlived them.
+//
+// An alert carries the subject identifier, a summary and a detail document, all
+// written about one account, and nothing ever removed them: a purged subject
+// stayed named in the alert list for the life of the deployment. The erasure
+// request carries a reason an operator types in prose, which is where the
+// person's name, their message or the ticket it was written from ends up.
+//
+// What must survive is the proof that the erasure happened. That is the request
+// row itself, and the test checks it is still there, still purged, still naming
+// who asked and when.
+func TestPurgeSubjectClearsTheIdentifiersItUsedToLeaveBehind(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	seedTenant(t, s, "tenant-a")
+	sub := seedSubject(t, s, "tenant-a", "subject-1", "ref-1")
+	other := seedSubject(t, s, "tenant-a", "subject-2", "ref-2")
+	at := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+
+	raise := func(id, subjectID, fingerprint string) {
+		t.Helper()
+		_, err := s.RaiseAlert(ctx, &store.Alert{
+			ID:          id,
+			TenantID:    "tenant-a",
+			AlertType:   "recovery.codes_exhausted",
+			Severity:    store.SeverityWarning,
+			SubjectID:   subjectID,
+			Summary:     "the subject has spent every recovery code",
+			Detail:      json.RawMessage(`{"display_name":"a name that belongs to a person"}`),
+			Fingerprint: fingerprint,
+			FirstSeenAt: at,
+		})
+		if err != nil {
+			t.Fatalf("raise alert %s: %v", id, err)
+		}
+	}
+	raise("alert-1", sub.ID, "fp-1")
+	raise("alert-2", sub.ID, "fp-2")
+	raise("alert-3", other.ID, "fp-3")
+	// An alert about the deployment rather than about anyone. It has no subject
+	// and no purge has any business with it.
+	raise("alert-4", "", "fp-4")
+
+	// Two requests against the subject: one cancelled last year, one about to
+	// be completed. Both carry a reason, and the older one is the reason the
+	// clearing is not restricted to the request being purged.
+	for _, r := range []*store.ErasureRequest{
+		{
+			ID: "er-old", TenantID: "tenant-a", SubjectID: sub.ID,
+			Status: store.ErasureCancelled, Reason: "asked by telephone, caller said she had moved",
+			RequestedBy: "admin-1", RequestedAt: at.Add(-90 * 24 * time.Hour),
+			PurgeAfter: at.Add(-60 * 24 * time.Hour),
+		},
+		{
+			ID: "er-due", TenantID: "tenant-a", SubjectID: sub.ID,
+			Status: store.ErasurePending, Reason: "subject request received, verified by ticket 4711",
+			RequestedBy: "admin-2", RequestedAt: at, PurgeAfter: at.Add(30 * 24 * time.Hour),
+		},
+	} {
+		if err := s.CreateErasure(ctx, r); err != nil {
+			t.Fatalf("create erasure %s: %v", r.ID, err)
+		}
+	}
+
+	if err := s.SoftDeleteSubject(ctx, "tenant-a", sub.ID, at); err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
+	if err := s.PurgeSubject(ctx, "tenant-a", sub.ID); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+
+	if n := countRows(t, s, `SELECT COUNT(*) FROM alerts WHERE subject_id = ?`, sub.ID); n != 0 {
+		t.Errorf("%d alerts still name the erased subject", n)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM alerts WHERE subject_id = ?`, other.ID); n != 1 {
+		t.Errorf("another subject's alert count is %d, want 1: the purge reached past the subject it was given", n)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM alerts WHERE subject_id IS NULL`); n != 1 {
+		t.Errorf("alerts about the deployment count is %d, want 1", n)
+	}
+
+	// The requests are still there, and still say what happened.
+	for _, id := range []string{"er-old", "er-due"} {
+		var reason, status, requestedBy string
+		err := s.read.QueryRowContext(ctx,
+			`SELECT COALESCE(reason, ''), status, requested_by FROM erasure_requests WHERE id = ?`,
+			id).Scan(&reason, &status, &requestedBy)
+		if err != nil {
+			t.Fatalf("read erasure request %s: %v", id, err)
+		}
+		if reason != "" {
+			t.Errorf("erasure request %s still carries the reason %q", id, reason)
+		}
+		if requestedBy == "" {
+			t.Errorf("erasure request %s no longer says who asked for it", id)
+		}
+		if status == "" {
+			t.Errorf("erasure request %s no longer says what became of it", id)
+		}
+	}
+
+	// And the request that was due can still be marked purged afterwards, which
+	// is the next thing the janitor does.
+	if err := s.MarkErasurePurged(ctx, "tenant-a", "er-due", at.Add(30*24*time.Hour)); err != nil {
+		t.Errorf("mark purged after the purge cleared the reason: %v", err)
+	}
+}
 
 // TestRestoreSubjectOnlyUndoesAnErasure checks the inverse of the soft delete.
 //
