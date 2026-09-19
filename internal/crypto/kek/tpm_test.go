@@ -1,3 +1,9 @@
+// The TPM tests open a device node, which is what the provider itself is built
+// around and what Windows does not have. The constraint matches the one on the
+// provider's own opener so that vet and the test build agree with it.
+
+//go:build !windows
+
 package kek
 
 import (

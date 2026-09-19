@@ -26,6 +26,9 @@ import (
 // KeySize is the required KEK length in bytes (AES-256).
 const KeySize = 32
 
+// The errors a keyring reports. They are distinguished because an empty keyring
+// is a deployment that was never initialised, while an unknown version is a
+// record sealed under a key this keyring no longer retains.
 var (
 	ErrNoKeys         = errors.New("kek: keyring contains no keys")
 	ErrUnknownVersion = errors.New("kek: unknown key version")
@@ -39,7 +42,11 @@ type keyring struct {
 	current uint32
 }
 
-func (r *keyring) Current() (uint32, []byte, error) {
+// Current returns the version to seal new records under, and a copy of its key.
+//
+// The copy is deliberate: the caller zeroizes what it is handed, and handing out
+// the map's own slice would zeroize the keyring itself on the first use.
+func (r *keyring) Current() (version uint32, key []byte, err error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if len(r.keys) == 0 {
@@ -52,6 +59,8 @@ func (r *keyring) Current() (uint32, []byte, error) {
 	return r.current, append([]byte(nil), k...), nil
 }
 
+// ByVersion returns a copy of the key of version v, for opening a record sealed
+// before the last rotation.
 func (r *keyring) ByVersion(v uint32) ([]byte, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -148,8 +157,15 @@ type EnvProvider struct {
 }
 
 // LoadEnvProvider parses the keyring held in the named environment variable.
-// The variable is unset once parsed, so it does not remain visible to child
-// processes or to /proc/self/environ.
+// The variable is unset once parsed, so a child process started later does not
+// inherit it and nothing in this process can read it back with os.Getenv.
+//
+// That is all the call buys. The kernel keeps the environment block the process
+// was started with, and /proc/<pid>/environ goes on serving it to the same uid
+// and to root for as long as the process lives: os.Unsetenv edits the Go
+// runtime's copy, not that block. A keyring that must not be readable that way
+// belongs in a file, which is what FileProvider is for and what every
+// deployment under deploy/ uses.
 func LoadEnvProvider(envVar string) (*EnvProvider, error) {
 	val, ok := os.LookupEnv(envVar)
 	if !ok || strings.TrimSpace(val) == "" {
@@ -157,7 +173,7 @@ func LoadEnvProvider(envVar string) (*EnvProvider, error) {
 	}
 	// Best effort: the Go runtime copied the value into an immutable string
 	// already, so the original cannot be overwritten. Unsetting at least
-	// removes it from the process environment block.
+	// removes it from the environment the runtime hands to child processes.
 	defer func() { _ = os.Unsetenv(envVar) }()
 
 	ring, err := parseKeyring([]byte(val))
@@ -257,8 +273,8 @@ func checkNotInDataDir(kekPath string, dataDirs []string) error {
 // here: the check is about placement, and a missing data directory cannot
 // contain the key anyway.
 func resolve(path string) string {
-	if real, err := filepath.EvalSymlinks(path); err == nil {
-		return real
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
 	}
 	// The leaf may not exist while its parent does, which is the usual case
 	// for a data directory the server is about to create. Resolving the parent

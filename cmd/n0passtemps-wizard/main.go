@@ -13,6 +13,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -129,8 +131,18 @@ func promptYesNo(r *bufio.Reader, question string, def bool) (bool, error) {
 // Overwriting a config.toml is an inconvenience. Overwriting a keyring
 // destroys every secret sealed under it, which is why the refusal is the
 // default everywhere in this tool and -force has to be asked for.
+//
+// The content never goes into the destination directly. It is written to a
+// temporary file beside it, flushed, and renamed over it, so the destination
+// holds either what it held before or all of the new content. The keyring is
+// the reason: kek rotate rewrites the one file that carries every key version,
+// and it is the only file here whose loss cannot be undone. Truncating it in
+// place would leave an empty keyring behind a crash, a power cut or a full
+// disk, and every sealed secret unreadable with it.
 func writeFile(path string, content []byte, mode os.FileMode, force bool) error {
-	if _, err := os.Stat(path); err == nil && !force {
+	// Lstat rather than Stat, so a symbolic link at the destination counts as a
+	// file that exists, wherever it points and whether or not its target does.
+	if _, err := os.Lstat(path); err == nil && !force {
 		return fmt.Errorf("%s already exists; move it aside or pass -force", path)
 	}
 
@@ -140,21 +152,61 @@ func writeFile(path string, content []byte, mode os.FileMode, force bool) error 
 		}
 	}
 
-	// The file is created with its final mode rather than chmod'd afterwards,
-	// so there is no window in which a keyring is world-readable.
-	//
-	// #nosec G304 -- the destination is the path the operator asked the wizard to write, and an existing file is
-	// refused above unless -force was passed
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	tmp, err := writeTemp(path, content, mode)
 	if err != nil {
-		return fmt.Errorf("create %s: %w", path, err)
+		return err
 	}
 
-	if _, err := f.Write(content); err != nil {
+	// Rename replaces the destination itself rather than writing through it.
+	// A symbolic link placed there is therefore replaced, not followed, and the
+	// file that ends up at the path always carries the mode asked for, whatever
+	// the mode of the one it replaces.
+	if err = os.Rename(tmp, path); err != nil {
+		removeTemp(tmp)
+		return fmt.Errorf("replace %s: %w", path, err)
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+// writeTemp writes content to a new file beside path and returns its name.
+//
+// The same directory, because a rename is only atomic within one filesystem.
+// On any failure the temporary file is removed, so a refused write leaves
+// nothing behind for the operator to mistake for a keyring.
+func writeTemp(path string, content []byte, mode os.FileMode) (string, error) {
+	suffix := make([]byte, 8)
+	if _, err := rand.Read(suffix); err != nil {
+		return "", fmt.Errorf("name a temporary file: %w", err)
+	}
+	tmp := filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".tmp-"+hex.EncodeToString(suffix))
+
+	// O_EXCL refuses a name that is already taken, symbolic links included, so
+	// nothing placed at the temporary name beforehand is written through. The
+	// file is created with its final mode rather than chmod'd afterwards, so
+	// key material is never readable more widely than it will end up.
+	//
+	// #nosec G304 -- the name is derived from the path the operator asked the wizard to write, and O_EXCL refuses
+	// anything that already exists there
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return "", fmt.Errorf("create %s: %w", tmp, err)
+	}
+
+	if _, err = f.Write(content); err != nil {
 		// The write already failed, so a close error would be the same fault
 		// reported twice and the file is incomplete either way.
 		_ = f.Close()
-		return fmt.Errorf("write %s: %w", path, err)
+		removeTemp(tmp)
+		return "", fmt.Errorf("write %s: %w", tmp, err)
+	}
+
+	// Flushed before the rename. Without it the rename can reach the disk ahead
+	// of the data, and a power cut then leaves the new name on an empty file.
+	if err = f.Sync(); err != nil {
+		// As above: the sync is the fault worth reporting.
+		_ = f.Close()
+		removeTemp(tmp)
+		return "", fmt.Errorf("sync %s: %w", tmp, err)
 	}
 
 	// Checked, not deferred. What this function writes is a keyring, a signing
@@ -163,8 +215,40 @@ func writeFile(path string, content []byte, mode os.FileMode, force bool) error 
 	// the disk. Discarding that error would leave the operator with an artefact
 	// that looks written and does not open, which is the failure the verify
 	// subcommand exists to catch long afterwards.
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close %s: %w", path, err)
+	if err = f.Close(); err != nil {
+		removeTemp(tmp)
+		return "", fmt.Errorf("close %s: %w", tmp, err)
+	}
+	return tmp, nil
+}
+
+// removeTemp deletes a temporary file on a path that has already failed.
+func removeTemp(tmp string) {
+	// The caller is returning the error that matters. One from the removal
+	// would only add that a stray dot file was left beside the destination,
+	// which is untidy and harms nothing.
+	_ = os.Remove(tmp)
+}
+
+// syncDir flushes a directory, which is where a rename is recorded.
+//
+// Until it is flushed, a power cut can bring back the previous entry. For a
+// rotated keyring that is the old keyring, complete, so nothing is lost; but
+// the command would have reported a key version the disk does not hold.
+func syncDir(dir string) error {
+	// #nosec G304 -- the parent of the path the operator asked the wizard to write, opened read-only to flush it
+	d, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", dir, err)
+	}
+	if err = d.Sync(); err != nil {
+		// The sync is the fault worth reporting, and nothing was written
+		// through this handle for a close to lose.
+		_ = d.Close()
+		return fmt.Errorf("sync %s: %w", dir, err)
+	}
+	if err = d.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", dir, err)
 	}
 	return nil
 }

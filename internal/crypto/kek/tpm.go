@@ -14,7 +14,6 @@ import (
 
 	"github.com/google/go-tpm/tpm2"
 	"github.com/google/go-tpm/tpm2/transport"
-	"github.com/google/go-tpm/tpm2/transport/linuxtpm"
 
 	"github.com/Socold/n0passtemps/internal/crypto/zeroize"
 )
@@ -177,11 +176,9 @@ func LoadTPMProvider(path, device string, dataDirs ...string) (*TPMProvider, err
 		return nil, fmt.Errorf("kek: read %q: %w", abs, err)
 	}
 
-	t, err := linuxtpm.Open(device)
+	t, err := OpenTPM(device)
 	if err != nil {
-		return nil, fmt.Errorf("kek: open %s: %w\n"+
-			"the service account needs read and write on the TPM device, which on most "+
-			"distributions means membership of the 'tss' group", device, err)
+		return nil, err
 	}
 	defer func() { _ = t.Close() }()
 

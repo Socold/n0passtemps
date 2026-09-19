@@ -14,8 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/go-tpm/tpm2/transport/linuxtpm"
-
 	"github.com/Socold/n0passtemps/internal/assertion"
 	"github.com/Socold/n0passtemps/internal/crypto/kek"
 	"github.com/Socold/n0passtemps/internal/crypto/zeroize"
@@ -77,11 +75,9 @@ func kekSeal(args []string) error {
 	}
 	defer zeroize.Bytes(plain)
 
-	t, err := linuxtpm.Open(*device)
+	t, err := kek.OpenTPM(*device)
 	if err != nil {
-		return fmt.Errorf("open %s: %w\n"+
-			"this account needs read and write on the TPM, which on most distributions\n"+
-			"means membership of the 'tss' group", *device, err)
+		return err
 	}
 	defer func() { _ = t.Close() }()
 
@@ -188,6 +184,24 @@ func kekRotate(args []string) error {
 		return err
 	}
 
+	// The mode is checked before the keys are read, as the service checks it
+	// before it starts and as assertion.LoadPrivateKeyPEM checks it for the
+	// signing key. Rotating writes the file back at 0600, so without this the
+	// tool would quietly repair the mode of a keyring whose every key had
+	// already been readable by any local account, and say nothing of the
+	// exposure. Inspecting warns instead of refusing: reading a file is not
+	// what makes the state worse.
+	info, err := os.Lstat(*path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", *path, err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("%s is mode %#o, readable beyond its owner: every key in it has been "+
+			"exposed to any local account, so rotating now would hide that rather than answer it. "+
+			"Treat the current keys as compromised, chmod 600 %s, then rotate",
+			*path, info.Mode().Perm(), *path)
+	}
+
 	raw, err := os.ReadFile(*path)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", *path, err)
@@ -209,7 +223,7 @@ func kekRotate(args []string) error {
 		if err != nil {
 			return fmt.Errorf("key version %q is not a number", v)
 		}
-		if uint32(n) > next {
+		if n > uint64(next) {
 			next = uint32(n)
 		}
 	}
@@ -483,16 +497,16 @@ func assertionKeyInspect(args []string) error {
 // person has an account.
 func runPepper(args []string) error {
 	fs := flag.NewFlagSet("pepper", flag.ExitOnError)
-	bytes := fs.Int("bytes", 32, "length of the pepper")
+	length := fs.Int("bytes", 32, "length of the pepper")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *bytes < 32 {
+	if *length < 32 {
 		return fmt.Errorf("the pepper must be at least 32 bytes; it is an HMAC key and "+
-			"32 matches the hash output length, got %d", *bytes)
+			"32 matches the hash output length, got %d", *length)
 	}
 
-	buf := make([]byte, *bytes)
+	buf := make([]byte, *length)
 	if _, err := rand.Read(buf); err != nil {
 		return fmt.Errorf("generate pepper: %w", err)
 	}
