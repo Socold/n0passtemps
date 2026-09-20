@@ -16,7 +16,7 @@ import (
 )
 
 // Version is the version of this SDK, reported in the default user agent.
-const Version = "1.1.2"
+const Version = "1.1.3"
 
 // DefaultTimeout bounds one HTTP attempt when no other timeout is configured.
 const DefaultTimeout = 10 * time.Second

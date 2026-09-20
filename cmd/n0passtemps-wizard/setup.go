@@ -241,7 +241,7 @@ func runSetup(args []string) error {
 		fmt.Printf("Wrote %s\n", path)
 	}
 
-	const image = "ghcr.io/socold/n0passtemps:1.1.0"
+	const image = "ghcr.io/socold/n0passtemps:1.1.3"
 	const wizard = "--entrypoint /usr/local/bin/n0passtemps-wizard " + image
 	const mount = "-v n0passtemps_n0passtemps-kek:/etc/n0passtemps/kek"
 

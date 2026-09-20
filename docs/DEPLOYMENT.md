@@ -293,12 +293,12 @@ docker volume create n0passtemps_n0passtemps-kek
 
 docker run --rm -v n0passtemps_n0passtemps-kek:/etc/n0passtemps/kek \
   --entrypoint /usr/local/bin/n0passtemps-wizard \
-  ghcr.io/socold/n0passtemps:1.1.0 \
+  ghcr.io/socold/n0passtemps:1.1.3 \
   kek init -out /etc/n0passtemps/kek/keyring.json
 
 docker run --rm -v n0passtemps_n0passtemps-kek:/etc/n0passtemps/kek \
   --entrypoint /usr/local/bin/n0passtemps-wizard \
-  ghcr.io/socold/n0passtemps:1.1.0 \
+  ghcr.io/socold/n0passtemps:1.1.3 \
   assertion-key init -out /etc/n0passtemps/kek/assertion-key.pem
 ```
 
@@ -314,7 +314,7 @@ Generate the pepper and put the line it prints into `.env`, replacing the empty
 
 ```bash
 docker run --rm --entrypoint /usr/local/bin/n0passtemps-wizard \
-  ghcr.io/socold/n0passtemps:1.1.0 pepper
+  ghcr.io/socold/n0passtemps:1.1.3 pepper
 # N0PASSTEMPS_SUBJECT_PEPPER=...
 ```
 
@@ -433,7 +433,7 @@ docker run --rm \
   -v "$PWD":/backup:ro \
   -e N0PASSTEMPS_SUBJECT_PEPPER \
   --entrypoint /usr/local/bin/n0passtemps-wizard \
-  ghcr.io/socold/n0passtemps:1.1.0 \
+  ghcr.io/socold/n0passtemps:1.1.3 \
   verify -db /backup/n0passtemps-2026-09-18.db -keyring /backup/keyring.json
 ```
 
@@ -478,7 +478,7 @@ Same clone, same `.env`, plus the database variables:
 cd n0passtemps/deploy
 cp .env.example .env
 $EDITOR .env
-# N0PASSTEMPS_VERSION=1.1.0
+# N0PASSTEMPS_VERSION=1.1.3
 # POSTGRES_USER=n0passtemps
 # POSTGRES_PASSWORD=<openssl rand -base64 32>
 # POSTGRES_DB=n0passtemps
@@ -901,7 +901,7 @@ file in any pod carrying the image.
 ### Upgrade
 
 ```bash
-kubectl -n n0passtemps set image deploy/n0passtemps n0passtemps=ghcr.io/socold/n0passtemps:1.1.0
+kubectl -n n0passtemps set image deploy/n0passtemps n0passtemps=ghcr.io/socold/n0passtemps:1.1.3
 kubectl -n n0passtemps rollout status deploy/n0passtemps
 ```
 
