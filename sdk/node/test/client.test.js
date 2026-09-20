@@ -153,6 +153,20 @@ describe("request shape", () => {
       body: { challenge_id: challengeId, credential },
     },
     {
+      name: "beginDiscoverableAssertion",
+      call: (c) => c.beginDiscoverableAssertion(),
+      method: "POST",
+      path: "/v1/webauthn/assert/discoverable",
+      body: null,
+    },
+    {
+      name: "completeDiscoverableAssertion",
+      call: (c) => c.completeDiscoverableAssertion({ challengeId, credential }),
+      method: "POST",
+      path: "/v1/webauthn/assert/discoverable/complete",
+      body: { challenge_id: challengeId, credential },
+    },
+    {
       name: "enrolTotp",
       call: (c) => c.enrolTotp(AWKWARD_REF),
       method: "POST",

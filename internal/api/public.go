@@ -542,6 +542,17 @@ func (s *Server) handleAssertComplete(w http.ResponseWriter, r *http.Request) er
 	limits := s.recordAttempt(r, tenantID, sub.ID, dims, false)
 	assessed := s.assessWebAuthn(outcome, limits)
 
+	return s.finishWebAuthnAssertion(w, r, caller, tenantID, sub, outcome, assessed)
+}
+
+// finishWebAuthnAssertion turns a validated WebAuthn outcome into the signed
+// assertion, the audit entry and the response.
+//
+// The named and the usernameless routes share it. What a completed WebAuthn
+// ceremony is worth does not depend on how the subject came to be known, and
+// two copies of this would be two places for the factor list, the reported
+// signals and the risk claim to drift apart.
+func (s *Server) finishWebAuthnAssertion(w http.ResponseWriter, r *http.Request, caller *Caller, tenantID string, sub *store.Subject, outcome *wa.AssertionOutcome, assessed *risk.Assessment) error {
 	factors := []assertion.Factor{assertion.FactorWebAuthn}
 	if outcome.UserVerified {
 		factors = append(factors, assertion.FactorWebAuthnUV)
@@ -602,6 +613,107 @@ func (s *Server) handleAssertComplete(w http.ResponseWriter, r *http.Request) er
 		Signals:   signals,
 	}.withRisk(assessed))
 	return nil
+}
+
+// handleDiscoverableAssertBegin starts an authentication ceremony for a subject
+// nobody has named yet.
+//
+// There is no subject_ref in the path, because the point of the route is that
+// the caller does not know who is signing in. The response is the same shape as
+// the named route's, with an empty allow list, which is what makes the browser
+// offer whichever passkeys the authenticator holds for this relying party.
+//
+// Only the network dimension of the rate limit applies here. The subject
+// dimension cannot, because no subject is known until the ceremony completes,
+// and that is a real reduction in protection rather than an oversight: this
+// route can be used to mint challenges without naming anybody. The challenges
+// are single use, short lived and useless without an authenticator that holds a
+// matching credential, so what remains is the cost of issuing them, which is
+// what the per-network and per-key limits bound.
+func (s *Server) handleDiscoverableAssertBegin(w http.ResponseWriter, r *http.Request) error {
+	caller, err := requireCaller(r.Context())
+	if err != nil {
+		return err
+	}
+	tenantID, err := s.callerTenant(caller)
+	if err != nil {
+		return err
+	}
+
+	dims := s.clientThrottleDims(r, caller, "")
+	if err := s.checkThrottle(r, tenantID, dims); err != nil {
+		return err
+	}
+
+	result, err := s.deps.WebAuthn.BeginDiscoverableAssertion(r.Context(), tenantID)
+	if err != nil {
+		return s.ceremonyError(r, tenantID, "", caller,
+			audit.EventAssertionStarted, err)
+	}
+
+	// Audited with no subject, which is the honest record: at this point the
+	// service does not know one. The completion entry names the subject and
+	// carries the same challenge identifier, which is what joins the two.
+	s.audited(r, audit.Event{
+		TenantID:     tenantID,
+		EventType:    audit.EventAssertionStarted,
+		ActorType:    caller.ActorType(),
+		ActorID:      caller.ActorID(),
+		ResourceType: "challenge",
+		ResourceID:   result.ChallengeID,
+		Outcome:      store.OutcomeSuccess,
+		Detail:       map[string]any{"discoverable": true},
+	})
+
+	WriteJSON(w, r, http.StatusOK, result)
+	return nil
+}
+
+// handleDiscoverableAssertComplete finishes a ceremony begun without a subject.
+//
+// The order here is deliberate. The network limit is checked before any work,
+// then the ceremony resolves the subject, and only then is the attempt recorded
+// against that subject as well. A failure therefore counts against the network
+// it came from but cannot count against a subject, because a failed ceremony
+// has not established which subject it was for. Recording it against whichever
+// subject the response claimed would let an attacker lock out any account they
+// could name a credential for.
+func (s *Server) handleDiscoverableAssertComplete(w http.ResponseWriter, r *http.Request) error {
+	caller, err := requireCaller(r.Context())
+	if err != nil {
+		return err
+	}
+	tenantID, err := s.callerTenant(caller)
+	if err != nil {
+		return err
+	}
+
+	var req ceremonyCompleteRequest
+	if err := decodeJSON(r, &req); err != nil {
+		return err
+	}
+	if err := req.validate(); err != nil {
+		return err
+	}
+
+	networkDims := s.clientThrottleDims(r, caller, "")
+	if err := s.checkThrottle(r, tenantID, networkDims); err != nil {
+		return err
+	}
+
+	sub, outcome, err := s.deps.WebAuthn.CompleteDiscoverableAssertion(r.Context(),
+		tenantID, req.ChallengeID, req.Credential)
+	if err != nil {
+		s.recordAttempt(r, tenantID, "", networkDims, true)
+		return s.ceremonyError(r, tenantID, "", caller,
+			audit.EventAssertionRejected, err)
+	}
+
+	dims := s.clientThrottleDims(r, caller, sub.ID)
+	limits := s.recordAttempt(r, tenantID, sub.ID, dims, false)
+	assessed := s.assessWebAuthn(outcome, limits)
+
+	return s.finishWebAuthnAssertion(w, r, caller, tenantID, sub, outcome, assessed)
 }
 
 // reportCloneWarning records a signature counter that failed to advance.

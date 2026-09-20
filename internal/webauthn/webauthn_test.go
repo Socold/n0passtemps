@@ -1135,3 +1135,244 @@ func TestLockedSubjectCannotBeginOrCompleteEitherCeremony(t *testing.T) {
 		t.Errorf("locked subject holds %d credentials, want the 1 enrolled before the lock", len(creds))
 	}
 }
+
+// discoverableAssert runs a whole usernameless ceremony and reports which
+// subject came back.
+func (f *fixture) discoverableAssert(a *virtualAuthenticator) (*store.Subject, *webauthn.AssertionOutcome, error) {
+	f.t.Helper()
+	begin, err := f.svc.BeginDiscoverableAssertion(f.ctx, testTenant)
+	if err != nil {
+		return nil, nil, err
+	}
+	resp, err := a.get(begin.Options)
+	if err != nil {
+		f.t.Fatalf("authenticator get: %v", err)
+	}
+	return f.svc.CompleteDiscoverableAssertion(f.ctx, testTenant, begin.ChallengeID, resp)
+}
+
+func TestDiscoverableAssertionNamesTheSubjectItResolved(t *testing.T) {
+	f := newFixture(t)
+	sub := f.subject("alice@example.test", "Alice")
+	a := f.authenticator(modelA)
+	cred := f.mustRegister(sub, a)
+
+	got, out, err := f.discoverableAssert(a)
+	if err != nil {
+		t.Fatalf("a genuine usernameless assertion was refused: %v", err)
+	}
+	if got.ID != sub.ID {
+		t.Errorf("resolved subject = %q, want %q", got.ID, sub.ID)
+	}
+	if out.Credential.ID != cred.ID {
+		t.Errorf("outcome credential = %q, want the one that was used, %q", out.Credential.ID, cred.ID)
+	}
+	if !out.UserVerified {
+		t.Error("user verification was required, so the outcome must report it")
+	}
+}
+
+func TestDiscoverableAssertionOffersNoAllowList(t *testing.T) {
+	f := newFixture(t)
+	sub := f.subject("alice@example.test", "Alice")
+	f.mustRegister(sub, f.authenticator(modelA))
+
+	begin, err := f.svc.BeginDiscoverableAssertion(f.ctx, testTenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An allow list would defeat the point: the browser would learn which
+	// credentials this subject holds before anyone proved anything, and the
+	// caller would have had to name the subject to build it.
+	if got := optionsField(t, begin.Options, "publicKey", "allowCredentials"); got != nil {
+		t.Errorf("allowCredentials = %v, want absent", got)
+	}
+	if got := optionsField(t, begin.Options, "publicKey", "userVerification"); got != "required" {
+		t.Errorf("userVerification = %v, want \"required\": a usernameless ceremony is "+
+			"scoped to nothing, so possession alone must not sign anyone in", got)
+	}
+}
+
+func TestDiscoverableAssertionRefusesAPossessionOnlyResponse(t *testing.T) {
+	f := newFixture(t)
+	sub := f.subject("alice@example.test", "Alice")
+	a := f.authenticator(modelA)
+	f.mustRegister(sub, a)
+
+	// A key whose PIN was never entered, which is what a found or stolen
+	// authenticator produces.
+	a.userVerified = false
+
+	if _, _, err := f.discoverableAssert(a); !errors.Is(err, webauthn.ErrCeremonyFailed) {
+		t.Errorf("possession-only usernameless assertion returned %v, want ErrCeremonyFailed", err)
+	}
+}
+
+func TestDiscoverableAssertionRefusesARevokedCredential(t *testing.T) {
+	f := newFixture(t)
+	sub := f.subject("alice@example.test", "Alice")
+	a := f.authenticator(modelA)
+	cred := f.mustRegister(sub, a)
+
+	if err := f.store.RevokeCredential(f.ctx, testTenant, cred.ID, "lost", f.clock.now()); err != nil {
+		t.Fatal(err)
+	}
+
+	// The property, not the mechanism: a revoked passkey signs in to nothing,
+	// even when nobody had to name its owner. It is refused twice over, by the
+	// explicit check on the resolved credential and again by the store, whose
+	// counter and last-used writes both require revoked_at to be null. This
+	// test would still pass with the explicit check removed, which is why the
+	// reason for keeping it is written where the check is rather than here.
+	if _, _, err := f.discoverableAssert(a); !errors.Is(err, webauthn.ErrCeremonyFailed) {
+		t.Errorf("revoked credential returned %v, want ErrCeremonyFailed", err)
+	}
+}
+
+func TestDiscoverableAssertionRefusesAnInactiveSubject(t *testing.T) {
+	f := newFixture(t)
+	sub := f.subject("alice@example.test", "Alice")
+	a := f.authenticator(modelA)
+	f.mustRegister(sub, a)
+
+	if err := f.store.SetSubjectStatus(f.ctx, testTenant, sub.ID, store.SubjectLocked); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := f.discoverableAssert(a); !errors.Is(err, webauthn.ErrCeremonyFailed) {
+		t.Errorf("locked subject returned %v, want ErrCeremonyFailed", err)
+	}
+}
+
+func TestDiscoverableAssertionRefusesAMismatchedUserHandle(t *testing.T) {
+	f := newFixture(t)
+	alice := f.subject("alice@example.test", "Alice")
+	bob := f.subject("bob@example.test", "Bob")
+	a := f.authenticator(modelA)
+	f.mustRegister(alice, a)
+	bobAuth := f.authenticator(modelB)
+	f.mustRegister(bob, bobAuth)
+
+	begin, err := f.svc.BeginDiscoverableAssertion(f.ctx, testTenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := a.get(begin.Options)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Alice's own credential, presented with Bob's user handle. What this
+	// pins is that the substitution gains nothing: the subject is resolved
+	// from the credential, so no handle can make the service believe Alice is
+	// Bob, and a response whose two halves disagree is refused outright rather
+	// than half ignored. The library compares the handle as well, so this
+	// passes with the service's own comparison removed; the comparison stays
+	// because the property should not rest on one dependency.
+	var body map[string]any
+	if err := json.Unmarshal(resp, &body); err != nil {
+		t.Fatal(err)
+	}
+	bobHandle := userHandleOf(t, bob.ID)
+	body["response"].(map[string]any)["userHandle"] = base64.RawURLEncoding.EncodeToString(bobHandle)
+	tampered, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := f.svc.CompleteDiscoverableAssertion(f.ctx, testTenant, begin.ChallengeID, tampered); !errors.Is(err, webauthn.ErrCeremonyFailed) {
+		t.Errorf("mismatched user handle returned %v, want ErrCeremonyFailed", err)
+	}
+}
+
+func TestNamedAndDiscoverableChallengesAreNotInterchangeable(t *testing.T) {
+	f := newFixture(t)
+	sub := f.subject("alice@example.test", "Alice")
+	a := f.authenticator(modelA)
+	f.mustRegister(sub, a)
+
+	// A challenge issued for a named subject, completed through the
+	// usernameless route. The two ceremonies differ in the allow list and in
+	// the user-verification requirement, which is exactly the pair an
+	// attacker would want to choose between.
+	named, err := f.svc.BeginAssertion(f.ctx, sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := a.get(named.Options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.svc.CompleteDiscoverableAssertion(f.ctx, testTenant, named.ChallengeID, resp); !errors.Is(err, webauthn.ErrCeremonyFailed) {
+		t.Errorf("named challenge through the usernameless route returned %v, want ErrCeremonyFailed", err)
+	}
+
+	// And the reverse.
+	disc, err := f.svc.BeginDiscoverableAssertion(f.ctx, testTenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2, err := a.get(disc.Options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.CompleteAssertion(f.ctx, sub, disc.ChallengeID, resp2); !errors.Is(err, webauthn.ErrCeremonyFailed) {
+		t.Errorf("usernameless challenge through the named route returned %v, want ErrCeremonyFailed", err)
+	}
+}
+
+func TestDiscoverableAssertionChallengeIsSingleUse(t *testing.T) {
+	f := newFixture(t)
+	sub := f.subject("alice@example.test", "Alice")
+	a := f.authenticator(modelA)
+	f.mustRegister(sub, a)
+
+	begin, err := f.svc.BeginDiscoverableAssertion(f.ctx, testTenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := a.get(begin.Options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.svc.CompleteDiscoverableAssertion(f.ctx, testTenant, begin.ChallengeID, resp); err != nil {
+		t.Fatalf("first completion refused: %v", err)
+	}
+	if _, _, err := f.svc.CompleteDiscoverableAssertion(f.ctx, testTenant, begin.ChallengeID, resp); !errors.Is(err, webauthn.ErrChallengeNotFound) {
+		t.Errorf("replayed usernameless completion returned %v, want ErrChallengeNotFound", err)
+	}
+}
+
+func TestDiscoverableAssertionIsTenantScoped(t *testing.T) {
+	f := newFixture(t)
+	sub := f.subject("alice@example.test", "Alice")
+	a := f.authenticator(modelA)
+	f.mustRegister(sub, a)
+
+	begin, err := f.svc.BeginDiscoverableAssertion(f.ctx, testTenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := a.get(begin.Options)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The credential lookup is the only thing that names the subject, so it
+	// must not reach across tenants. A challenge belonging to one tenant is
+	// not found under another, which refuses this before the lookup runs.
+	if _, _, err := f.svc.CompleteDiscoverableAssertion(f.ctx, "other-tenant", begin.ChallengeID, resp); err == nil {
+		t.Error("a usernameless completion succeeded under a different tenant")
+	}
+}
+
+// userHandleOf derives the handle the service stores for a subject, so a test
+// can present a handle belonging to somebody else.
+func userHandleOf(t *testing.T, subjectID string) []byte {
+	t.Helper()
+	id, err := uuid.Parse(subjectID)
+	if err != nil {
+		t.Fatalf("subject identifier is not a uuid: %v", err)
+	}
+	return append([]byte(nil), id[:]...)
+}

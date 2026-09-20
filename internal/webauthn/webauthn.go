@@ -491,6 +491,17 @@ func (s *Service) CompleteAssertion(ctx context.Context, subject *store.Subject,
 		return nil, ErrCeremonyFailed
 	}
 
+	return s.recordAssertion(ctx, rec, validated, parsed)
+}
+
+// recordAssertion turns a validated assertion into an outcome and records what
+// the ceremony did to the credential.
+//
+// The named and the discoverable completion paths share it. The counter
+// bookkeeping is the part of an assertion easiest to get subtly wrong, and a
+// second copy would be a second place for the clone signal and the replay
+// guard to drift apart.
+func (s *Service) recordAssertion(ctx context.Context, rec *store.Credential, validated *lib.Credential, parsed *protocol.ParsedCredentialAssertionData) (*AssertionOutcome, error) {
 	outcome := &AssertionOutcome{
 		Credential: rec,
 		// Read from the authenticator data of THIS ceremony, not from the
@@ -550,6 +561,161 @@ func (s *Service) CompleteAssertion(ctx context.Context, subject *store.Subject,
 	}
 
 	return outcome, nil
+}
+
+// BeginDiscoverableAssertion starts an authentication ceremony that does not
+// name the subject in advance.
+//
+// This is what a passkey prompt does. The authenticator offers whichever
+// credentials it holds for this relying party, the user picks one, and the
+// response says which subject it belonged to. The caller therefore does not
+// have to know who is signing in before they sign in, which is the point, and
+// is also why this route needs its own reasoning about what the ceremony
+// proves.
+//
+// User verification is required here rather than taken from the
+// configuration. A named assertion is already scoped to a subject the caller
+// chose, so possession of that subject's authenticator is a meaningful answer
+// on its own. A discoverable ceremony is scoped to nothing: the authenticator
+// alone decides which account the response is for. Accepting a
+// possession-only response would mean a found or stolen passkey signs in as
+// its owner with nothing further needed, and the caller cannot compensate,
+// because it did not choose the subject either. A deployment whose
+// authenticators cannot verify a user cannot offer this, which is the correct
+// outcome rather than a limitation to work around.
+func (s *Service) BeginDiscoverableAssertion(ctx context.Context, tenantID string) (*BeginAssertionResult, error) {
+	assertion, session, err := s.rp.BeginDiscoverableLogin(
+		lib.WithUserVerification(protocol.VerificationRequired),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("webauthn: begin discoverable login: %w", err)
+	}
+
+	// Stored with no subject, because there is none yet. That empty value is
+	// also what keeps the two assertion flows apart: the named completion
+	// requires the challenge to name the subject it was handed, and the
+	// discoverable completion requires it to name nobody. Neither ceremony can
+	// be finished through the other's route, which matters because they differ
+	// in exactly the two checks an attacker would want to choose between, the
+	// allow list and the user-verification requirement.
+	challengeID, expiresAt, err := s.persistChallenge(ctx, tenantID, "",
+		store.CeremonyAssertion, session)
+	if err != nil {
+		return nil, err
+	}
+
+	return &BeginAssertionResult{
+		ChallengeID: challengeID,
+		Options:     assertion,
+		ExpiresAt:   expiresAt,
+	}, nil
+}
+
+// CompleteDiscoverableAssertion finishes a ceremony begun without a subject
+// and reports which subject the response turned out to belong to.
+//
+// The subject is resolved from the credential identifier and never from the
+// user handle. Both arrive in the same client-controlled response, but they
+// are not equally trustworthy: the credential identifier selects a stored
+// public key which then has to verify the signature, whereas the handle is
+// only a value the client sent. Resolving the subject from the handle would
+// let anyone present their own authenticator alongside somebody else's handle
+// and be told they are that person. The handle is still checked, because a
+// response whose two halves disagree is not one this service issued.
+func (s *Service) CompleteDiscoverableAssertion(ctx context.Context, tenantID, challengeID string, credentialJSON []byte) (*store.Subject, *AssertionOutcome, error) {
+	challenge, session, err := s.consumeChallenge(ctx, tenantID, challengeID,
+		store.CeremonyAssertion)
+	if err != nil {
+		return nil, nil, err
+	}
+	// The mirror of the subject check in CompleteAssertion. A challenge issued
+	// for a named subject must not be completed here, where there is no allow
+	// list and no caller-supplied subject to compare it against.
+	if challenge.SubjectID != "" {
+		return nil, nil, ErrCeremonyFailed
+	}
+
+	parsed, err := protocol.ParseCredentialRequestResponseBytes(credentialJSON)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrCeremonyFailed, err)
+	}
+
+	var (
+		rec     *store.Credential
+		subject *store.Subject
+	)
+
+	// The library calls this to turn the response into the user it should
+	// validate against. Everything the service knows about who is signing in
+	// is decided here.
+	lookup := func(rawID, handle []byte) (lib.User, error) {
+		found, err := s.store.GetCredentialByID(ctx, tenantID, s.cfg.RPID, rawID)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, ErrCeremonyFailed
+		}
+		if err != nil {
+			return nil, fmt.Errorf("webauthn: credential lookup: %w", err)
+		}
+		// GetCredentialByID deliberately does not filter revoked rows: the
+		// registration path uses it to refuse an authenticator that is already
+		// known, whether or not it still works. Here a revoked credential must
+		// authenticate nothing.
+		//
+		// This is the earlier of two refusals rather than the only one. Both
+		// AdvanceSignCount and TouchCredential carry "revoked_at IS NULL", so
+		// the ceremony would fail at the end anyway. Relying on that would
+		// mean verifying a signature against a revoked key first, resolving
+		// the subject it belongs to, and depending on a WHERE clause written
+		// to serve the replay guard to also serve revocation. Refusing here
+		// makes revocation a stated property of this path.
+		if found.Revoked() {
+			return nil, ErrCeremonyFailed
+		}
+
+		sub, err := s.store.GetSubject(ctx, tenantID, found.SubjectID)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, ErrCeremonyFailed
+		}
+		if err != nil {
+			return nil, fmt.Errorf("webauthn: subject lookup: %w", err)
+		}
+		if !sub.Active() {
+			return nil, ErrCeremonyFailed
+		}
+
+		expected, err := userHandle(sub.ID)
+		if err != nil {
+			return nil, err
+		}
+		if !hmac.Equal(expected, handle) {
+			return nil, ErrCeremonyFailed
+		}
+
+		rec, subject = found, sub
+
+		// Only the credential that was presented goes into the list the
+		// library validates against. Handing it the subject's other
+		// credentials would let a response be accepted against a key the user
+		// did not just use.
+		return newUser(sub, "", []lib.Credential{toLibCredential(found)})
+	}
+
+	validated, err := s.rp.ValidateDiscoverableLogin(lookup, *session, parsed)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrCeremonyFailed, err)
+	}
+	if rec == nil || subject == nil || !hmac.Equal(rec.CredentialID, validated.ID) {
+		// The lookup sets both, and the library validates against what the
+		// lookup returned, so this should be unreachable. Refusing rather than
+		// trusting it keeps the invariant local.
+		return nil, nil, ErrCeremonyFailed
+	}
+
+	outcome, err := s.recordAssertion(ctx, rec, validated, parsed)
+	if err != nil {
+		return nil, nil, err
+	}
+	return subject, outcome, nil
 }
 
 // persistChallenge stores the ceremony state and returns its identifier.

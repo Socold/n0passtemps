@@ -154,6 +154,79 @@ does persist the label it was given on the credential row, where it exists so an
 operator can tell one of a subject's keys from another; it takes part in no
 decision.
 
+## Usernameless sign-in
+
+A named assertion starts with the caller saying who is signing in. A
+discoverable ceremony does not: the authenticator offers whichever credentials
+it holds for this relying party, the user picks one, and the response says
+whose it was. That is what a passkey prompt does, and it is what users now
+expect, so the service offers it alongside the named flow rather than instead
+of it.
+
+Two decisions carry the security of that flow.
+
+**User verification is required, not configured.** Every other ceremony takes
+`webauthn.user_verification` from the configuration. This one ignores it and
+requires verification. A named assertion is already scoped to a subject the
+caller chose, so proving possession of that subject's authenticator answers a
+question somebody asked. A discoverable ceremony is scoped to nothing: the
+authenticator alone decides which account the response is for. Accepting a
+possession-only response would mean a found or stolen passkey signs in as its
+owner with nothing else needed, and the caller cannot compensate, because it
+did not choose the subject either. A deployment whose authenticators cannot
+verify a user therefore cannot offer usernameless sign-in. That is the correct
+outcome and not a limitation to work around.
+
+**The subject is resolved from the credential, never from the user handle.**
+Both arrive in the same response, and a response is whatever the client chose
+to send. They are not equally trustworthy. The credential identifier selects a
+stored public key, and that key then has to verify the signature over this
+ceremony's challenge; an attacker who names a credential they do not hold gets
+no further. The handle is only a value in a JSON document. Resolving the
+subject from it would let anyone present their own authenticator alongside
+somebody else's handle and be told they are that person.
+
+The handle is still compared against the one the service derives for the
+resolved subject, and a mismatch refuses the ceremony. That comparison proves
+nothing by itself, and it is not what identifies the subject. It refuses a
+response assembled from two different ceremonies, and it means the property
+does not rest on the library alone performing the same check.
+
+### Keeping the two flows apart
+
+A discoverable challenge is stored with no subject, because at that point there
+is none. That empty value is also the guard. The named completion requires the
+challenge to name the subject it was handed; the discoverable completion
+requires it to name nobody. Neither ceremony can be finished through the
+other's route.
+
+This matters because the two differ in exactly the pair of checks an attacker
+would want to choose between: the named flow sends an allow list and takes the
+configured verification requirement, the discoverable flow sends no allow list
+and requires verification. Letting a challenge cross between them would let the
+weaker half of each be combined.
+
+No new ceremony value was added to the challenge table for this. The `assertion`
+value covers both, and the subject column tells them apart, so the schema did
+not have to change and an existing deployment gains the flow without a
+migration.
+
+### What it does not change
+
+A revoked credential authenticates nothing, and an inactive subject
+authenticates nothing. Both are checked on the resolved credential before the
+signature is verified, which is earlier than the store would refuse the write
+at the end of the ceremony.
+
+The lookup is scoped to the tenant and to the configured relying party
+identifier, so a credential registered under one tenant cannot resolve a
+subject under another.
+
+Everything after validation is shared with the named flow: the same counter
+compare-and-swap, the same clone signal, the same binding hash comparison, the
+same risk assessment. The two paths converge on one function precisely so that
+the part of an assertion easiest to get subtly wrong exists once.
+
 ## Attestation policy
 
 `webauthn.attestation_preference` defaults to `none` and

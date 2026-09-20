@@ -256,16 +256,33 @@ func (a *virtualAuthenticator) get(options any) ([]byte, error) {
 	}
 
 	var cred *virtualCredential
-	for _, d := range pk.AllowCredentials {
-		id, err := base64.RawURLEncoding.DecodeString(d.ID)
-		if err != nil {
-			return nil, fmt.Errorf("authenticator: allowed id is not base64url: %w", err)
+	if len(pk.AllowCredentials) == 0 {
+		// An empty allow list is a discoverable request: the relying party has
+		// named nobody, so the device itself chooses from the credentials it
+		// holds for this relying party. A real authenticator prompts the user;
+		// this one takes the lowest identifier so the choice is deterministic
+		// and a test can assert which subject came back.
+		var chosen string
+		for id, held := range a.credentials {
+			if held.rpID != pk.RPID {
+				continue
+			}
+			if chosen == "" || id < chosen {
+				chosen, cred = id, held
+			}
 		}
-		// A credential is scoped to the relying party it was created for, and
-		// the device will not use it for another one.
-		if held, ok := a.credentials[string(id)]; ok && held.rpID == pk.RPID {
-			cred = held
-			break
+	} else {
+		for _, d := range pk.AllowCredentials {
+			id, err := base64.RawURLEncoding.DecodeString(d.ID)
+			if err != nil {
+				return nil, fmt.Errorf("authenticator: allowed id is not base64url: %w", err)
+			}
+			// A credential is scoped to the relying party it was created for,
+			// and the device will not use it for another one.
+			if held, ok := a.credentials[string(id)]; ok && held.rpID == pk.RPID {
+				cred = held
+				break
+			}
 		}
 	}
 	if cred == nil {

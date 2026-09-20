@@ -121,6 +121,13 @@ func (s *Server) mountPublic(mux *http.ServeMux) {
 	mux.Handle("POST /v1/webauthn/{subject_ref}/assert", authed(ScopeWebAuthn, s.handleAssertBegin))
 	mux.Handle("POST /v1/webauthn/{subject_ref}/assert/complete", authed(ScopeWebAuthn, s.handleAssertComplete))
 
+	// Named "assert/discoverable" rather than "discoverable/assert" so the
+	// pattern cannot collide with {subject_ref}: a subject whose reference was
+	// literally "discoverable" would otherwise make two patterns match one
+	// path.
+	mux.Handle("POST /v1/webauthn/assert/discoverable", authed(ScopeWebAuthn, s.handleDiscoverableAssertBegin))
+	mux.Handle("POST /v1/webauthn/assert/discoverable/complete", authed(ScopeWebAuthn, s.handleDiscoverableAssertComplete))
+
 	mux.Handle("POST /v1/totp/{subject_ref}/enrol", authed(ScopeTOTP, s.handleTOTPEnrol))
 	mux.Handle("POST /v1/totp/{subject_ref}/enrol/confirm", authed(ScopeTOTP, s.handleTOTPConfirm))
 	mux.Handle("POST /v1/totp/{subject_ref}/verify", authed(ScopeTOTP, s.handleTOTPVerify))

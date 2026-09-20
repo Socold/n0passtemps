@@ -188,6 +188,28 @@ func TestRequestShape(t *testing.T) {
 			},
 		},
 		{
+			name: "BeginDiscoverableAssertion", status: 200, response: ceremonyJSON,
+			invoke:     func(c *Client) (any, error) { return c.BeginDiscoverableAssertion(ctx) },
+			wantMethod: "POST", wantURI: "/v1/webauthn/assert/discoverable",
+		},
+		{
+			name: "CompleteDiscoverableAssertion", status: 200, response: assertionJSON,
+			invoke: func(c *Client) (any, error) {
+				return c.CompleteDiscoverableAssertion(ctx, challengeID, credential)
+			},
+			wantMethod: "POST", wantURI: "/v1/webauthn/assert/discoverable/complete",
+			wantBody: `{"challenge_id":"` + challengeID + `","credential":` + credentialJSON + `}`,
+			check: func(t *testing.T, got any) {
+				res := got.(*AssertionResult)
+				// The usernameless route is the one that reports who signed
+				// in, so the subject identifier is the field a caller reads
+				// first. It is still the verified claims that decide.
+				if res.SubjectID == "" || res.Assertion != "aaa.bbb.ccc" {
+					t.Errorf("assertion result decoded as %+v", res)
+				}
+			},
+		},
+		{
 			name: "EnrolTOTP", status: 201,
 			response: `{"secret_id":"s1","secret":"JBSWY3DPEHPK3PXP","provisioning_uri":"otpauth://totp/x","algorithm":"SHA1","digits":6,"period_seconds":30,"expires_at":"2026-09-16T10:15:00Z"}`,
 			invoke:   func(c *Client) (any, error) { return c.EnrolTOTP(ctx, awkwardRef) },

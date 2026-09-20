@@ -394,6 +394,55 @@ func (c *Client) CompleteAssertion(ctx context.Context, subjectRef, challengeID 
 	return &out, nil
 }
 
+// BeginDiscoverableAssertion starts an authentication ceremony without naming
+// the subject.
+//
+// This is the passkey flow: the options it returns carry no allow list, so the
+// browser offers whichever credentials the authenticator holds for this
+// relying party and the user picks one. Pass them to
+// navigator.credentials.get() unchanged.
+//
+// The ceremony always requires user verification, whatever the deployment
+// configures for the named flow. A ceremony that names nobody is answered by
+// the authenticator alone, so possession on its own would let a found passkey
+// sign in as its owner.
+func (c *Client) BeginDiscoverableAssertion(ctx context.Context) (*Ceremony, error) {
+	return c.ceremony(ctx, call{
+		method: http.MethodPost,
+		route:  "/v1/webauthn/assert/discoverable",
+		path:   "/v1/webauthn/assert/discoverable",
+	})
+}
+
+// CompleteDiscoverableAssertion finishes a ceremony begun without a subject and
+// reports which subject the credential belonged to, in the SubjectID of the
+// result.
+//
+// credential is the PublicKeyCredential the browser produced, forwarded
+// verbatim; it must carry the userHandle the authenticator returned, which a
+// browser includes for a discoverable credential. Verify the returned
+// assertion before acting on it, and take the subject identifier from the
+// verified claims rather than from the response body.
+//
+// A challenge is single use, so this call is never retried.
+func (c *Client) CompleteDiscoverableAssertion(ctx context.Context, challengeID string, credential json.RawMessage) (*AssertionResult, error) {
+	if err := checkCompletion(challengeID, credential); err != nil {
+		return nil, err
+	}
+	var out AssertionResult
+	err := c.do(ctx, call{
+		method: http.MethodPost,
+		route:  "/v1/webauthn/assert/discoverable/complete",
+		path:   "/v1/webauthn/assert/discoverable/complete",
+		body:   completeRequest{ChallengeID: challengeID, Credential: credential},
+		out:    &out,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // EnrolTOTP issues a TOTP secret for the subject. The secret is pending until
 // ConfirmTOTP proves the user can produce a code from it.
 func (c *Client) EnrolTOTP(ctx context.Context, subjectRef string) (*TOTPEnrolment, error) {

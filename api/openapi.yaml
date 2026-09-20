@@ -614,6 +614,116 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /v1/webauthn/assert/discoverable:
+    post:
+      tags: [WebAuthn]
+      operationId: beginDiscoverableAssertion
+      summary: Begin an authentication ceremony without naming the subject.
+      description: |
+        Requires an API key that holds the `webauthn` scope, or an unrestricted
+        key.
+
+        Round trip one of two for usernameless sign-in. There is no
+        `subject_ref` in the path, because the point of the route is that the
+        caller does not yet know who is signing in. The options carry no
+        `allowCredentials`, which is what makes the browser offer whichever
+        passkeys the authenticator holds for this relying party.
+
+        `userVerification` is always `required` here, whatever
+        `webauthn.user_verification` is configured to. A named ceremony is
+        already scoped to a subject the caller chose, so possession of that
+        subject's authenticator answers a question somebody asked. This
+        ceremony is scoped to nothing: the authenticator alone decides which
+        account the response is for, so a possession-only response would let a
+        found or stolen passkey sign in as its owner with nothing else needed.
+        A deployment whose authenticators cannot verify a user cannot offer
+        this route.
+
+        Only the per-network and per-key limits apply, because no subject is
+        known yet. The challenges are single use, short lived and useless
+        without an authenticator holding a matching credential, so those limits
+        bound the cost of issuing them.
+      security:
+        - apiKey: []
+      responses:
+        "200":
+          description: A ceremony was started. Pass the options to the browser.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BeginAssertionResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/Throttled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/webauthn/assert/discoverable/complete:
+    post:
+      tags: [WebAuthn]
+      operationId: completeDiscoverableAssertion
+      summary: Complete a ceremony begun without naming the subject.
+      description: |
+        Requires an API key that holds the `webauthn` scope, or an unrestricted
+        key.
+
+        Round trip two of two for usernameless sign-in. The response reports
+        which subject the credential turned out to belong to, in `subject_id`,
+        alongside the same signed assertion the named route returns.
+
+        The subject is resolved from the credential identifier and never from
+        the user handle. Both arrive in the same client-supplied response, but
+        the credential identifier selects a stored public key which then has to
+        verify the signature, whereas the handle is only a value in a JSON
+        document. The handle is compared against the one this service derived
+        for the resolved subject, and a mismatch refuses the ceremony.
+
+        A refusal is never recorded against a subject, because a failed
+        ceremony has not established which subject it was for. It counts
+        against the calling key and the source network only.
+      security:
+        - apiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CeremonyCompleteRequest"
+      responses:
+        "200":
+          description: The subject authenticated, and the response names them.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssertionResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/CeremonyFailed"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/Throttled"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /v1/webauthn/{subject_ref}/assert/complete:
     parameters:
       - $ref: "#/components/parameters/SubjectRef"

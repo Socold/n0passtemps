@@ -190,10 +190,14 @@ in full.
 
 Found while building 1.0.0, in rough order of value.
 
+**Discoverable-credential sign-in: landed.** Unreleased; see
+[../CHANGELOG.md](../CHANGELOG.md) and the reasoning in
+[WEBAUTHN.md](WEBAUTHN.md) under "Usernameless sign-in". The caller no longer
+has to name the subject first.
+
 | Item | Why |
 |---|---|
 | External audit sink | The hash chain makes tampering detectable, not impossible. Shipping entries to an append-only destination outside the operator's control is the only way to do better, and the threat model says so |
-| Discoverable-credential sign-in | Today the caller names the subject first. Usernameless sign-in is what users now expect from passkeys, and the ceremony layer is most of the way there |
 | Administrative sign-in with WebAuthn | The administration interface authenticates with a bearer token pasted into a form. A passwordless product whose own console does not use passkeys is an awkward demonstration |
 | A `verify` subcommand for backups | Operators back up the database, the keyring and the pepper separately. Nothing checks that a given trio still opens |
 | Multi-replica janitor lock | Each replica runs every sweep. Harmless, since the sweeps are idempotent, and wasteful |

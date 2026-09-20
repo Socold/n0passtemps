@@ -5,6 +5,50 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Usernameless sign-in**, `POST /v1/webauthn/assert/discoverable` and
+  `.../complete`, behind the existing `webauthn` scope. There is no
+  `subject_ref` in the path: the options carry no allow list, so the browser
+  offers whichever passkeys the authenticator holds for this relying party, and
+  the completion response reports which subject the credential belonged to.
+  This is what users now expect from a passkey, and the ceremony layer was most
+  of the way there already.
+
+  Two decisions carry its security. **User verification is required**, whatever
+  `webauthn.user_verification` is configured to: a named ceremony is scoped to a
+  subject the caller chose, but this one is scoped to nothing, so a
+  possession-only response would let a found or stolen passkey sign in as its
+  owner with nothing else needed, and the caller cannot compensate because it
+  did not choose the subject either. A deployment whose authenticators cannot
+  verify a user therefore cannot offer the route, which is the correct outcome.
+  **The subject is resolved from the credential identifier and never from the
+  user handle**: both arrive in the same client-supplied response, but the
+  credential identifier selects a stored public key that then has to verify the
+  signature, whereas the handle is only a value in a JSON document. The handle
+  is still compared against the one the service derived for the resolved
+  subject, so a response assembled from two ceremonies is refused.
+
+  A failed usernameless ceremony is never recorded against a subject, because
+  it has not established which subject it was for. Recording it against
+  whichever subject the response named would be a lockout primitive against any
+  account an attacker could name a credential for. It counts against the
+  calling key and the source network only.
+
+  No migration. The challenge row's subject column is already nullable, and the
+  empty value is what keeps the two flows apart: the named completion requires
+  the challenge to name its subject, the usernameless completion requires it to
+  name nobody, so neither ceremony can be finished through the other's route.
+  That matters because the two differ in exactly the pair of checks an attacker
+  would want to choose between, the allow list and the verification
+  requirement.
+
+  All three SDKs gained the pair of calls, and
+  [docs/WEBAUTHN.md](docs/WEBAUTHN.md) has the reasoning under "Usernameless
+  sign-in".
+
 ## [1.1.0] - 2026-09-19
 
 ### Added

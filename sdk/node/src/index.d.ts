@@ -180,6 +180,10 @@ export class Client {
   completeRegistration(subjectRef: string, input: CeremonyCompleteInput): Promise<RegisterCompleteResult>;
   beginAssertion(subjectRef: string): Promise<BeginAssertionResult>;
   completeAssertion(subjectRef: string, input: CeremonyCompleteInput): Promise<AssertionResult>;
+
+  /** Passkey flow: no subject is named, and the result reports which one signed in. */
+  beginDiscoverableAssertion(): Promise<BeginAssertionResult>;
+  completeDiscoverableAssertion(input: CeremonyCompleteInput): Promise<AssertionResult>;
   enrolTotp(subjectRef: string): Promise<TotpEnrolResult>;
   confirmTotp(subjectRef: string, code: string): Promise<TotpConfirmResult>;
   verifyTotp(subjectRef: string, code: string): Promise<AssertionResult>;

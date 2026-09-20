@@ -216,6 +216,51 @@ export class Client {
   }
 
   /**
+   * Begin a WebAuthn authentication without naming the subject.
+   *
+   * This is the passkey flow. The options carry no allow list, so the browser
+   * offers whichever credentials the authenticator holds for this relying
+   * party and the user picks one; send them to the browser unchanged, as with
+   * {@link Client#beginAssertion}.
+   *
+   * The ceremony always requires user verification, whatever the deployment
+   * configures for the named flow. A ceremony that names nobody is answered by
+   * the authenticator alone, so possession on its own would let a found passkey
+   * sign in as its owner.
+   *
+   * @returns {Promise<object>} `{ challenge_id, options, expires_at }`
+   */
+  async beginDiscoverableAssertion() {
+    return this.#request(
+      "POST",
+      "/v1/webauthn/assert/discoverable",
+      "/v1/webauthn/assert/discoverable",
+    );
+  }
+
+  /**
+   * Complete a ceremony begun without a subject. The result names the subject
+   * the credential belonged to in `subject_id`.
+   *
+   * The credential must carry the `userHandle` the authenticator returned,
+   * which a browser includes for a discoverable credential. Verify the
+   * resolved `assertion` before anything is granted, and take the subject
+   * identifier from the verified claims rather than from the body: the body is
+   * unsigned.
+   *
+   * @param {{ challengeId: string, credential: object }} input
+   * @returns {Promise<object>} AssertionResult
+   */
+  async completeDiscoverableAssertion(input) {
+    return this.#request(
+      "POST",
+      "/v1/webauthn/assert/discoverable/complete",
+      "/v1/webauthn/assert/discoverable/complete",
+      Client.#ceremonyBody(input),
+    );
+  }
+
+  /**
    * Issue a TOTP secret. It is disclosed in this response and never again, and
    * it is not usable until confirmed with {@link Client#confirmTotp}.
    *

@@ -632,6 +632,44 @@ class Client:
             )
         )
 
+    def begin_discoverable_assertion(self) -> Dict[str, Any]:
+        """Start an authentication ceremony without naming the subject.
+
+        This is the passkey flow. The options carry no allow list, so the
+        browser offers whichever credentials the authenticator holds for this
+        relying party and the user picks one.
+
+        The ceremony always requires user verification, whatever the deployment
+        configures for the named flow: a ceremony that names nobody is answered
+        by the authenticator alone, so possession on its own would let a found
+        passkey sign in as its owner.
+
+        Returns ``challenge_id``, ``options`` and ``expires_at``.
+        """
+        return self._request("POST", "/v1/webauthn/assert/discoverable")
+
+    def complete_discoverable_assertion(
+        self, challenge_id: str, credential: Mapping[str, Any]
+    ) -> AssertionResult:
+        """Finish a ceremony begun without a subject.
+
+        The result's ``subject_id`` reports which subject the credential
+        belonged to. ``credential`` must carry the ``userHandle`` the
+        authenticator returned, which a browser includes for a discoverable
+        credential.
+
+        Verify ``assertion`` before granting anything, and take the subject
+        identifier from the verified claims rather than from the body, which is
+        unsigned. Raises AuthenticationFailed when refused.
+        """
+        return AssertionResult.from_dict(
+            self._request(
+                "POST",
+                "/v1/webauthn/assert/discoverable/complete",
+                {"challenge_id": challenge_id, "credential": credential},
+            )
+        )
+
     # --- TOTP ---
 
     def enrol_totp(self, subject_ref: str) -> TOTPEnrolment:
