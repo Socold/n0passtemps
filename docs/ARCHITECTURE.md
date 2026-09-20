@@ -60,7 +60,7 @@ key material in memory. Everything else is derived.
 |---|---|---|
 | `cmd/n0passtemps-server` | The entrypoint: parses seven flags, loads the configuration, opens the keyring and the store, provisions the tenant, builds every service, starts the janitor and serves. With `-bootstrap-admin` it creates the first administrative tokens, as many as `-admins` says, prints each once and exits without serving; the long-running path never writes a token and only warns when no administrator exists. See [ADR 0014](adr/0014-bootstrap-by-explicit-command.md) | everything |
 | `cmd/n0passtemps-wizard` | Generates the keyring, the signing key and the pepper, writes a configuration, and validates one. Nothing it does is required | `config`, `kek`, `assertion` |
-| `internal/janitor` | The five periodic sweeps, in process, and the keyring age check that raises `kek.rotation_overdue` | `config`, `store`, `audit`, `alerts` |
+| `internal/janitor` | The five periodic sweeps, in process and behind a deployment-wide sweep lock so that several replicas do not each repeat them, and the keyring age check that raises `kek.rotation_overdue` | `config`, `store`, `audit`, `alerts` |
 | `internal/admin/ui` | The server-rendered interface, embedded, mounted at `/admin` | `config`, `store`, `audit`, `subject`, `throttle` |
 | `internal/config` | Loads defaults, the TOML file and the environment; validates once at startup | `go-toml/v2` |
 | `internal/api` | The HTTP surface: routing, middleware, problem responses, both handler sets | everything below |
@@ -70,6 +70,7 @@ key material in memory. Everything else is derived.
 | `internal/totp` | RFC 6238 code generation and verification. Holds no state | `zeroize` |
 | `internal/assertion` | Issues and verifies the signed ceremony result; publishes the JWK Set | `zeroize` |
 | `internal/audit` | The hash chain, the event vocabulary and the recorder | `store` |
+| `internal/auditsink` | Delivers the hash-covered part of each entry to an append-only destination outside the operator's control. The only package that makes an outbound connection, and it exists only when `audit.sink.endpoint` is set | `config`, `store`, `audit`, `version` |
 | `internal/alerts` | Turns ten detected conditions into rows an operator can act on | `store` |
 | `internal/throttle` | Evaluates and records the rate limits | `config`, `store` |
 | `internal/health` | Builds the two health reports | `config`, `store`, `version` |
@@ -226,6 +227,40 @@ returns the same body: a caller learns that authentication did not succeed,
 which is all it needs, and cannot tell a wrong signature from an expired
 challenge from an unknown credential.
 
+## Where the external audit sink sits
+
+Step 7 above is where `internal/auditsink` attaches, and it attaches after the
+append rather than around it. `audit.Recorder` appends the entry, the store
+returns it with its sequence number and its chain hashes filled in, and only
+then is it offered to the sink. An entry that never committed is never offered,
+and an offer that fails changes nothing about an entry that did.
+
+`Offer` is a non-blocking send onto a bounded queue. It returns nothing, it can
+fail at nothing, and it is the only part of the sink that any request path
+touches. Everything else happens on one background goroutine, started from
+`main` beside the janitor and stopped the same way, which makes one last
+delivery attempt as the process shuts down.
+
+The queue is a latency optimisation and not the buffer. The buffer is the audit
+log: it is ordered by sequence number, the receiver acknowledges up to a
+sequence number, and a file in the data directory records that number. So
+whenever the queue overflows, an offer arrives out of order, a POST fails or the
+process restarts, the shipper stops trusting the queue and reads from the log
+one past the watermark instead. A full buffer costs latency and a database read;
+it cannot cost the witness an entry.
+
+What travels is narrower than the entry. The chain hash covers a salted digest
+of the three personal fields rather than the fields themselves, which is what
+makes erasure possible, and it is that digest which is delivered. `subject_id`,
+`source_ip` and `detail` are not sent at all, and neither is the salt. The
+result is exactly the hash input, which is exactly enough for a receiver to
+recompute every hash and detect a gap, and not enough to tell which person an
+entry concerns. See [ADR 0016](adr/0016-ship-the-audit-chain-to-an-external-witness.md).
+
+This is the only outbound connection the service makes, and the only one it can
+make. With `audit.sink.endpoint` unset no shipper exists, so there is no idle
+client and no timer.
+
 ## Storage
 
 ### The two-pool SQLite arrangement
@@ -293,6 +328,14 @@ chain head and then inserts an entry committing to it, and two concurrent
 appends under READ COMMITTED can both read the same head. That is resolved with
 an advisory lock.
 
+The janitor's sweep lock is the one other advisory lock, and it is a different
+kind: session level rather than transaction level, and tried rather than waited
+for. A pass is not one statement but six independent deletes that must be able
+to fail one at a time, so it cannot live in a transaction, and a replica that
+does not get the lock wants to skip its pass rather than queue behind somebody
+else's. On SQLite the same coordination is a lease row with an expiry, because
+that engine has no advisory locks and a dead holder must not keep the lock.
+
 Timestamps are native `TIMESTAMPTZ`, normalised to UTC on read. PostgreSQL
 stores them as a count of microseconds, so `audit.Prepare` truncates to
 microseconds before hashing, in one shared place rather than in one backend, and
@@ -343,6 +386,7 @@ fails if either declares a schema object the other does not. It runs in CI.
 | Recovery codes | Selector in clear and indexed; verifier as an Argon2id PHC string | 70 bits of verifier entropy; `m=19456` KiB, `t=2`, `p=1`; constant-time comparison | Nothing: hashes are not reversible, and a lost sheet means a fresh batch |
 | TOTP secrets | `totp_secrets.secret_sealed`, envelope-encrypted | AES-256-GCM under a per-record data key, wrapped under the KEK | The secret is unrecoverable and the user re-enrols |
 | Subject reference | `subjects.ref_hmac` for lookup, `subjects.ref_sealed` for disclosure | HMAC-SHA256 under the pepper; the sealed copy under the KEK | The readable form, which costs the Article 15 access path and the administration interface's ability to name a person |
+| External audit sink credential | The variable named by `audit.sink.token_env`, only when a sink is configured | The variable is unset once read; never logged, never in an alert row, never in the health report | Nothing stored. Delivery stops being accepted until the receiver issues a new credential, which raises `audit.sink_failing` |
 
 The envelope format is versioned and self-describing: a one-byte format
 version, a big-endian KEK version, the DEK-wrapping nonce, the wrapped DEK, the

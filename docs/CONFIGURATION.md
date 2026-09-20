@@ -560,6 +560,187 @@ Refused by the validator:
 - `config: audit.max_query_limit must be between 1 and 10000, got %d`
 - `config: audit.retention_days cannot be negative`
 
+## audit.sink
+
+Delivers a copy of the audit chain to a destination outside this deployment.
+Everything in this section is off by default, and with it off the service makes
+no outbound connection of any kind: no shipper is built, so there is no idle
+client and no timer.
+
+### The trust assumption, stated
+
+The hash chain makes tampering detectable by anybody who kept an earlier head.
+It does not survive the operator of this server, who owns the database file and
+can therefore edit a row and recompute every hash from the edit onwards;
+`/admin/v1/audit/verify` will then report the log as intact. Attacker 9 in
+[THREAT-MODEL.md](THREAT-MODEL.md) sets this out in full.
+
+A sink closes that only if the receiver is genuinely somebody else's. A file on
+this host, a bucket under the same cloud credentials, or a log collector the
+same root account administers all fall to exactly the attacker the chain already
+fails to stop, so a sink of that kind is worthless rather than merely weaker.
+This service cannot tell which kind it has been handed, so the operator declares
+it with `receiver_outside_operator_control`, and an endpoint without that
+declaration is refused at startup.
+
+Setting it also accepts the second half of the assumption: a delivered entry is
+beyond this service's reach for ever, an erasure request included. What the
+receiver holds carries no personal data, so nothing there answers to Article 17;
+what it holds is a salted commitment that cannot be reversed without a salt
+which never leaves this database. A deployment that wants the receiver's copy
+bounded anyway bounds it with the receiver's own retention.
+
+| Key | Type | Default | Environment variable | Purpose |
+|---|---|---|---|---|
+| `audit.sink.endpoint` | string | empty | `N0PASSTEMPS_AUDIT_SINK_ENDPOINT` | Where each batch is POSTed. Empty means the sink is off, and there is deliberately no separate `enabled` flag: the endpoint is the switch, so an empty section cannot be half on. Must be `https`, except towards loopback. |
+| `audit.sink.token_env` | string | `N0PASSTEMPS_AUDIT_SINK_TOKEN` | `N0PASSTEMPS_AUDIT_SINK_TOKEN_ENV` | Names the variable holding the bearer credential. The credential itself has no file and no TOML form, like every other secret. |
+| `audit.sink.receiver_outside_operator_control` | bool | `false` | `N0PASSTEMPS_AUDIT_SINK_RECEIVER_OUTSIDE_OPERATOR_CONTROL` | The declaration above. An endpoint is refused without it. |
+| `audit.sink.buffer_size` | int | `1024` | `N0PASSTEMPS_AUDIT_SINK_BUFFER_SIZE` | Bounds the in-memory hand-off from the recorder. Overflowing it costs latency, not entries; see below. |
+| `audit.sink.batch_size` | int | `128` | `N0PASSTEMPS_AUDIT_SINK_BATCH_SIZE` | Entries per POST, and the page size of a catch-up read from the audit log. Cannot exceed `buffer_size`. |
+| `audit.sink.flush_interval` | duration | `5s` | `N0PASSTEMPS_AUDIT_SINK_FLUSH_INTERVAL` | How long a partial batch waits for company. It is what bounds how far behind the witness runs when traffic is light. |
+| `audit.sink.timeout` | duration | `10s` | `N0PASSTEMPS_AUDIT_SINK_TIMEOUT` | Bounds one POST. Generous, because no request path waits on it. |
+| `audit.sink.retry_backoff` | duration | `1s` | `N0PASSTEMPS_AUDIT_SINK_RETRY_BACKOFF` | The pause after the first failed attempt. |
+| `audit.sink.max_retry_backoff` | duration | `5m` | `N0PASSTEMPS_AUDIT_SINK_MAX_RETRY_BACKOFF` | The ceiling the pause doubles up to. Delivery is retried for ever rather than abandoned: the entries stay in the audit log, so a witness that is behind catches up while one the sender gave up on never does. |
+| `audit.sink.watermark_path` | path | empty | `N0PASSTEMPS_AUDIT_SINK_WATERMARK_PATH` | Where delivery progress is recorded. Empty puts it at `audit-sink.watermark` inside `database.data_dir`. It holds one sequence number and no secret. |
+
+A minimal working section:
+
+```toml
+[audit.sink]
+endpoint = "https://witness.example.org/v1/audit"
+receiver_outside_operator_control = true
+```
+
+with the credential in the environment:
+
+```
+N0PASSTEMPS_AUDIT_SINK_TOKEN=<what the receiver issued>
+```
+
+Refused by the validator, and only when an endpoint is set, because with none
+the section is never read:
+
+- `config: audit.sink.endpoint %q is not a URL: ...`
+- `config: audit.sink.endpoint %q must use scheme https, or http towards loopback only`
+- `config: audit.sink.endpoint %q has no host`
+- `config: audit.sink.endpoint %q uses plain http towards a host that is not loopback; it would send the bearer credential and the shape of this deployment's audit history in clear`
+- `config: audit.sink.receiver_outside_operator_control must be set to true before an endpoint is accepted. ...`
+- `config: audit.sink.token_env is required when an endpoint is set; the receiver has to be able to tell this deployment from anybody else who finds the URL`
+- `config: audit.sink.buffer_size must be at least 1, got %d`
+- `config: audit.sink.batch_size must be at least 1, got %d`
+- `config: audit.sink.batch_size (%d) cannot exceed buffer_size (%d)`
+- `config: audit.sink.flush_interval must be positive`
+- `config: audit.sink.timeout must be positive`
+- `config: audit.sink.retry_backoff must be positive; a zero pause would turn an unreachable receiver into a busy loop`
+- `config: audit.sink.max_retry_backoff (%s) must not be below retry_backoff (%s)`
+
+Two further failures stop the start rather than being reported by the validator,
+because they are about the environment rather than the file. A `token_env` that
+names an empty or unset variable is refused, and so is a `watermark_path` whose
+directory cannot be written: both would otherwise leave a deployment believing
+it had a witness when it did not.
+
+### What is delivered, and what is not
+
+Each entry is reduced to the fields the chain hash commits to, which is exactly
+what a receiver needs in order to recompute the hashes and detect a gap:
+`seq`, `tenant_id`, `occurred_at`, `event_type`, `actor_type`, `actor_id`,
+`resource_type`, `resource_id`, `outcome`, `request_id`, `pii_digest`,
+`prev_hash` and `entry_hash`.
+
+`subject_id`, `source_ip` and `detail` are not sent. The chain covers a salted
+digest of those three rather than the fields themselves, which is what allows an
+entry to be erased without breaking verification, and it is the digest that
+travels. The per-entry salt is not sent either: a source address carries about
+thirty-two bits of entropy, so a receiver holding both the salt and the digest
+would recover the address by exhaustive search.
+
+`detail` is the field that would otherwise have been the leak. Nothing models
+its shape and nothing bounds what a future handler puts in it, so it is bounded
+by exclusion rather than by a filter somebody would have to keep up to date. The
+consequence is that the external copy answers one question, whether this history
+was rewritten, and cannot be used to investigate an incident or to rebuild the
+log.
+
+### What happens when the buffer fills
+
+Nothing that reaches a user. `Offer` never blocks and never fails: the entry is
+dropped from the queue, counted in `audit_sink.dropped_offers` in the detailed
+health report, logged once per episode, and the shipper falls back to reading
+the audit log from one past the last acknowledged sequence number. So a full
+buffer costs a database read and some latency, never a gap in the witness. The
+same fallback covers an out-of-order offer, a failed POST and a restart.
+
+A `dropped_offers` count that keeps climbing means `buffer_size` is too small
+for the deployment's write rate, or the receiver is too slow for it. Neither is
+urgent, and neither loses anything.
+
+### At least once, and what a receiver has to do
+
+The watermark is written only after the receiver has acknowledged a batch, so a
+process that dies in between sends that batch again. The other order would be at
+most once: the marker would move, the entries would never arrive, and nothing
+anywhere would know.
+
+A receiver therefore has three obligations. It de-duplicates on `seq`, and a
+second copy of a `seq` that differs from the first is evidence rather than a
+duplicate. It checks `count`, `from_seq` and `to_seq` against the entries it was
+given, so a body that arrived incomplete is refused instead of stored as though
+complete. And it checks that `seq` runs consecutively and that each `prev_hash`
+equals the previous `entry_hash`, which is how 41, 42, 44 is detected, twice
+over. `auditsink.CheckSequence` is that check, written once so it can be copied
+rather than described.
+
+A batch looks like this:
+
+```json
+{
+  "format": "n0passtemps.audit.v1",
+  "source": "default",
+  "sent_at": "2026-09-20T11:04:07Z",
+  "from_seq": 41,
+  "to_seq": 42,
+  "count": 2,
+  "entries": [
+    {
+      "seq": 41,
+      "tenant_id": "default",
+      "occurred_at": "2026-09-20T11:04:02.412331Z",
+      "event_type": "webauthn.assertion.completed",
+      "actor_type": "subject",
+      "outcome": "success",
+      "request_id": "01JB2...",
+      "pii_digest": "9mJ...=",
+      "prev_hash": "Tq4...=",
+      "entry_hash": "b7F...="
+    }
+  ]
+}
+```
+
+`source` is a label for a receiver collecting from several deployments. It is
+not evidence of anything: the bearer credential the receiver issued is what
+identifies the sender.
+
+Any 2xx is an acknowledgement. Anything else, including a 401, is retried with
+the backoff, because a rejected credential is fixed by an operator rotating what
+the receiver expects and only a retry picks that up without a restart.
+
+### Retention and the witness pull in opposite directions
+
+An entry trimmed by `audit.retention_days` before it was delivered cannot be
+delivered, and the receiver sees a gap it cannot tell from tampering. The
+shipper reports that case at error level rather than shipping in silence:
+
+```
+audit entries are missing from the local log and cannot be delivered
+expected_seq=1841 first_available_seq=2210
+```
+
+The guidance is unchanged from the [audit](#audit) section: leave
+`retention_days` at 0 and prune deliberately, and with a sink configured, prune
+only what the receiver has acknowledged.
+
 ## admin
 
 | Key | Type | Default | Environment variable | Purpose |

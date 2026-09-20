@@ -459,7 +459,86 @@ type Audit struct {
 	// MaxQueryLimit caps a single audit query, because this is the one table
 	// that grows without bound.
 	MaxQueryLimit int `toml:"max_query_limit"`
+
+	// Sink delivers a copy of every entry to a destination outside this
+	// deployment. It is off unless an endpoint is configured.
+	Sink AuditSink `toml:"sink"`
 }
+
+// AuditSink configures delivery of the audit chain to an external witness.
+//
+// The hash chain makes local tampering detectable by anybody who kept an
+// earlier head. It does not survive the operator, who owns the database file
+// and can recompute every hash after an edit. A copy held somewhere the
+// operator cannot rewrite is what closes that, because a rewritten chain will
+// not reproduce the hashes the witness already holds.
+//
+// There is no enabled flag. The endpoint is the switch, so a deployment that
+// has configured nothing makes no outbound connection at all, which is the
+// property the rest of this product rests on: an empty section cannot be
+// half-on. See internal/auditsink and docs/CONFIGURATION.md.
+type AuditSink struct {
+	// Endpoint receives a POST per batch. An empty value means the sink is off
+	// and no network code runs.
+	//
+	// It must be https, except towards loopback, which exists for a receiver
+	// reached through a local tunnel and for the tests. A bearer credential and
+	// the shape of a deployment's audit history are both things that must not
+	// cross a network in clear.
+	Endpoint string `toml:"endpoint"`
+
+	// TokenEnv names the environment variable holding the bearer credential.
+	// The credential itself has no file counterpart and no TOML counterpart,
+	// like every other secret this service reads.
+	TokenEnv string `toml:"token_env"`
+
+	// ReceiverOutsideOperatorControl is the operator declaring what the sink
+	// assumes and this service cannot check.
+	//
+	// A sink the operator can rewrite buys nothing: a file on the same host, an
+	// object store under the same credentials, or a log collector the same root
+	// account administers all fall to the same attacker the chain already
+	// fails to stop. The declaration is refused by default rather than assumed,
+	// because the feature is worthless and not merely weaker when it is false,
+	// and because delivered entries are outside this service's reach for ever
+	// after, erasure included.
+	ReceiverOutsideOperatorControl bool `toml:"receiver_outside_operator_control"`
+
+	// BufferSize bounds the in-memory hand-off between the recorder and the
+	// shipper. Overflowing it costs latency rather than entries; see
+	// internal/auditsink for what happens when it fills.
+	BufferSize int `toml:"buffer_size"`
+
+	// BatchSize is the largest number of entries in one POST, and the page size
+	// of a catch-up read from the audit log.
+	BatchSize int `toml:"batch_size"`
+
+	// FlushInterval is how long a partial batch waits for company before it is
+	// sent anyway. It bounds how far behind the witness is in normal running.
+	FlushInterval Duration `toml:"flush_interval"`
+
+	// Timeout bounds one POST. It is generous because nothing waits on it: no
+	// request path touches the shipper.
+	Timeout Duration `toml:"timeout"`
+
+	// RetryBackoff is the pause after the first failed attempt, doubling up to
+	// MaxRetryBackoff. Delivery is retried for ever rather than abandoned,
+	// because the entries stay in the audit log and a witness that is behind is
+	// recoverable while one that gave up is not.
+	RetryBackoff    Duration `toml:"retry_backoff"`
+	MaxRetryBackoff Duration `toml:"max_retry_backoff"`
+
+	// WatermarkPath is the file recording how far delivery has got. Empty puts
+	// it in database.data_dir, which is the directory a deployment already
+	// treats as persistent.
+	//
+	// It holds no secret and is not a second copy of the log: losing it costs a
+	// redelivery, which the receiver de-duplicates on the sequence number.
+	WatermarkPath string `toml:"watermark_path"`
+}
+
+// Enabled reports whether an external sink is configured.
+func (s AuditSink) Enabled() bool { return strings.TrimSpace(s.Endpoint) != "" }
 
 // Admin configures the administration surface.
 type Admin struct {
@@ -679,6 +758,17 @@ func Default() Config {
 			RetentionDays: 0,
 			VerifyOnStart: false,
 			MaxQueryLimit: 500,
+			Sink: AuditSink{
+				// No endpoint, so no outbound connection. Everything else here
+				// is the shape delivery takes once an operator names one.
+				TokenEnv:        EnvPrefix + "AUDIT_SINK_TOKEN",
+				BufferSize:      1024,
+				BatchSize:       128,
+				FlushInterval:   Duration{5 * time.Second},
+				Timeout:         Duration{10 * time.Second},
+				RetryBackoff:    Duration{time.Second},
+				MaxRetryBackoff: Duration{5 * time.Minute},
+			},
 		},
 		Admin: Admin{
 			UIEnabled:           true,
@@ -1135,6 +1225,7 @@ func (c *Config) Validate() error {
 	if c.Audit.RetentionDays < 0 {
 		add("config: audit.retention_days cannot be negative")
 	}
+	errs = append(errs, validateAuditSink(c.Audit.Sink)...)
 
 	// Admin.
 	if c.Admin.UIEnabled {
@@ -1201,6 +1292,95 @@ func (c *Config) Validate() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// validateAuditSink checks the external sink section.
+//
+// Everything below is checked only when an endpoint is set, because with none
+// the sink is off and refusing a deployment for the shape of a section it never
+// reads would be refusing it for nothing. The declaration and the credential
+// are the two exceptions in spirit: they are required to turn the sink on, so
+// they are checked exactly when it is on.
+func validateAuditSink(s AuditSink) []error {
+	if !s.Enabled() {
+		return nil
+	}
+
+	var errs []error
+	add := func(format string, args ...any) {
+		errs = append(errs, fmt.Errorf(format, args...))
+	}
+
+	u, err := url.Parse(strings.TrimSpace(s.Endpoint))
+	switch {
+	case err != nil:
+		add("config: audit.sink.endpoint %q is not a URL: %v", s.Endpoint, err)
+	case u.Scheme != "https" && u.Scheme != "http":
+		add("config: audit.sink.endpoint %q must use scheme https, or http towards "+
+			"loopback only", s.Endpoint)
+	case u.Host == "":
+		add("config: audit.sink.endpoint %q has no host", s.Endpoint)
+	case u.Scheme == "http" && !isLoopbackHost(u.Hostname()):
+		add("config: audit.sink.endpoint %q uses plain http towards a host that is "+
+			"not loopback; it would send the bearer credential and the shape of "+
+			"this deployment's audit history in clear", s.Endpoint)
+	}
+
+	if !s.ReceiverOutsideOperatorControl {
+		add("config: audit.sink.receiver_outside_operator_control must be set to true " +
+			"before an endpoint is accepted. The sink exists to hold a copy of the " +
+			"audit chain where this deployment's operator cannot rewrite it, so a " +
+			"destination they administer, such as a file on this host or a bucket " +
+			"under the same credentials, buys nothing at all. Setting it also " +
+			"accepts that a delivered entry is beyond this service's reach for " +
+			"ever, an erasure request included")
+	}
+	if strings.TrimSpace(s.TokenEnv) == "" {
+		add("config: audit.sink.token_env is required when an endpoint is set; " +
+			"the receiver has to be able to tell this deployment from anybody " +
+			"else who finds the URL")
+	}
+
+	if s.BufferSize < 1 {
+		add("config: audit.sink.buffer_size must be at least 1, got %d", s.BufferSize)
+	}
+	if s.BatchSize < 1 {
+		add("config: audit.sink.batch_size must be at least 1, got %d", s.BatchSize)
+	}
+	if s.BatchSize > s.BufferSize {
+		add("config: audit.sink.batch_size (%d) cannot exceed buffer_size (%d); a "+
+			"batch the buffer cannot hold would be assembled from the audit log on "+
+			"every flush and the buffer would never be anything but full",
+			s.BatchSize, s.BufferSize)
+	}
+	if s.FlushInterval.Duration <= 0 {
+		add("config: audit.sink.flush_interval must be positive; it is what bounds " +
+			"how far behind the witness runs when traffic is light")
+	}
+	if s.Timeout.Duration <= 0 {
+		add("config: audit.sink.timeout must be positive")
+	}
+	if s.RetryBackoff.Duration <= 0 {
+		add("config: audit.sink.retry_backoff must be positive; a zero pause would " +
+			"turn an unreachable receiver into a busy loop")
+	}
+	if s.MaxRetryBackoff.Duration < s.RetryBackoff.Duration {
+		add("config: audit.sink.max_retry_backoff (%s) must not be below retry_backoff (%s)",
+			s.MaxRetryBackoff.Duration, s.RetryBackoff.Duration)
+	}
+	return errs
+}
+
+// AuditSinkWatermarkPath is where the shipper records how far delivery has got.
+//
+// It defaults into the data directory rather than beside the configuration,
+// because it is state that must survive a restart on the same volume, and
+// unlike the keyring it is not a secret: it holds one sequence number.
+func (c *Config) AuditSinkWatermarkPath() string {
+	if p := strings.TrimSpace(c.Audit.Sink.WatermarkPath); p != "" {
+		return p
+	}
+	return filepath.Join(c.Database.DataDir, "audit-sink.watermark")
 }
 
 // checkKEKOutsideDataDir mirrors the check the KEK provider performs at load
@@ -1290,6 +1470,17 @@ func isLoopbackAddr(addr string) bool {
 		// An empty host means every interface.
 		return false
 	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// isLoopbackHost reports whether a bare host, with no port, names this machine.
+//
+// It is separate from isLoopbackAddr, which takes a host:port listener address.
+func isLoopbackHost(host string) bool {
 	if host == "localhost" {
 		return true
 	}

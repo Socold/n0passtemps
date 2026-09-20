@@ -1,9 +1,9 @@
 // Package alerts turns detected conditions into rows an operator can act on.
 //
-// There are exactly twelve conditions. The list is deliberately short: an alert
-// stream nobody reads is worse than no alert stream, because it creates the
-// belief that someone would notice. Each condition here is either evidence of
-// an attack in progress, evidence that a control has failed, or a state that
+// There are exactly thirteen conditions. The list is deliberately short: an
+// alert stream nobody reads is worse than no alert stream, because it creates
+// the belief that someone would notice. Each condition here is either evidence
+// of an attack in progress, evidence that a control has failed, or a state that
 // will lock a user out if it is left alone.
 //
 // Repetition is collapsed by fingerprint rather than by rate limiting the
@@ -34,7 +34,7 @@ import (
 	"github.com/Socold/n0passtemps/internal/store"
 )
 
-// Type identifies one of the twelve conditions.
+// Type identifies one of the thirteen conditions.
 //
 // The values are dotted and match the audit event families, so an alert and the
 // audit entries that explain it can be correlated by prefix.
@@ -98,6 +98,16 @@ const (
 	// as high risk. The service never refuses on risk alone, so the subject
 	// is already in; this row is how an operator finds out.
 	TypeRiskHigh Type = "risk.high"
+
+	// TypeAuditSinkFailing reports that delivery to the external audit sink is
+	// not getting through.
+	//
+	// Nothing an end user does is affected: the entries are in the local log and
+	// the chain still verifies. What has stopped is the copy held where this
+	// deployment's operator cannot rewrite it, so from the moment this row
+	// appears the log is back to being tamper-evident only to somebody who
+	// already kept a head of their own.
+	TypeAuditSinkFailing Type = "audit.sink_failing"
 )
 
 // spec is the fixed description of a condition.
@@ -185,9 +195,21 @@ var specs = map[Type]spec{
 		severity: store.SeverityWarning,
 		summary:  "An authentication completed and was assessed as high risk",
 	},
+	TypeAuditSinkFailing: {
+		// A warning, not critical. Critical is reserved for the chain itself
+		// failing verification, which means the evidence is already unreliable;
+		// here the evidence is intact and what has lapsed is the witness that
+		// would prove it stayed that way. Info would be wrong in the other
+		// direction: an operator who configured a sink did so because
+		// detection by the party holding the database is not good enough for
+		// them, and silent reversion to exactly that is the condition they
+		// asked to be told about.
+		severity: store.SeverityWarning,
+		summary:  "Audit entries are not reaching the external sink",
+	},
 }
 
-// AllTypes lists the twelve conditions in the order they are declared, for the
+// AllTypes lists the thirteen conditions in the order they are declared, for the
 // administrative interface and for the completeness tests.
 var AllTypes = []Type{
 	TypeAuthFailureSubject,
@@ -202,6 +224,7 @@ var AllTypes = []Type{
 	TypeKEKRotationOverdue,
 	TypeTicketFactorOverride,
 	TypeRiskHigh,
+	TypeAuditSinkFailing,
 }
 
 // Severity returns the severity of the condition.
@@ -213,7 +236,7 @@ func (t Type) Severity() store.Severity { return specs[t].severity }
 // Summary returns the default summary line for the condition.
 func (t Type) Summary() string { return specs[t].summary }
 
-// Valid reports whether t is one of the twelve declared conditions.
+// Valid reports whether t is one of the thirteen declared conditions.
 func (t Type) Valid() bool {
 	_, ok := specs[t]
 	return ok
@@ -554,6 +577,31 @@ func (e *Engine) TicketFactorOverride(ctx context.Context, tenantID, subjectID, 
 			"issued_by":          issuedBy,
 			"ticket_id":          ticketID,
 		},
+	})
+}
+
+// AuditSinkFailing reports that delivery to the external audit sink is not
+// getting through.
+//
+// pending is how many entries the receiver is behind by, which is the number an
+// operator needs in order to tell a blip from an outage that has been running
+// since the weekend. reason is the shipper's own account of the last failure,
+// already reduced to a short phrase: the endpoint appears in the row because
+// the question is always which receiver, and no credential ever does, because
+// an alert row is read by people and a secret in it is a secret in a
+// screenshot.
+//
+// The fingerprint covers the type and the endpoint, so a receiver that has been
+// down for an hour is one row with a rising occurrence count rather than one
+// row per retry.
+func (e *Engine) AuditSinkFailing(ctx context.Context, tenantID, endpoint string, pending int64, reason string) (*store.Alert, error) {
+	return e.Raise(ctx, Input{
+		TenantID:   tenantID,
+		Type:       TypeAuditSinkFailing,
+		ResourceID: endpoint,
+		Summary: fmt.Sprintf("%d audit entries are not reaching %s: %s",
+			pending, endpoint, reason),
+		Detail: map[string]any{"pending": pending, "endpoint": endpoint, "reason": reason},
 	})
 }
 

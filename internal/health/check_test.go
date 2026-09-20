@@ -516,3 +516,72 @@ func TestUptime(t *testing.T) {
 		t.Errorf("uptime_seconds = %d, want 90", got)
 	}
 }
+
+// TestAuditSinkIsAbsentWithNoSinkConfigured mirrors the TLS block's reasoning:
+// with nothing configured there is nothing to be healthy about, and a green
+// field would suggest a witness that does not exist.
+func TestAuditSinkIsAbsentWithNoSinkConfigured(t *testing.T) {
+	c := New(baseConfig(), healthyStore(), healthyKeyring(), testNow, fixedClock)
+
+	r := c.Report(context.Background())
+	if r.AuditSink != nil {
+		t.Fatalf("a report with no sink configured carries %+v", r.AuditSink)
+	}
+	if r.Status != StatusOK {
+		t.Errorf("status = %q, want ok", r.Status)
+	}
+}
+
+func TestAuditSinkReportsHowFarBehindDeliveryIs(t *testing.T) {
+	st := healthyStore()
+	st.headSeq = 42
+	c := New(baseConfig(), st, healthyKeyring(), testNow, fixedClock)
+	c.SetAuditSinkProbe("https://witness.example.org/audit", func() (int64, int64, string) {
+		return 40, 0, ""
+	})
+
+	r := c.Report(context.Background())
+	if r.AuditSink == nil {
+		t.Fatal("the report carries no audit sink block although a probe is wired in")
+	}
+	if r.AuditSink.PendingEntries != 2 {
+		t.Errorf("pending_entries = %d, want 2", r.AuditSink.PendingEntries)
+	}
+
+	// Being a couple of entries behind is the normal state of a sink that
+	// flushes on an interval, so it must not degrade the whole report.
+	if r.AuditSink.Status != StatusOK || r.Status != StatusOK {
+		t.Errorf("a sink two entries behind reported %q and %q, want ok",
+			r.AuditSink.Status, r.Status)
+	}
+}
+
+func TestAFailingAuditSinkDegradesTheReport(t *testing.T) {
+	st := healthyStore()
+	st.headSeq = 100
+	c := New(baseConfig(), st, healthyKeyring(), testNow, fixedClock)
+	c.SetAuditSinkProbe("https://witness.example.org/audit", func() (int64, int64, string) {
+		return 10, 7, "auditsink: the receiver did not accept the batch: 503 Service Unavailable"
+	})
+
+	// Degraded rather than error: the service still authenticates users, and
+	// the audit log is still intact. What has lapsed is the copy held where the
+	// operator cannot rewrite it, which is a thing to be told about and not a
+	// reason to take the service out of rotation.
+	r := c.Report(context.Background())
+	if r.Status != StatusDegraded {
+		t.Errorf("overall status = %q, want degraded", r.Status)
+	}
+	if r.AuditSink.Status != StatusDegraded {
+		t.Errorf("audit sink status = %q, want degraded", r.AuditSink.Status)
+	}
+	if r.AuditSink.DroppedOffers != 7 {
+		t.Errorf("dropped_offers = %d, want 7", r.AuditSink.DroppedOffers)
+	}
+	if !strings.Contains(r.AuditSink.Detail, "503") {
+		t.Errorf("detail does not carry the reason: %q", r.AuditSink.Detail)
+	}
+	if r.AuditSink.Endpoint != "https://witness.example.org/audit" {
+		t.Errorf("endpoint = %q", r.AuditSink.Endpoint)
+	}
+}

@@ -1,0 +1,210 @@
+package auditsink
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"testing"
+
+	"github.com/Socold/n0passtemps/internal/audit"
+)
+
+func TestTheProjectionCarriesNoPersonalField(t *testing.T) {
+	lg := &fakeLog{}
+	entry := lg.append(t, audit.EventRecoveryConsumed)
+
+	body, err := json.Marshal(Project(entry))
+	if err != nil {
+		t.Fatalf("marshal record: %v", err)
+	}
+
+	// The sink must not widen what a deployment exposes. The three personal
+	// fields of an entry are committed to the chain through a salted digest, so
+	// the digest is what travels and the fields themselves never leave.
+	for _, key := range []string{"subject_id", "source_ip", "detail", "pii_salt"} {
+		if bytes.Contains(body, []byte(`"`+key+`"`)) {
+			t.Errorf("the delivered record carries a %q field", key)
+		}
+	}
+	for _, value := range []string{entry.SubjectID, entry.SourceIP, "lost device"} {
+		if value != "" && bytes.Contains(body, []byte(value)) {
+			t.Errorf("the delivered record carries the value %q", value)
+		}
+	}
+
+	// And the salt is the sharper case: a source address has about thirty-two
+	// bits of entropy, so a receiver holding both the salt and the digest could
+	// recover the address by exhaustive search.
+	if bytes.Contains(body, []byte(base64Of(entry.PIISalt))) {
+		t.Error("the delivered record carries the per-entry salt")
+	}
+	if !bytes.Contains(body, []byte(base64Of(entry.PIIDigest))) {
+		t.Error("the delivered record does not carry the digest, so it cannot be verified")
+	}
+}
+
+func TestADeliveredRecordVerifiesOnItsOwn(t *testing.T) {
+	lg := &fakeLog{}
+	entries := lg.appendMany(t, 4)
+
+	// A round trip through JSON, because that is what a receiver actually
+	// holds: anything that did not survive the encoding is not available to it.
+	var records []Record
+	for _, e := range entries {
+		records = append(records, roundTrip(t, Project(e)))
+	}
+
+	if broken := CheckSequence(records, audit.Genesis()); broken != 0 {
+		t.Fatalf("an untouched run reports a break at %d", broken)
+	}
+}
+
+func TestCheckSequenceDetectsAGap(t *testing.T) {
+	lg := &fakeLog{}
+	entries := lg.appendMany(t, 4)
+
+	var records []Record
+	for _, e := range entries {
+		records = append(records, roundTrip(t, Project(e)))
+	}
+
+	t.Run("a missing entry surfaces at the entry after it", func(t *testing.T) {
+		// The case from the specification: a receiver holding 1, 2 and 4 must
+		// be able to tell. It surfaces twice over, in the numbering and in the
+		// chain link, which is why no receiver has to be clever.
+		withGap := []Record{records[0], records[1], records[3]}
+		if got := CheckSequence(withGap, audit.Genesis()); got != records[3].Seq {
+			t.Errorf("a gap before seq %d was reported at %d", records[3].Seq, got)
+		}
+	})
+
+	t.Run("a substitution that keeps the numbering surfaces too", func(t *testing.T) {
+		tampered := append([]Record(nil), records...)
+		tampered[2].EventType = audit.EventAssertionRejected
+		if got := CheckSequence(tampered, audit.Genesis()); got != tampered[2].Seq {
+			t.Errorf("an edited record at seq %d was reported at %d", tampered[2].Seq, got)
+		}
+	})
+
+	t.Run("an edited hash surfaces at the same entry", func(t *testing.T) {
+		tampered := append([]Record(nil), records...)
+		hash := bytes.Clone(tampered[1].EntryHash)
+		hash[0] ^= 0xff
+		tampered[1].EntryHash = hash
+		if got := CheckSequence(tampered, audit.Genesis()); got != tampered[1].Seq {
+			t.Errorf("an edited hash at seq %d was reported at %d", tampered[1].Seq, got)
+		}
+	})
+
+	t.Run("a run that does not chain onto the expected head is refused", func(t *testing.T) {
+		// This is what a witness does with a rewritten chain: the operator can
+		// recompute every hash consistently, but not so that it reproduces the
+		// head the witness already holds.
+		wrong := bytes.Clone(audit.Genesis())
+		wrong[0] ^= 0xff
+		if got := CheckSequence(records, wrong); got != records[0].Seq {
+			t.Errorf("a run chaining onto the wrong head was reported at %d, want %d", got, records[0].Seq)
+		}
+	})
+}
+
+func TestBatchVerify(t *testing.T) {
+	lg := &fakeLog{}
+	entries := lg.appendMany(t, 3)
+
+	var records []Record
+	for _, e := range entries {
+		records = append(records, Project(e))
+	}
+	full := Batch{
+		Format:  Format,
+		Source:  testTenant,
+		FromSeq: records[0].Seq,
+		ToSeq:   records[len(records)-1].Seq,
+		Count:   len(records),
+		Entries: records,
+	}
+
+	if err := full.Verify(); err != nil {
+		t.Fatalf("a complete batch was refused: %v", err)
+	}
+
+	t.Run("a truncated body is refused", func(t *testing.T) {
+		// The declared range is the only way a receiver can notice a body that
+		// arrived incomplete. Without the check it would store the short batch
+		// and then report the gap as the sender's fault.
+		short := full
+		short.Entries = records[:2]
+		if err := short.Verify(); !errors.Is(err, ErrMalformedBatch) {
+			t.Errorf("a truncated batch gave %v, want ErrMalformedBatch", err)
+		}
+	})
+
+	t.Run("an unknown format is refused", func(t *testing.T) {
+		other := full
+		other.Format = "something.else.v9"
+		if err := other.Verify(); !errors.Is(err, ErrMalformedBatch) {
+			t.Errorf("an unknown format gave %v, want ErrMalformedBatch", err)
+		}
+	})
+
+	t.Run("an empty batch is refused", func(t *testing.T) {
+		empty := Batch{Format: Format, Count: 0}
+		if err := empty.Verify(); !errors.Is(err, ErrMalformedBatch) {
+			t.Errorf("an empty batch gave %v, want ErrMalformedBatch", err)
+		}
+	})
+}
+
+func TestProjectDoesNotAliasTheEntry(t *testing.T) {
+	lg := &fakeLog{}
+	entry := lg.append(t, audit.EventAssertionCompleted)
+	record := Project(entry)
+
+	// The recorder hands the shipper the pointer the store returned, and the
+	// shipper hands it to a goroutine. A record sharing the backing arrays
+	// would change under the goroutine's feet.
+	entry.EntryHash[0] ^= 0xff
+	if record.EntryHash[0] == entry.EntryHash[0] {
+		t.Error("the record aliases the entry's hash")
+	}
+}
+
+func roundTrip(t *testing.T, r Record) Record {
+	t.Helper()
+	body, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal record: %v", err)
+	}
+	var out Record
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("unmarshal record: %v", err)
+	}
+	return out
+}
+
+func recordsEqual(a, b Record) bool {
+	return a.Seq == b.Seq &&
+		a.TenantID == b.TenantID &&
+		a.OccurredAt.Equal(b.OccurredAt) &&
+		a.EventType == b.EventType &&
+		a.ActorType == b.ActorType &&
+		a.ActorID == b.ActorID &&
+		a.ResourceType == b.ResourceType &&
+		a.ResourceID == b.ResourceID &&
+		a.Outcome == b.Outcome &&
+		a.RequestID == b.RequestID &&
+		bytes.Equal(a.PIIDigest, b.PIIDigest) &&
+		bytes.Equal(a.PrevHash, b.PrevHash) &&
+		bytes.Equal(a.EntryHash, b.EntryHash)
+}
+
+// base64Of renders bytes the way encoding/json does, so a test can look for a
+// value in a marshalled record.
+func base64Of(b []byte) string {
+	out, err := json.Marshal(b)
+	if err != nil {
+		return ""
+	}
+	return string(bytes.Trim(out, `"`))
+}

@@ -65,6 +65,9 @@ func TestExampleEnvFileNamesRealVariables(t *testing.T) {
 		//                   names through subject.pepper_env
 		//   KEK             read by internal/crypto/kek, likewise named
 		//                   through kek.env_var
+		//   AUDIT_SINK_TOKEN
+		//                   read by internal/auditsink, likewise named through
+		//                   audit.sink.token_env
 		//   VERSION         consumed by the compose files to pin the image
 		//   PUBLISH         consumed by the compose files for the host port
 		//
@@ -74,6 +77,7 @@ func TestExampleEnvFileNamesRealVariables(t *testing.T) {
 		switch name {
 		case EnvPrefix + "SUBJECT_PEPPER",
 			EnvPrefix + "KEK",
+			EnvPrefix + "AUDIT_SINK_TOKEN",
 			EnvPrefix + "VERSION",
 			EnvPrefix + "PUBLISH":
 			continue

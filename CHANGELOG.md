@@ -142,6 +142,76 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   [docs/TROUBLESHOOT.md](docs/TROUBLESHOOT.md) has every verdict and what to do
   about it.
 
+- **An external audit sink**, from [docs/ROADMAP.md](docs/ROADMAP.md) section
+  2.4, off unless `audit.sink.endpoint` is set. The hash chain makes tampering
+  detectable by anybody who kept an earlier head; it does not survive the
+  operator of the server, who owns the database file and can therefore edit a
+  row and recompute every hash from the edit onwards, after which
+  `/admin/v1/audit/verify` reports the log as intact. A copy held where that
+  operator cannot rewrite it is the only thing that closes this, because a
+  recomputed chain cannot reproduce hashes somebody else already holds. The
+  destination is a plain HTTP endpoint with a bearer credential: every
+  deployment can stand one up, it adds no dependency, and the one property that
+  matters, that somebody else runs it, is not a property a message broker would
+  have added.
+
+  **Only the hash-covered fields are sent**, which is exactly what a receiver
+  needs in order to recompute the hashes and notice a gap. The subject, the
+  source address and the entry detail are not: the chain commits to a salted
+  digest of those three rather than to the fields themselves, which is what lets
+  an entry be erased without breaking verification, and it is that digest which
+  travels. The per-entry salt stays in the database, because a source address
+  carries about thirty-two bits of entropy and a receiver holding both the salt
+  and the digest would recover it by exhaustive search. `detail` would otherwise
+  have been the leak: nothing models its shape and nothing bounds what a future
+  handler puts in it, so it is bounded by exclusion rather than by a filter
+  somebody has to maintain. The consequence is stated rather than hidden: the
+  witness proves the history was not rewritten and cannot be used to investigate
+  an incident or to rebuild the log.
+
+  **Nothing about delivery can gate an authentication.** The recorder hands the
+  entry over after the append has committed, through a call that does not block,
+  cannot fail and returns nothing; delivery happens on one background goroutine
+  that nothing waits for. An entry the buffer cannot take is dropped, counted,
+  logged once per episode and alerted on, and then delivered anyway: the audit
+  log is the real buffer, so the shipper falls back to reading it from one past
+  the last sequence number the receiver acknowledged. A full buffer therefore
+  costs a database read and some latency, never a hole in the witness, and the
+  same fallback covers an out-of-order offer, a failed POST and a restart.
+
+  **At least once, with the watermark written last.** A file in the data
+  directory records how far delivery has got, written by a temporary file, an
+  fsync and a rename, and only after the receiver has acknowledged the batch. A
+  process that dies in between sends that batch again, which is why a receiver
+  de-duplicates on `seq` and treats a second, differing copy of a sequence
+  number as evidence rather than as a correction. The other order would have
+  been at most once: the marker would move, the entries would never arrive, and
+  nothing anywhere would know.
+
+  **The trust assumption is configuration, not documentation.** An endpoint is
+  refused unless `audit.sink.receiver_outside_operator_control` is set to true,
+  because this code cannot check where the receiver is and a sink the operator
+  administers is worthless rather than merely weaker. Plain HTTP is refused
+  except towards loopback, a `token_env` naming an empty variable stops the
+  start, and so does a watermark directory that cannot be written.
+
+  `ReadAuditRange` joins the store interface, reading entries by sequence number
+  across every tenant for the reason `VerifyChain` already does: an entry
+  recorded against the reserved system tenant sits between two ordinary ones,
+  and a tenant-scoped read would hand a witness a contiguous chain full of
+  holes. No migration: the watermark is a file, not a table, so a restored
+  backup cannot put it back out of step with the receiver.
+
+  What an operator reads: a new `audit_sink` block in the detailed health
+  report, carrying the endpoint, how far delivery has got, how far behind it is
+  and how many hand-offs the buffer refused, `degraded` while the last attempt
+  is failing; and one new alert type, `audit.sink_failing`, at warning. See
+  [ADR 0016](docs/adr/0016-ship-the-audit-chain-to-an-external-witness.md), the
+  `audit.sink` section of [docs/CONFIGURATION.md](docs/CONFIGURATION.md),
+  attacker 9 in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) for what it closes
+  and what it does not, and [docs/MONITORING.md](docs/MONITORING.md) for how
+  delivery failing becomes something somebody sees.
+
 ## [1.1.0] - 2026-09-19
 
 ### Added

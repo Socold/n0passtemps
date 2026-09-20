@@ -52,16 +52,17 @@ type Liveness struct {
 
 // Report is the authenticated report.
 type Report struct {
-	Status        Status          `json:"status"`
-	Version       version.Info    `json:"version"`
-	UptimeSeconds int64           `json:"uptime_seconds"`
-	Database      DatabaseHealth  `json:"database"`
-	KEK           KEKHealth       `json:"kek"`
-	TLS           *TLSHealth      `json:"tls,omitempty"`
-	Audit         AuditHealth     `json:"audit"`
-	Alerts        map[string]int  `json:"open_alerts"`
-	Features      map[string]bool `json:"features"`
-	Timestamp     time.Time       `json:"timestamp"`
+	Status        Status           `json:"status"`
+	Version       version.Info     `json:"version"`
+	UptimeSeconds int64            `json:"uptime_seconds"`
+	Database      DatabaseHealth   `json:"database"`
+	KEK           KEKHealth        `json:"kek"`
+	TLS           *TLSHealth       `json:"tls,omitempty"`
+	Audit         AuditHealth      `json:"audit"`
+	AuditSink     *AuditSinkHealth `json:"audit_sink,omitempty"`
+	Alerts        map[string]int   `json:"open_alerts"`
+	Features      map[string]bool  `json:"features"`
+	Timestamp     time.Time        `json:"timestamp"`
 
 	// LastError carries the most recent component failure, for the operator
 	// who has only this response to work from. It is a component name and a
@@ -109,6 +110,44 @@ type AuditHealth struct {
 	Detail  string `json:"detail,omitempty"`
 }
 
+// AuditSinkHealth describes delivery of the audit chain to the external
+// witness, and is absent when no sink is configured.
+//
+// Absent rather than reported as ok, for the reason TLSHealth is absent behind a
+// reverse proxy: with nothing configured there is nothing to be healthy about,
+// and a green field would suggest a witness that does not exist.
+type AuditSinkHealth struct {
+	Status Status `json:"status"`
+
+	// Endpoint is where entries are being sent. This report is authenticated,
+	// and the question behind reading this block is always which receiver. The
+	// bearer credential never appears.
+	Endpoint string `json:"endpoint"`
+
+	// DeliveredThroughSeq is the highest sequence number the receiver has
+	// acknowledged. Compared against audit.head_seq it is how far behind the
+	// witness is.
+	DeliveredThroughSeq int64 `json:"delivered_through_seq"`
+
+	// PendingEntries is that comparison, done here so a probe does not have to.
+	PendingEntries int64 `json:"pending_entries"`
+
+	// DroppedOffers counts the hand-offs the delivery buffer could not take
+	// since this process started. It is not a count of lost entries: a dropped
+	// offer is recovered from the audit log. A number that keeps climbing means
+	// the buffer is too small for the deployment's write rate, or the receiver
+	// is too slow for it.
+	DroppedOffers int64 `json:"dropped_offers"`
+
+	Detail string `json:"detail,omitempty"`
+}
+
+// AuditSinkProbe reports the state of external audit delivery.
+//
+// It is a function rather than an interface so that internal/health keeps
+// depending on nothing but the configuration, the store and the version.
+type AuditSinkProbe func() (deliveredThroughSeq, droppedOffers int64, lastError string)
+
 // KeyringInspector is the part of the keyring the health check needs.
 //
 // It is an interface so that the check does not depend on which provider is
@@ -126,9 +165,24 @@ type Checker struct {
 	start   time.Time
 	now     func() time.Time
 
-	mu           sync.RWMutex
-	lastError    string
-	kekRotatedAt time.Time
+	mu            sync.RWMutex
+	lastError     string
+	kekRotatedAt  time.Time
+	auditSink     AuditSinkProbe
+	auditSinkDest string
+}
+
+// SetAuditSinkProbe wires in the external audit sink, so that delivery falling
+// behind shows up in the detailed report as well as in the alert stream.
+//
+// It is a setter rather than a constructor argument because the check works
+// without one and a deployment with no sink configured never calls it, which is
+// the arrangement janitor.SetKEKProbe uses.
+func (c *Checker) SetAuditSinkProbe(endpoint string, fn AuditSinkProbe) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.auditSink = fn
+	c.auditSinkDest = endpoint
 }
 
 // New builds a Checker.
@@ -201,6 +255,7 @@ func (c *Checker) Report(ctx context.Context) Report {
 	r.KEK = c.checkKEK(now)
 	r.TLS = c.checkTLS(now)
 	r.Audit = c.checkAudit(ctx)
+	r.AuditSink = c.checkAuditSink(r.Audit.HeadSeq)
 	r.Alerts = c.checkAlerts(ctx)
 
 	c.mu.RLock()
@@ -212,8 +267,48 @@ func (c *Checker) Report(ctx context.Context) Report {
 		r.KEK.Status,
 		r.Audit.Status,
 		tlsStatus(r.TLS),
+		auditSinkStatus(r.AuditSink),
 	)
 	return r
+}
+
+// checkAuditSink reports external delivery, when a sink is configured.
+//
+// headSeq comes from the audit check that has just run, rather than from a
+// second read of the chain head, so the two numbers in the report are from the
+// same instant and cannot disagree.
+//
+// Being behind is not by itself degraded: entries are always in flight, and a
+// deployment that flushes every five seconds is expected to show a handful of
+// pending ones. What makes it degraded is the shipper reporting that its last
+// attempt failed, because that is the state where the witness stops keeping up
+// and the audit log quietly goes back to being tamper-evident only to whoever
+// kept a head of their own.
+func (c *Checker) checkAuditSink(headSeq int64) *AuditSinkHealth {
+	c.mu.RLock()
+	probe := c.auditSink
+	endpoint := c.auditSinkDest
+	c.mu.RUnlock()
+
+	if probe == nil {
+		return nil
+	}
+
+	delivered, dropped, lastErr := probe()
+	h := &AuditSinkHealth{
+		Status:              StatusOK,
+		Endpoint:            endpoint,
+		DeliveredThroughSeq: delivered,
+		DroppedOffers:       dropped,
+	}
+	if n := headSeq - delivered; n > 0 {
+		h.PendingEntries = n
+	}
+	if lastErr != "" {
+		h.Status = StatusDegraded
+		h.Detail = lastErr
+	}
+	return h
 }
 
 func (c *Checker) checkDatabase(ctx context.Context) DatabaseHealth {
@@ -404,6 +499,13 @@ func (c *Checker) checkAlerts(ctx context.Context) map[string]int {
 const MinTLSVersion = tls.VersionTLS12
 
 func tlsStatus(h *TLSHealth) Status {
+	if h == nil {
+		return StatusOK
+	}
+	return h.Status
+}
+
+func auditSinkStatus(h *AuditSinkHealth) Status {
 	if h == nil {
 		return StatusOK
 	}

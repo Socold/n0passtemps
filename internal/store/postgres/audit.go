@@ -288,6 +288,42 @@ func (s *Store) QueryAudit(ctx context.Context, tenantID string, f store.AuditFi
 	return out, nil
 }
 
+// ReadAuditRange implements store.AuditStore.
+//
+// The read spans every tenant, for the reason VerifyChain does: an entry
+// recorded against the reserved system tenant sits between two ordinary ones,
+// and filtering it out would present a contiguous chain as one full of holes.
+//
+// The comparison is seq >= fromSeq rather than the seq > cursor that the chain
+// walk uses, because the caller here names the first entry it wants rather than
+// the last one it already has.
+func (s *Store) ReadAuditRange(ctx context.Context, fromSeq int64, limit int) ([]*store.AuditEntry, error) {
+	if fromSeq < 1 {
+		fromSeq = 1
+	}
+
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+auditColumns+` FROM audit_log WHERE seq >= $1 ORDER BY seq ASC LIMIT $2`,
+		fromSeq, clampLimit(limit, 100, 10000))
+	if err != nil {
+		return nil, fmt.Errorf("postgres: read audit range: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*store.AuditEntry
+	for rows.Next() {
+		e, err := scanAuditEntry(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: iterate audit range: %w", err)
+	}
+	return out, nil
+}
+
 // VerifyChain implements store.AuditStore.
 //
 // Entries are walked in pages so that verifying a large log does not hold the

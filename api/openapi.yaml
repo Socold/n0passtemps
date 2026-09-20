@@ -3748,6 +3748,13 @@ components:
             would be a claim about something it does not know.
         audit:
           $ref: "#/components/schemas/AuditHealth"
+        audit_sink:
+          allOf:
+            - $ref: "#/components/schemas/AuditSinkHealth"
+          description: |
+            Absent when `audit.sink.endpoint` is unset, which is the default.
+            With nothing configured there is nothing to be healthy about, and a
+            green field would suggest an external witness that does not exist.
         open_alerts:
           type: object
           description: |
@@ -3840,6 +3847,67 @@ components:
             finished.
         rotation_overdue:
           type: boolean
+        detail:
+          type: string
+    AuditSinkHealth:
+      type: object
+      title: AuditSinkHealth
+      description: |
+        Delivery of the audit chain to the external witness.
+
+        The hash chain makes tampering detectable by anybody who kept an earlier
+        head, but not by the operator of the server, who can recompute every
+        hash after an edit. A copy held where they cannot rewrite it is what
+        closes that, and this block says whether it is keeping up.
+
+        Only the fields the chain hash commits to are delivered: no subject, no
+        source address and no entry detail.
+      required:
+        - status
+        - endpoint
+        - delivered_through_seq
+        - pending_entries
+        - dropped_offers
+      properties:
+        status:
+          allOf:
+            - $ref: "#/components/schemas/HealthStatus"
+          description: |
+            `degraded` when the last delivery attempt failed, with the reason in
+            `detail`. Never `error`: the local log is intact and users still
+            authenticate. It returns to `ok` on the first delivery that gets
+            through, while the `audit.sink_failing` alert row stays open as the
+            durable record of the episode.
+        endpoint:
+          type: string
+          description: |
+            Where entries are being sent. The bearer credential never appears
+            here or anywhere else in a response.
+          examples:
+            - https://witness.example.org/v1/audit
+        delivered_through_seq:
+          type: integer
+          format: int64
+          description: |
+            The highest sequence number the receiver has acknowledged. Delivery
+            is at least once, so a receiver may have been sent a batch twice;
+            this is what it confirmed.
+        pending_entries:
+          type: integer
+          format: int64
+          description: |
+            `audit.head_seq` minus `delivered_through_seq`. A handful is normal,
+            because a partial batch waits up to `audit.sink.flush_interval` for
+            company. A number that only grows is a receiver slower than the
+            deployment writes.
+        dropped_offers:
+          type: integer
+          format: int64
+          description: |
+            Hand-offs the delivery buffer could not take since this process
+            started. Not a count of lost entries: each is recovered from the
+            audit log, which is the real buffer. A number that climbs steadily
+            means `audit.sink.buffer_size` is too small for the write rate.
         detail:
           type: string
     TLSHealth:

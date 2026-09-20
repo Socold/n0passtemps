@@ -438,6 +438,80 @@ max_query_limit = 500
 
 
 # ---------------------------------------------------------------------------
+# External audit sink
+# ---------------------------------------------------------------------------
+# Delivers a copy of the audit chain to a destination outside this deployment.
+# Off in this file, and off by default: with no endpoint the service builds no
+# shipper at all, so it makes no outbound connection of any kind.
+#
+# What it is for. The hash chain makes tampering detectable by anybody who kept
+# an earlier head. It does not survive the operator of this server, who owns the
+# database file and can therefore edit a row and recompute every hash from the
+# edit onwards; /admin/v1/audit/verify then reports the log as intact. A copy
+# held where that operator cannot rewrite it is the only thing that closes this,
+# because a recomputed chain cannot reproduce hashes somebody else already
+# holds.
+#
+# What it sends. Only the fields the chain hash commits to, which is exactly
+# enough for a receiver to recompute the hashes and notice a gap. The subject,
+# the source address and the entry detail are not sent: the chain covers a
+# salted digest of those three, and it is the digest that travels. The salt
+# stays here, because a source address has about thirty-two bits of entropy and
+# a receiver holding both would recover it by exhaustive search. So the witness
+# proves the history was not rewritten and cannot be used to investigate
+# anything, which is deliberate. See docs/adr/0016.
+#
+# What it never does. Delay a login. The recorder hands entries over without
+# blocking, delivery happens on a background goroutine, and an entry the buffer
+# cannot take is dropped, logged, alerted on and then delivered anyway from the
+# audit log. See the audit.sink section of docs/CONFIGURATION.md.
+[audit.sink]
+# Where each batch is POSTed. Empty means off; there is deliberately no separate
+# "enabled" flag, so an empty section cannot be half on. Must be https, except
+# towards loopback.
+# endpoint = "https://witness.example.org/v1/audit"
+
+# The operator declaring what this service cannot check. An endpoint is refused
+# without it.
+#
+# A sink the operator administers is worthless rather than merely weaker: a file
+# on this host, a bucket under the same cloud credentials, or a log collector
+# the same root account manages all fall to exactly the attacker the chain
+# already fails to stop. Setting this also accepts that a delivered entry is
+# beyond this service's reach for ever, an erasure request included.
+# receiver_outside_operator_control = true
+
+# Names the variable holding the bearer credential the receiver issued. The
+# credential itself has no place in this file, like every other secret.
+# token_env = "N0PASSTEMPS_AUDIT_SINK_TOKEN"
+
+# The in-memory hand-off from the recorder, and the entries per POST. Filling
+# the buffer costs a database read and some latency, never an entry: the audit
+# log is the real buffer and delivery resumes from the last sequence number the
+# receiver acknowledged. batch_size cannot exceed buffer_size.
+# buffer_size = 1024
+# batch_size = 128
+
+# How long a partial batch waits for company, which bounds how far behind the
+# witness runs when traffic is light, and how long one POST may take. Nothing
+# on a request path waits for either.
+# flush_interval = "5s"
+# timeout = "10s"
+
+# The pause after a failed attempt, doubling up to the ceiling. Delivery is
+# retried for ever rather than abandoned: the entries stay in the audit log, so
+# a witness that is behind catches up while one the sender gave up on never
+# does.
+# retry_backoff = "1s"
+# max_retry_backoff = "5m"
+
+# Where delivery progress is recorded. Empty puts it at audit-sink.watermark
+# inside database.data_dir. It holds one sequence number and no secret, and
+# losing it costs a redelivery, which the receiver drops on the sequence number.
+# watermark_path = ""
+
+
+# ---------------------------------------------------------------------------
 # Administration
 # ---------------------------------------------------------------------------
 [admin]

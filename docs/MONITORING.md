@@ -46,6 +46,8 @@ the public surface and any API key reaches it.
            "detail": "the current key has been in use for 402 days, the interval is 365" },
   "tls": { "status": "ok", "not_after": "2026-12-01T00:00:00Z", "expires_in_days": 75, "subject": "auth.example.com" },
   "audit": { "status": "ok", "head_seq": 48213 },
+  "audit_sink": { "status": "ok", "endpoint": "https://witness.example.org/v1/audit",
+                  "delivered_through_seq": 48209, "pending_entries": 4, "dropped_offers": 0 },
   "open_alerts": { "info": 3, "warning": 1, "critical": 0 },
   "features": { "lite_mode": false, "admin_rbac": true, "dual_approval": true,
                 "deferred_erasure": true, "kek_rotation_reminder": true,
@@ -70,6 +72,11 @@ Field by field, and what to do with each:
 | `tls` absent or `null` | Not an alert | TLS is terminated by a reverse proxy, whose certificate this service cannot see. Reporting nothing is honest; monitor the proxy's certificate with the proxy's tooling |
 | `audit.head_seq` | Flat during working hours | The chain head not moving means nothing is being audited, which means either no traffic or a broken append path |
 | `audit.status` | `error` | The chain head could not be read |
+| `audit_sink` absent | Not an alert, unless you configured a sink | Absent means `audit.sink.endpoint` is unset and no external witness exists. A green field there would suggest one that does not |
+| `audit_sink.status` | `degraded`, after one scrape interval | The shipper's last attempt failed and `detail` says why. Nothing a user does is affected and the local log is intact; what has lapsed is the copy held where this operator cannot rewrite it |
+| `audit_sink.pending_entries` | A rising floor, not a value | `audit.head_seq` minus `delivered_through_seq`. A handful is normal, because a batch waits up to `audit.sink.flush_interval` for company. A number that only grows is a receiver that is slower than the deployment writes |
+| `audit_sink.dropped_offers` | Climbing steadily | Hand-offs the delivery buffer could not take since this process started. Not lost entries: each is recovered from the audit log. It means `buffer_size` is too small for the write rate, or the receiver is too slow for it |
+| `audit_sink.delivered_through_seq` | Flat while `audit.head_seq` moves | Delivery has stopped even though the service has not. This is the same condition as the alert below, seen from the scrape side |
 | `open_alerts.critical` | Above 0, at once | There is exactly one critical alert type and it is the audit chain |
 | `open_alerts.warning` | Trend it, and page on a jump | A jump is the shape of an attack in progress |
 | `features` | A change you did not make | Confirms which mode the deployment is actually in, which is the fastest way to catch a `lite_mode` that was left on |
@@ -87,6 +94,7 @@ curl -sS --max-time 5 "$BASE/admin/v1/health" \
       and (.kek.rotation_overdue | not)
       and ((.tls // {expires_in_days: 999}).expires_in_days > 14)
       and .open_alerts.critical == 0
+      and ((.audit_sink // {status: "ok"}).status == "ok")
     ' > /dev/null || echo "n0passtemps: health check failed"
 ```
 
@@ -110,6 +118,15 @@ is the closest thing available to the external witness the hash chain needs. A
 copy held somewhere the operator of this host cannot rewrite is what makes a
 later rewrite detectable. See [ADR 0007](adr/0007-chain-the-audit-log.md) and
 [THREAT-MODEL.md](THREAT-MODEL.md).
+
+`audit.sink.endpoint` does that part continuously and without a script to keep
+running, and it sends less: only the fields the chain hash covers, which is
+enough to prove the history was not rewritten and not enough to investigate
+anything. The two are complementary rather than alternatives. Paging through
+this route is how a copy that can actually be read gets off the box, and the
+sink is how a copy that cannot be quietly rewritten does. See
+[the `audit.sink` section of CONFIGURATION.md](CONFIGURATION.md#auditsink) and
+[ADR 0016](adr/0016-ship-the-audit-chain-to-an-external-witness.md).
 
 Event families worth a saved query:
 
@@ -178,6 +195,7 @@ cannot file the same condition at three different levels.
 | 10 | `kek.rotation_overdue` | info | A key encryption key is past `kek.rotation_interval`. Nothing is broken yet, which is why it is informational. Raised by the janitor pass rather than by a request | Plan a rotation: `n0passtemps-wizard kek rotate`, restart, then `POST /admin/v1/kek/rewrap`. It is an explicit operator action and the service will never perform one on its own. Requires `features.kek_rotation_reminder`; see [ADMIN-GUIDE.md](ADMIN-GUIDE.md#rotating-the-keyring) |
 | 11 | `risk.high` | warning | An authentication completed and was assessed as high risk. The service reports risk and never refuses on it, so the subject is already in and this row is how an operator finds out. The detail carries the score and the reasons that fired; so does the summary, because the question on seeing this row is always which signals it was | Read the reasons. `recovery_code_used` with `recent_failures_subject` is the account-takeover shape: check with the account holder out of band before anything else, and consider locking the subject. `signature_counter_stalled` reaches high on its own and is handled as row 3. Warning rather than critical because nothing has failed: the ceremony verified and every control held. Warning rather than info because the assessment is strictly more specific than a failure burst and concerns an authentication that succeeded. Collapses by fingerprint onto one row per subject, so a subject under attack produces a rising `occurrences` count rather than a row per attempt. Only `high` raises it: alerting on `elevated`, which an ordinary recovery-code redemption reaches, would bury the rest of the stream.  See [RISK.md](RISK.md) |
 | 12 | `enrolment_ticket.factor_override` | warning | An enrolment ticket was issued for a subject who already holds an active authenticator or a confirmed TOTP secret, which the caller asked for explicitly with `require_existing_factor: false`. A ticket is a way in for someone with no factor; issued for an account that has factors it is an account-takeover primitive for whoever controls delivery | Check who asked. The detail carries `issued_by`, the credential that issued it, and what the subject held at the time. An operator override after a telephone identity check is the expected case and the `reason` on the `enrolment_ticket.issued` audit entry should say so. A run of them from one API key is not: revoke the key. Warning rather than critical because a control was overridden deliberately by an authorised caller with a legitimate use, a user whose confirmed TOTP secret is on a phone they no longer have; warning rather than info because the override is exactly the step an attacker who controls delivery needs. See [ADMIN-GUIDE.md](ADMIN-GUIDE.md#6-a-user-has-lost-every-authenticator) |
+| 13 | `audit.sink_failing` | warning | Entries are not reaching the external audit sink. Raised by the shipper, at most once a minute while the condition lasts, and only when `audit.sink.endpoint` is configured. The detail carries how far behind the receiver is, the endpoint and the last failure. Nothing a user does is affected and the local chain is intact; what has stopped is the copy held where this deployment's operator cannot rewrite it, so the log is back to being tamper-evident only to somebody who already kept a head of their own | Read `detail.reason`. A connection error or a 5xx is the receiver's outage and delivery resumes on its own, with the backoff reaching one attempt per `audit.sink.max_retry_backoff`. A 401 or 403 means the credential the receiver expects has changed: put the new one in the variable `audit.sink.token_env` names and restart. A 422 means the receiver rejected the batch shape, which after an upgrade means it does not know this `format` yet. Nothing needs replaying by hand: the audit log is the buffer and the shipper resumes from the last sequence number the receiver acknowledged. Warning rather than critical because the evidence is intact and it is the witness that lapsed; warning rather than info because reverting to detection-by-the-operator is precisely the state an operator who configured a sink asked to be told about |
 
 Reading them:
 
@@ -207,6 +225,12 @@ Acknowledge when the condition has been dealt with, not to clear the list.
 
 Alerts have no automatic expiry. They accumulate, and acknowledged rows stay.
 On a long-lived deployment the table grows; there is no prune for it.
+
+One of them clears itself in the health report but not in the alert table.
+`audit.sink_failing` describes an episode: the report goes back to `ok` on the
+first delivery that gets through, while the row stays open with its occurrence
+count, because the question afterwards is how long the witness was behind and
+that is not a question a self-clearing row can answer.
 
 Every alert is also logged, at the level its severity deserves, so a deployment
 that ships logs but does not query the alert table still sees the critical ones:
@@ -276,6 +300,7 @@ A useful starting set of log-based alerts:
 | Any 500 | `status>=500` |
 | Credential last-use not recorded | message `api key last-use timestamp not recorded`, level warn |
 | Janitor failing | message `janitor pass completed with errors`, level error. A pass that removes nothing logs at debug, and a pass that removed something logs at info with the counts `challenges`, `throttles`, `approvals`, `erasures` and `audit_pruned` |
+| Janitor unable to coordinate | message `janitor pass skipped: the sweep lock could not be taken`, level error. Not the same line as a pass another replica is doing, which is the one below: this one means the database did not answer at all, and no replica swept |
 
 ## Database tuning
 
@@ -301,10 +326,33 @@ Three details worth knowing:
   the future, because that would turn the janitor into a way to unlock an
   account by waiting.
 - It runs in-process rather than as a cron job, so a correctly deployed service
-  is a maintained service. The cost is that a deployment running several
-  replicas performs each sweep once per replica. Every sweep is idempotent and
-  expressed as a conditional delete, so the duplication is wasteful rather than
-  harmful.
+  is a maintained service. Every replica therefore runs a janitor, and each
+  pass first takes a deployment-wide sweep lock so that the work happens once
+  per interval rather than once per replica. Every sweep is idempotent and
+  expressed as a conditional delete, so the lock removes duplicated work rather
+  than preventing damage.
+
+### Reading the janitor on a deployment with several replicas
+
+One replica sweeps and the others skip that pass. Four messages, and the pair
+that matters is the first two:
+
+| Message | Level | What it means |
+|---|---|---|
+| `janitor pass skipped: another replica holds the sweep lock` | info the first time, debug every time after | Normal. This replica is idle for the interval because a sibling is sweeping. It is at info once so that a replica which appears to be doing nothing is not silent about why, and at debug afterwards so that an idle replica does not write a line every interval for the life of the deployment |
+| `janitor sweep lock taken after a skipped pass` | info | This replica has taken over the sweeping, usually because the one that held the lock has gone. It is the other half of the pair: the two transitions together tell you which replica is doing the work and since when |
+| `janitor pass skipped: the sweep lock could not be taken` | error | Not a busy sibling. The database did not answer, so no replica swept this interval. Alert on it |
+| `janitor sweep lock not released` | warn | A pass finished but could not give the lock back. Self-correcting: the lock goes when the connection ends or the lease expires, and the deployment loses at most one interval |
+
+So an idle second replica and a broken janitor are different lines at different
+levels. What is worth alerting on is neither of the first two but the absence of
+`janitor pass completed` from the whole deployment for several intervals: with
+the lock in place, exactly one replica logs it per interval, and which one is not
+fixed. Alerting on a per-replica silence would fire on every healthy deployment,
+which is also why a skipped pass raises no alert of its own in the alert store.
+
+Each field: `owner` names the replica as a host and a process identifier, which
+in Kubernetes is the pod name and `1`.
 
 ### Audit log growth
 
@@ -395,7 +443,7 @@ curl -sS "$BASE/admin/v1/audit/verify?from_seq=$((WATERMARK + 1))" \
 | Filesystem | Must support WAL. Some network mounts do not, and the symptom is a startup refusal saying `pragma journal_mode is "delete", expected "wal"` |
 | `VACUUM` | Not run automatically. After a large prune or a purge of many subjects the file does not shrink. Run it during a maintenance window, with the service stopped |
 | Backup | `sqlite3 file.db ".backup '/dest.db'"` is consistent against a live writer. Copying the file alone is not, because of the WAL |
-| Horizontal scale | None. SQLite does not support concurrent writers across processes or pods. One instance, one file |
+| Horizontal scale | None. SQLite does not support concurrent writers across processes or pods. One instance, one file. The janitor's lease row in `janitor_leases` does coordinate two processes that share a file anyway, but it coordinates housekeeping only and is not support for the arrangement |
 
 ### PostgreSQL specifics
 
@@ -403,12 +451,13 @@ curl -sS "$BASE/admin/v1/audit/verify?from_seq=$((WATERMARK + 1))" \
 |---|---|
 | Pool size | `database.max_open_conns`, default 8, becomes `pgxpool.MaxConns`. Multiply by the replica count and keep the total below the server's `max_connections`, or the surplus fails intermittently under load rather than at startup |
 | Connection lifetime | `database.conn_max_lifetime`, default 30m, becomes `MaxConnLifetime`. It matters in front of a connection proxy, which may move the backend under a long-lived connection |
-| The advisory lock | Held only for the audit append. A long-running transaction that blocks it stalls every audited request, so watch `pg_locks` for an advisory lock with waiters |
+| The advisory lock | Taken for the audit append, one insert at a time. A long-running transaction that blocks it stalls every audited request, so watch `pg_locks` for an advisory lock with waiters |
+| The janitor's advisory lock | A second advisory lock, taken at session level for the length of a janitor pass, on a connection held out of the pool. It never has waiters, because a replica that cannot take it skips its pass rather than queueing, and the server drops it when its holder's connection ends. A pass of it in `pg_locks` is therefore normal and unrelated to the audit one |
 | Autovacuum | `audit_log` is append-mostly, so it accumulates little bloat, but the index on `(tenant_id, subject_id, occurred_at)` is updated by every erasure. After a large erasure run, `REINDEX` it |
 | JSONB | `detail` and `payload` are JSONB, which is decomposed: keys come back in the server's order. Compare them as documents, never as strings. The chain is unaffected because the implementation canonicalises through the server before hashing |
 | `TIMESTAMPTZ` | Microsecond resolution. `audit.Prepare` truncates before hashing, which is why an entry written with nanosecond precision still verifies when read back |
 | Backup | `pg_dump -Fc`, which is consistent against a live writer. A dump and restore preserves the chain |
-| Horizontal scale | Two or more replicas share the database and the limits, because the throttle holds no state of its own. The audit append serialises across all of them through the advisory lock |
+| Horizontal scale | Two or more replicas share the database and the limits, because the throttle holds no state of its own. The audit append serialises across all of them through the advisory lock, and the janitor sweeps once per interval across all of them through a second one. See [DEPLOYMENT.md](DEPLOYMENT.md) under "Running more than one replica" |
 | TLS | `sslmode=verify-full` for anything that crosses a network. `sslmode=disable` is accepted towards loopback or a Unix socket, and towards another host only with `database.allow_plaintext`, which is for a private container network on the same host. The validator refuses a DSN with no `sslmode` at all, because libpq's default of `prefer` falls back to plaintext without reporting it |
 
 ## A monitoring baseline

@@ -163,6 +163,21 @@ func applyEnv(cfg *Config) error {
 	boolean("AUDIT_VERIFY_ON_START", &cfg.Audit.VerifyOnStart)
 	num("AUDIT_MAX_QUERY_LIMIT", &cfg.Audit.MaxQueryLimit)
 
+	// The external audit sink. The bearer credential is not here: like the
+	// keyring and the pepper it is named through a variable rather than carried
+	// by one this package reads, so it never ends up in a Config a test or a
+	// diagnostic might print.
+	str("AUDIT_SINK_ENDPOINT", &cfg.Audit.Sink.Endpoint)
+	str("AUDIT_SINK_TOKEN_ENV", &cfg.Audit.Sink.TokenEnv)
+	boolean("AUDIT_SINK_RECEIVER_OUTSIDE_OPERATOR_CONTROL", &cfg.Audit.Sink.ReceiverOutsideOperatorControl)
+	num("AUDIT_SINK_BUFFER_SIZE", &cfg.Audit.Sink.BufferSize)
+	num("AUDIT_SINK_BATCH_SIZE", &cfg.Audit.Sink.BatchSize)
+	dur("AUDIT_SINK_FLUSH_INTERVAL", &cfg.Audit.Sink.FlushInterval)
+	dur("AUDIT_SINK_TIMEOUT", &cfg.Audit.Sink.Timeout)
+	dur("AUDIT_SINK_RETRY_BACKOFF", &cfg.Audit.Sink.RetryBackoff)
+	dur("AUDIT_SINK_MAX_RETRY_BACKOFF", &cfg.Audit.Sink.MaxRetryBackoff)
+	str("AUDIT_SINK_WATERMARK_PATH", &cfg.Audit.Sink.WatermarkPath)
+
 	boolean("ADMIN_UI_ENABLED", &cfg.Admin.UIEnabled)
 	dur("ADMIN_SESSION_TTL", &cfg.Admin.SessionTTL)
 	boolean("ADMIN_SESSION_COOKIE_SECURE", &cfg.Admin.SessionCookieSecure)

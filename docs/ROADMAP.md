@@ -195,9 +195,30 @@ Found while building 1.0.0, in rough order of value.
 [WEBAUTHN.md](WEBAUTHN.md) under "Usernameless sign-in". The caller no longer
 has to name the subject first.
 
+**External audit sink: landed.** Unreleased; see
+[../CHANGELOG.md](../CHANGELOG.md),
+[ADR 0016](adr/0016-ship-the-audit-chain-to-an-external-witness.md), the
+`audit.sink` section of [CONFIGURATION.md](CONFIGURATION.md) and attacker 9 in
+[THREAT-MODEL.md](THREAT-MODEL.md).
+
+It is off unless an endpoint is configured, because running with no outbound
+network access is the point of the product, and what it sends is narrower than
+an audit entry: only the fields the chain hash commits to, which is enough for a
+receiver to recompute the hashes and notice a gap and not enough to tell which
+person an entry concerns. So the witness proves the history was not rewritten
+and cannot be used to investigate an incident. The proposal did not anticipate
+that trade and it is worth stating plainly: closing the gap and shipping a
+readable copy of the log are two different features, and this is the first.
+
+One other thing the proposal got wrong. The delivery machinery was the easy
+half. The hard half was deciding what may leave the deployment at all, and the
+answer only exists because the chain already commits to a salted digest of the
+personal fields rather than to the fields themselves; without that erasure
+compromise from 1.0.0 there would have been no projection that is both
+verifiable and free of personal data.
+
 | Item | Why |
 |---|---|
-| External audit sink | The hash chain makes tampering detectable, not impossible. Shipping entries to an append-only destination outside the operator's control is the only way to do better, and the threat model says so |
 | Administrative sign-in with WebAuthn | The administration interface authenticates with a bearer token pasted into a form. A passwordless product whose own console does not use passkeys is an awkward demonstration |
 | A `verify` subcommand for backups | Operators back up the database, the keyring and the pepper separately. Nothing checks that a given trio still opens |
 | Multi-replica janitor lock | Each replica runs every sweep. Harmless, since the sweeps are idempotent, and wasteful |

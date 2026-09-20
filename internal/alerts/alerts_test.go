@@ -121,7 +121,7 @@ func newEngine(t *testing.T) (*Engine, *fakeStore, *clock, *logBuffer) {
 const tenant = "tenant-1"
 
 func TestEveryDeclaredTypeIsCounted(t *testing.T) {
-	const want = 12
+	const want = 13
 	if len(AllTypes) != want {
 		t.Fatalf("AllTypes has %d entries, want %d", len(AllTypes), want)
 	}
@@ -462,6 +462,10 @@ func TestConvenienceMethodsCoverEveryType(t *testing.T) {
 		}},
 		{TypeTicketFactorOverride, func(e *Engine) (*store.Alert, error) {
 			return e.TicketFactorOverride(ctx, tenant, "subject-1", "ticket-1", "key-1", 2, true)
+		}},
+		{TypeAuditSinkFailing, func(e *Engine) (*store.Alert, error) {
+			return e.AuditSinkFailing(ctx, tenant, "https://witness.example.org/audit", 240,
+				"the receiver refused the batch with 503")
 		}},
 	}
 

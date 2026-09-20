@@ -274,3 +274,62 @@ func TestQueryAuditFamilyPrefix(t *testing.T) {
 		t.Fatalf("a percent sign in the filter matched %d entries, want 0", len(got))
 	}
 }
+
+// TestReadAuditRangeSpansEveryTenant is the property the external audit sink
+// rests on.
+//
+// An entry recorded against the reserved system tenant, which is what a failed
+// authentication produces, sits between two ordinary ones in the chain. A read
+// that filtered by tenant would hand a witness a contiguous chain with holes in
+// it, and the witness would report tampering that never happened.
+func TestReadAuditRangeSpansEveryTenant(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	appendN(t, s, "tenant-a", 2)
+	appendN(t, s, store.SystemTenantID, 1)
+	appendN(t, s, "tenant-a", 2)
+
+	got, err := s.ReadAuditRange(ctx, 1, 100)
+	if err != nil {
+		t.Fatalf("ReadAuditRange: %v", err)
+	}
+	if len(got) != 5 {
+		t.Fatalf("read %d entries, want all 5 regardless of tenant", len(got))
+	}
+	for i, e := range got {
+		if e.Seq != int64(i+1) {
+			t.Fatalf("entry %d has seq %d, want %d: the range must be contiguous", i, e.Seq, i+1)
+		}
+	}
+	if broken := audit.VerifySequence(got, audit.Genesis()); broken != 0 {
+		t.Errorf("the range does not verify as a chain, broken at %d", broken)
+	}
+}
+
+// TestReadAuditRangeStartsAtTheSequenceAsked covers the difference from the
+// chain walk: a caller here names the first entry it wants, not the last one it
+// already has.
+func TestReadAuditRangeStartsAtTheSequenceAsked(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	appendN(t, s, "tenant-a", 6)
+
+	got, err := s.ReadAuditRange(ctx, 4, 2)
+	if err != nil {
+		t.Fatalf("ReadAuditRange: %v", err)
+	}
+	if len(got) != 2 || got[0].Seq != 4 || got[1].Seq != 5 {
+		t.Fatalf("read %d entries starting at %d, want seq 4 and 5", len(got), got[0].Seq)
+	}
+
+	// Past the end of the log is an empty page and not an error: that is how
+	// the shipper learns it is level with the log.
+	got, err = s.ReadAuditRange(ctx, 99, 10)
+	if err != nil {
+		t.Fatalf("ReadAuditRange past the end: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("read %d entries past the end of the log, want none", len(got))
+	}
+}

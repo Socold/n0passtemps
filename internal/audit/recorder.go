@@ -10,6 +10,21 @@ import (
 	"github.com/Socold/n0passtemps/internal/store"
 )
 
+// Sink takes a copy of an entry that has just been recorded, for delivery
+// somewhere outside this deployment.
+//
+// The interface is declared here rather than in the implementing package so
+// that the recorder does not depend on it, which keeps the dependency pointing
+// one way: an audit entry is written whether or not anything is shipping it.
+//
+// Offer must not block, must not fail and must not panic. A destination that is
+// slow, unreachable or misconfigured has to cost an authentication nothing,
+// which means the decision about what to do with an entry the implementation
+// cannot take right now belongs to the implementation. See internal/auditsink.
+type Sink interface {
+	Offer(entry *store.AuditEntry)
+}
+
 // Recorder appends entries to the audit log.
 //
 // Appends are synchronous. Buffering them would make an authentication
@@ -21,12 +36,25 @@ type Recorder struct {
 	store store.AuditStore
 	log   *slog.Logger
 	now   func() time.Time
+
+	// sink is the external witness, when one is configured. It is offered
+	// entries that have already been committed, so nothing it does can change
+	// whether the entry exists.
+	sink Sink
 }
 
 // NewRecorder returns a Recorder backed by s.
 func NewRecorder(s store.AuditStore, log *slog.Logger) *Recorder {
 	return &Recorder{store: s, log: log, now: time.Now}
 }
+
+// SetSink wires in an external destination for recorded entries.
+//
+// It is a setter rather than a constructor argument because the recorder works
+// without one and a deployment with no sink configured never calls it, which is
+// the same arrangement as janitor.SetKEKProbe. It is called once during startup,
+// before any request is served.
+func (r *Recorder) SetSink(s Sink) { r.sink = s }
 
 // Event describes one thing to record. It is a narrower struct than
 // store.AuditEntry because the chain fields and the sequence number are filled
@@ -77,12 +105,20 @@ func (r *Recorder) Record(ctx context.Context, ev Event) error {
 		entry.Detail = raw
 	}
 
-	if _, err := r.store.Append(ctx, entry); err != nil {
+	stored, err := r.store.Append(ctx, entry)
+	if err != nil {
 		r.log.ErrorContext(ctx, "audit append failed",
 			slog.String("event_type", ev.EventType),
 			slog.String("outcome", string(ev.Outcome)),
 			slog.Any("error", err))
 		return fmt.Errorf("audit: append %s: %w", ev.EventType, err)
+	}
+
+	// Only after the append has committed, and only as a hand-off. The entry is
+	// already durable and already chained, so an offer that is dropped loses a
+	// delivery rather than a record.
+	if r.sink != nil && stored != nil {
+		r.sink.Offer(stored)
 	}
 	return nil
 }

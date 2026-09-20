@@ -51,8 +51,9 @@ var testVars = map[string]string{
 // externallyReadVars are read by a package other than this one, so they never
 // appear in applyEnv.
 var externallyReadVars = map[string]string{
-	"N0PASSTEMPS_SUBJECT_PEPPER": "read by internal/subject, named through subject.pepper_env",
-	"N0PASSTEMPS_KEK":            "read by internal/crypto/kek, named through kek.env_var",
+	"N0PASSTEMPS_SUBJECT_PEPPER":   "read by internal/subject, named through subject.pepper_env",
+	"N0PASSTEMPS_KEK":              "read by internal/crypto/kek, named through kek.env_var",
+	"N0PASSTEMPS_AUDIT_SINK_TOKEN": "read by internal/auditsink, named through audit.sink.token_env",
 }
 
 var deployVarPattern = regexp.MustCompile(`N0PASSTEMPS_[A-Z0-9_]+`)

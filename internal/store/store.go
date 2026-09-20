@@ -401,6 +401,24 @@ type AuditStore interface {
 	// intact.
 	VerifyChain(ctx context.Context, fromSeq int64) (checked int64, brokenAt int64, err error)
 
+	// ReadAuditRange returns up to limit entries with a sequence number of at
+	// least fromSeq, in ascending sequence order.
+	//
+	// It spans every tenant and takes no tenant argument, for the reason
+	// VerifyChain does: the chain is deployment-wide, an entry recorded against
+	// the reserved system tenant sits between two ordinary ones, and a
+	// tenant-scoped read would present a contiguous chain as one full of holes.
+	// QueryAudit is the tenant-scoped read and is what an operator's queries go
+	// through; this one exists for the parts of the service that follow the
+	// chain itself, where a hole that is not really there would be reported as
+	// tampering.
+	//
+	// A short page means the end of the log has been reached. An entry whose
+	// sequence number is above fromSeq while nothing sits at fromSeq itself
+	// means the prefix has been trimmed or removed, which the caller is
+	// expected to notice rather than the implementation to hide.
+	ReadAuditRange(ctx context.Context, fromSeq int64, limit int) ([]*AuditEntry, error)
+
 	// EraseSubjectAuditEntries clears the personal fields from every entry
 	// naming a subject and appends a tombstone recording that it happened.
 	//

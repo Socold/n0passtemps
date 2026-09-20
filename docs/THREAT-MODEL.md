@@ -543,18 +543,45 @@ the signing key and the configuration.
 
 **Stopped by**
 
-Nothing in this software, and the software says so rather than implying
+Nothing in this software by itself, and the software says so rather than implying
 otherwise. `SECURITY.md` puts operator tampering with the audit log explicitly
 out of scope, because it is a documented limitation and not a vulnerability.
 
-**What would actually close the gap**
+**What closes the gap, once it is configured**
 
-An external witness: shipping audit entries, or periodically the chain head, to
-an append-only sink outside the operator's control, and comparing. A third party
-holding an expected head can then detect a rewrite, because the rewritten chain
-will not reproduce it. That is not in this release, and until it is, the honest
-statement is that the chain detects tampering by everyone except the party
-holding the file.
+An external witness. `audit.sink.endpoint` ships the hash-covered part of every
+entry to an HTTP receiver with a bearer credential, and a receiver that has kept
+those hashes can detect a rewrite, because a chain recomputed after an edit
+cannot reproduce hashes somebody else already holds. That is what turns this
+attacker from undetectable into detectable, and it is the only thing that does.
+
+It is off unless an endpoint is configured, and the configuration makes the
+operator declare that the receiver is outside their control, because the feature
+is worthless rather than merely weaker when it is not: a file on this host, a
+bucket under the same credentials or a log collector the same root account
+administers all fall to this same attacker.
+
+Four limits are worth stating plainly.
+
+- **It protects the past, not the present.** Entries delivered before the
+  operator turned hostile are witnessed. From the moment they control the
+  process they can stop the shipper, revoke the credential, point the endpoint
+  elsewhere or simply not write the entries they do not want written. A witness
+  proves what was sent; it cannot make a compromised deployment send anything.
+- **Detection still depends on somebody comparing.** The receiver holds the
+  hashes. Nothing in this service asks it whether they still match, and nothing
+  can: a check this service performed would be a check the operator controls.
+  The comparison is the receiver's job and an operator's procedure.
+- **The copy proves and does not explain.** Only the fields the chain hash
+  commits to are sent, which excludes the subject, the source address and the
+  entry detail. The witness answers whether the history was rewritten. It cannot
+  be used to investigate an incident or to rebuild the log, and a reader of it
+  cannot tell which person an entry concerns. That is deliberate: see
+  [ADR 0016](adr/0016-ship-the-audit-chain-to-an-external-witness.md).
+- **A trimmed prefix looks like tampering.** Entries removed by
+  `audit.retention_days` before they were delivered leave a gap the receiver
+  cannot tell from an edit. The shipper reports that case at error level, and
+  the guidance is to prune only what the receiver has acknowledged.
 
 Within a single database, detection is the strongest property available, and it
 is enough to make undetected selective deletion impractical for anybody who does
@@ -684,6 +711,29 @@ short, closed list of conditions, because an alert stream nobody reads is worse
 than no alert stream: it creates the belief that someone would notice.
 [MONITORING.md](MONITORING.md) says what to alert on and what response each one
 warrants.
+
+### An audit sink adds a party, and a credential
+
+A deployment with `audit.sink.endpoint` set has one more party in its trust
+boundary and one more credential to look after, and both are worth naming.
+
+The receiver holds the hash-covered part of every entry. That is a commitment to
+the personal fields rather than the fields themselves, and the per-entry salt is
+never sent, so a receiver, or whoever compromises one, learns the shape and the
+timing of a deployment's activity and not who it concerned. The sequence
+numbers, the event types and the outcomes are enough to tell that forty
+authentications failed on a Tuesday night, and not enough to tell whose.
+
+Whoever holds the bearer credential can write to the receiver. A witness the
+sender can also poison is weaker than one it cannot, and the answer is the
+receiver's: it stores the first copy of a sequence number it is given and treats
+a second, different copy as evidence rather than as a correction. That is stated
+as a receiver obligation in [CONFIGURATION.md](CONFIGURATION.md#auditsink),
+because this service cannot enforce it from the sending end.
+
+The credential is read from the environment, unset once read, and appears in no
+log line, no alert row and no health response. Losing it costs delivery until the
+receiver issues a new one, and nothing else.
 
 ### Risk signals report, and that is all they buy
 

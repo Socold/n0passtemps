@@ -23,6 +23,7 @@ import (
 	"github.com/Socold/n0passtemps/internal/api"
 	"github.com/Socold/n0passtemps/internal/assertion"
 	"github.com/Socold/n0passtemps/internal/audit"
+	"github.com/Socold/n0passtemps/internal/auditsink"
 	"github.com/Socold/n0passtemps/internal/config"
 	"github.com/Socold/n0passtemps/internal/crypto/envelope"
 	"github.com/Socold/n0passtemps/internal/crypto/kek"
@@ -150,6 +151,19 @@ func run() error {
 	alertEngine := alerts.New(st, log, time.Now)
 	limiter := throttle.New(st, cfg.Throttle, time.Now)
 
+	// The external audit sink, when one is configured. It is built before the
+	// tenant is provisioned so that the very first entry a deployment writes is
+	// offered to the witness like every other one.
+	shipper, err := openAuditSink(cfg, st, alertEngine, log)
+	if err != nil {
+		return err
+	}
+	if shipper != nil {
+		recorder.SetSink(shipper)
+		sink := auditsink.Start(ctx, shipper)
+		defer sink.Stop()
+	}
+
 	rp, err := webauthn.New(cfg.WebAuthn, st, time.Now)
 	if err != nil {
 		return fmt.Errorf("webauthn relying party: %w", err)
@@ -168,6 +182,9 @@ func run() error {
 	// the age of the database rather than on when the key actually changed. It
 	// errs towards reporting rotation as overdue, which is the safe direction.
 	checker := health.New(cfg, st, keyring, keyringAnchor(ctx, cfg, st, log), time.Now)
+	if shipper != nil {
+		checker.SetAuditSinkProbe(shipper.Endpoint(), shipper.Probe)
+	}
 
 	if cfg.Audit.VerifyOnStart {
 		if err := verifyChainOnStart(ctx, cfg, recorder, alertEngine, log); err != nil {
@@ -232,6 +249,35 @@ func openKeyring(cfg *config.Config) (keyring, error) {
 	default:
 		return nil, fmt.Errorf("keyring: provider %q is not supported", cfg.KEK.Provider)
 	}
+}
+
+// openAuditSink builds the external audit shipper, or reports that none is
+// configured.
+//
+// A nil shipper and a nil error is the normal case: the sink is off unless an
+// endpoint is set, and this product's argument is that it runs with no outbound
+// network access at all. Every other failure stops the start, because a
+// deployment that believes its audit log is being witnessed and is not would
+// only find out from an alert nobody had reason to expect.
+func openAuditSink(cfg *config.Config, st store.Store, al *alerts.Engine, log *slog.Logger) (*auditsink.Shipper, error) {
+	shipper, err := auditsink.New(auditsink.Options{
+		Config:        cfg.Audit.Sink,
+		TenantID:      cfg.TenantID(),
+		WatermarkPath: cfg.AuditSinkWatermarkPath(),
+		Backlog:       st,
+		Alerts:        al,
+		Logger:        log,
+		Clock:         time.Now,
+	})
+	switch {
+	case errors.Is(err, auditsink.ErrNotConfigured):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("external audit sink: %w\n"+
+			"set %sAUDIT_SINK_TOKEN, or the variable named by audit.sink.token_env, "+
+			"to the credential the receiver issued", err, config.EnvPrefix)
+	}
+	return shipper, nil
 }
 
 // openStore connects to the configured database.
