@@ -18,8 +18,9 @@ idea.
 | Maintenance | The style budget below is closed: `make lint` runs whole in CI and reports nothing |
 | Security review | Done, September 2026. Findings fixed and disclosed; see the note below and `docs/audits/` |
 
-Three phase 1 exit criteria deserve an honest note. One of them, the
-external security review, is now met; the other two are not.
+Three phase 1 exit criteria deserved an honest note. Two of them, the
+external security review and the coverage threshold, are now met; the third,
+registry publication, needs accounts that belong to the maintainer.
 
 **Client libraries.** The specification asks for SDKs in Node, Python and Go.
 All three live under `sdk/`, each its own package with its own test suite and no
@@ -27,13 +28,20 @@ runtime dependency beyond its standard library, except that Python needs
 `cryptography` for the one Ed25519 verification primitive. None is published to
 a registry yet, which needs accounts that belong to the maintainer.
 
-**Test coverage.** The specification asks for more than 80% of statements. The
-suite reaches 72.0%, or **79.8%** counting the PostgreSQL store and the TPM
-provider, which a plain `go test ./...` reports as zero because their tests are
+**Test coverage: met.** The specification asks for more than 80% of statements
+and the suite reaches **80.0%**, counting the PostgreSQL store and the TPM
+provider, which a plain `go test ./...` reports as zero because their tests sit
 behind the `integration` build tag and behind a device that has to be present.
-That is short of 80 by two tenths of a point, and the gap is left open rather
-than closed, because closing it now would mean writing tests chosen for the
-denominator instead of for what they prove.
+Without those two it is 72.3%, and `make cover-integration`, which starts no
+software TPM, reads 79.5%; the three numbers differ by what was running, not by
+what is true.
+
+The last two tenths came from the part of `run` that returns before a listener
+is opened: `-version`, `-check-config` and `-migrate`. Those are the three
+commands the documentation tells an operator to run, one of them from a
+deployment pipeline before it starts a new version, and none of them had a test.
+Reaching a threshold that way is worth doing; reaching it by covering whatever
+was cheapest would not have been.
 
 Neither number was measured against anything until 1.1.0: the coverage upload
 was configured not to fail a build and there was no threshold file, so the gate
@@ -46,7 +54,7 @@ Where the rest is, in order of what it would be worth:
 
 | Package | Statements covered | What is untested |
 |---|---|---|
-| `cmd/n0passtemps-server` | 60.0% | `run` and `main`, which wire everything together and are reached only by starting the process |
+| `cmd/n0passtemps-server` | 71.0% | The part of `run` past the early exits, and `main`, which are reached only by starting the process and signalling it |
 | `internal/crypto/kek` | 43.1% | The TPM provider's error paths, which need a device that fails in a particular way |
 | `internal/admin/ui` | 69.4% | Template rendering branches |
 
