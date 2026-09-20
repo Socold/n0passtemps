@@ -133,19 +133,33 @@ credential to leak, rotate or find in a log. The npm job also passes
 `--provenance`, which records the same signed statement the container image
 already gets.
 
-What the maintainer does once, and cannot be done from here:
+Both jobs have now run, on the 1.1.2 tag, and both failed in the way a
+missing registry setting fails: PyPI answered `invalid-publisher` and npm a
+`404` on the PUT. Neither is a regression, since the 1.1.0 release did not
+contain these jobs at all; they are simply live now and saying what is absent.
 
-1. On npmjs.com, add a trusted publisher for `n0passtemps` naming this
-   repository, `release.yml` and the environment `npm`.
-2. On pypi.org, add a pending publisher for `n0passtemps` naming this
-   repository, `release.yml` and the environment `pypi`.
-3. Create both environments in the repository's settings.
+The two environments exist. What remains is one setting on each registry, and
+neither can be done from here because both live under accounts the maintainer
+holds:
 
-Until the environments exist the two jobs are skipped, which is deliberate: a
-release should not fail because a registry nobody has set up yet was not
-published to. Both jobs refuse to publish a version the tag does not name, which
-is the one mistake neither registry lets anybody take back -- npm allows
-unpublishing for 72 hours and PyPI not at all.
+1. On npmjs.com, add a trusted publisher for `n0passtemps`: owner `Socold`,
+   repository `n0passtemps`, workflow `release.yml`, environment `npm`.
+2. On pypi.org, add a pending publisher for `n0passtemps`: owner `Socold`,
+   repository `n0passtemps`, workflow `release.yml`, environment `pypi`. It has
+   to be a *pending* publisher because the project does not exist yet, which is
+   how PyPI lets a first release create it.
+
+The npm half had a second cause worth recording, because the registry's answer
+did not point at it. Trusted publishing needs npm CLI 11.5.1 or later and Node
+22 ships npm 10, which has no OIDC support and falls back to reading a token out
+of the environment; with none set, the publish fails with a 404 that says
+nothing about the version. The job now installs a pinned npm of its own. That
+half was the workflow's own fault and would have failed even with the publisher
+configured.
+
+Both jobs refuse to publish a version the tag does not name, which is the one
+mistake neither registry lets anybody take back: npm allows unpublishing for 72
+hours and PyPI not at all.
 
 ## Phase 2
 
