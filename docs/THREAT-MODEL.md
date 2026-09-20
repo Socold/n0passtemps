@@ -184,7 +184,7 @@ integrating application's configuration.
   public surface. A leaked key therefore discloses the version and the keyring
   state, which ADR 0008 withheld from the unauthenticated caller.
 - **Detection latency.** Nothing alerts on a key being used from a new address,
-  or at a new time, or for an unusual mix of routes. The alert engine has eleven
+  or at a new time, or for an unusual mix of routes. The alert engine has thirteen
   conditions and none of them is behavioural.
 
 ### 3. A rogue administrator
@@ -226,7 +226,7 @@ request an erasure, rewrap the keyring, and decide approvals.
 **Not mitigated**
 
 - **A full administrator is trusted.** By design. `admin_full` holds all
-  twenty-seven permissions, and the only thing standing between it and total
+  twenty-eight permissions, and the only thing standing between it and total
   control is the dual-approval queue on four operations and the audit log
   afterwards. Separation of duty here is a speed bump and a record, not a
   barrier.
@@ -649,7 +649,7 @@ disappear, and this section is what the transfer costs.
   window, a single use, no assertion at the end, and an audit trail.
 - **Detection is after the fact.** Nothing alerts on a redemption from an
   unexpected address, or on a redemption minutes before the legitimate user
-  tries. The alert list has eleven conditions and none of them is behavioural.
+  tries. The alert list has thirteen conditions and none of them is behavioural.
 - **Delivery is unauthenticated at the application's end.** If the integrating
   application emails tickets and its mail path is compromised, every ticket it
   ever sends is readable. That is a property of the application's

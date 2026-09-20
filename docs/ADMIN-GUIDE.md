@@ -30,7 +30,7 @@ by `admin.session_ttl`. Both sit behind the same network allow list.
 | `admin_operator` | Everything an auditor can | Lock and unlock a subject, revoke one credential, reissue recovery codes, reset a throttle, acknowledge an alert, rotate its own token | Mint, rotate or revoke any other credential, decide an approval, request or cancel an erasure, revoke every credential of a subject in one call, rewrap the keyring |
 | `admin_full` | Everything | Everything | Nothing |
 
-The full matrix, all twenty-seven permissions against all three roles, is in
+The full matrix, all twenty-eight permissions against all three roles, is in
 [RBAC.md](RBAC.md).
 
 With `features.admin_rbac = false`, which `features.lite_mode` implies, every
@@ -1166,8 +1166,8 @@ append or on a schedule, is what closes this gap. It is not in this release.
 
 | Document | What it covers |
 |---|---|
-| [RBAC.md](RBAC.md) | All twenty-seven permissions against the three roles |
-| [MONITORING.md](MONITORING.md) | The ten alert types and what to do about each |
+| [RBAC.md](RBAC.md) | All twenty-eight permissions against the three roles |
+| [MONITORING.md](MONITORING.md) | The thirteen alert types and what to do about each |
 | [GDPR.md](GDPR.md) | The access and erasure paths in full |
 | [TROUBLESHOOT.md](TROUBLESHOOT.md) | Symptom-first diagnosis |
 | [CONFIGURATION.md](CONFIGURATION.md) | Every setting named above |

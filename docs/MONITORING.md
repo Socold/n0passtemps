@@ -299,7 +299,7 @@ A useful starting set of log-based alerts:
 | Rising 429 rate | `status=429`, grouped by `route` and `source_ip` |
 | Any 500 | `status>=500` |
 | Credential last-use not recorded | message `api key last-use timestamp not recorded`, level warn |
-| Janitor failing | message `janitor pass completed with errors`, level error. A pass that removes nothing logs at debug, and a pass that removed something logs at info with the counts `challenges`, `throttles`, `approvals`, `erasures` and `audit_pruned` |
+| Janitor failing | message `janitor pass completed with errors`, level error. A pass that removes nothing logs at debug, and a pass that removed something logs at info with the counts `challenges`, `tickets`, `throttles`, `approvals`, `erasures` and `audit_pruned` |
 | Janitor unable to coordinate | message `janitor pass skipped: the sweep lock could not be taken`, level error. Not the same line as a pass another replica is doing, which is the one below: this one means the database did not answer at all, and no replica swept |
 
 ## Database tuning
@@ -311,10 +311,10 @@ is proportional to the number of subjects, and the janitor keeps the ephemeral
 tables small.
 
 `internal/janitor` runs every `features.janitor_interval`, default 5 minutes,
-and sweeps five things: WebAuthn challenges whose ceremony was abandoned,
-throttle buckets whose window has long passed, approval requests nobody decided,
-erasure requests whose `purge_after` has closed, and audit entries past
-`audit.retention_days`. Most sweeps span every tenant, because the janitor acts
+and sweeps six things: WebAuthn challenges whose ceremony was abandoned,
+enrolment tickets past their expiry, throttle buckets whose window has long
+passed, approval requests nobody decided, erasure requests whose `purge_after`
+has closed, and audit entries past `audit.retention_days`. Most sweeps span every tenant, because the janitor acts
 on behalf of none of them.
 
 Three details worth knowing:

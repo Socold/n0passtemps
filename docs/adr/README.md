@@ -1,7 +1,7 @@
 # Architecture decision records
 
 A written specification preceded the code. A technical review of that document
-found defects, and the implementation deliberately deviates from it on eleven
+found defects, and the implementation deliberately deviates from it on twelve
 points. Each deviation is recorded below, so that a reader comparing the
 specification with the repository can tell a considered decision from drift.
 

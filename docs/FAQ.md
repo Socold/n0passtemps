@@ -502,4 +502,4 @@ be told to use a different one.
 | [CONFIGURATION.md](CONFIGURATION.md) | Every setting named above |
 | [TROUBLESHOOT.md](TROUBLESHOOT.md) | Symptom-first diagnosis |
 | [ADMIN-GUIDE.md](ADMIN-GUIDE.md) | Day to day operation |
-| [docs/adr](adr/README.md) | The eleven deviations from the original specification, and two further decisions |
+| [docs/adr](adr/README.md) | The twelve deviations from the original specification, and three further decisions |

@@ -60,7 +60,7 @@ key material in memory. Everything else is derived.
 |---|---|---|
 | `cmd/n0passtemps-server` | The entrypoint: parses seven flags, loads the configuration, opens the keyring and the store, provisions the tenant, builds every service, starts the janitor and serves. With `-bootstrap-admin` it creates the first administrative tokens, as many as `-admins` says, prints each once and exits without serving; the long-running path never writes a token and only warns when no administrator exists. See [ADR 0014](adr/0014-bootstrap-by-explicit-command.md) | everything |
 | `cmd/n0passtemps-wizard` | Generates the keyring, the signing key and the pepper, writes a configuration, and validates one. Nothing it does is required | `config`, `kek`, `assertion` |
-| `internal/janitor` | The five periodic sweeps, in process and behind a deployment-wide sweep lock so that several replicas do not each repeat them, and the keyring age check that raises `kek.rotation_overdue` | `config`, `store`, `audit`, `alerts` |
+| `internal/janitor` | The six periodic sweeps, in process and behind a deployment-wide sweep lock so that several replicas do not each repeat them, and the keyring age check that raises `kek.rotation_overdue` | `config`, `store`, `audit`, `alerts` |
 | `internal/admin/ui` | The server-rendered interface, embedded, mounted at `/admin` | `config`, `store`, `audit`, `subject`, `throttle` |
 | `internal/config` | Loads defaults, the TOML file and the environment; validates once at startup | `go-toml/v2` |
 | `internal/api` | The HTTP surface: routing, middleware, problem responses, both handler sets | everything below |
@@ -71,7 +71,7 @@ key material in memory. Everything else is derived.
 | `internal/assertion` | Issues and verifies the signed ceremony result; publishes the JWK Set | `zeroize` |
 | `internal/audit` | The hash chain, the event vocabulary and the recorder | `store` |
 | `internal/auditsink` | Delivers the hash-covered part of each entry to an append-only destination outside the operator's control. The only package that makes an outbound connection, and it exists only when `audit.sink.endpoint` is set | `config`, `store`, `audit`, `version` |
-| `internal/alerts` | Turns ten detected conditions into rows an operator can act on | `store` |
+| `internal/alerts` | Turns thirteen detected conditions into rows an operator can act on | `store` |
 | `internal/throttle` | Evaluates and records the rate limits | `config`, `store` |
 | `internal/health` | Builds the two health reports | `config`, `store`, `version` |
 | `internal/logging` | Configures structured output and enforces redaction | `config` |
@@ -465,4 +465,4 @@ than a tag, and Node.js is absent from the build and from CI entirely.
 | [CONFIGURATION.md](CONFIGURATION.md) | Every key the loader accepts |
 | [WEBAUTHN.md](WEBAUTHN.md) | The ceremony in detail |
 | [THREAT-MODEL.md](THREAT-MODEL.md) | What each boundary above is holding back |
-| [docs/adr](adr/README.md) | The eleven deliberate deviations from the specification, and two decisions on questions it leaves open |
+| [docs/adr](adr/README.md) | The twelve deliberate deviations from the specification, and three decisions on questions it leaves open |
