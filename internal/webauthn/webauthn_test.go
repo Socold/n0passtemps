@@ -20,6 +20,7 @@ import (
 	"github.com/Socold/n0passtemps/internal/store"
 	"github.com/Socold/n0passtemps/internal/store/sqlite"
 	"github.com/Socold/n0passtemps/internal/webauthn"
+	"github.com/Socold/n0passtemps/internal/webauthn/virtual"
 )
 
 const (
@@ -129,31 +130,31 @@ func (f *fixture) reload(sub *store.Subject) *store.Subject {
 	return out
 }
 
-func (f *fixture) authenticator(model uuid.UUID) *virtualAuthenticator {
-	return newVirtualAuthenticator(testOrigin, [16]byte(model))
+func (f *fixture) authenticator(model uuid.UUID) *virtual.Authenticator {
+	return virtual.New(testOrigin, [16]byte(model))
 }
 
 // authenticatorAt is the same device behind a page served from somewhere else,
 // which is what a relying party with more than one origin has to reason about.
-func (f *fixture) authenticatorAt(origin string, model uuid.UUID) *virtualAuthenticator {
-	return newVirtualAuthenticator(origin, [16]byte(model))
+func (f *fixture) authenticatorAt(origin string, model uuid.UUID) *virtual.Authenticator {
+	return virtual.New(origin, [16]byte(model))
 }
 
 // register runs a whole registration ceremony and returns its result.
-func (f *fixture) register(sub *store.Subject, a *virtualAuthenticator) (*store.Credential, error) {
+func (f *fixture) register(sub *store.Subject, a *virtual.Authenticator) (*store.Credential, error) {
 	f.t.Helper()
 	begin, err := f.svc.BeginRegistration(f.ctx, sub, "")
 	if err != nil {
 		return nil, err
 	}
-	resp, err := a.create(begin.Options)
+	resp, err := a.Create(begin.Options)
 	if err != nil {
 		f.t.Fatalf("authenticator create: %v", err)
 	}
 	return f.svc.CompleteRegistration(f.ctx, sub, begin.ChallengeID, resp, "")
 }
 
-func (f *fixture) mustRegister(sub *store.Subject, a *virtualAuthenticator) *store.Credential {
+func (f *fixture) mustRegister(sub *store.Subject, a *virtual.Authenticator) *store.Credential {
 	f.t.Helper()
 	cred, err := f.register(sub, a)
 	if err != nil {
@@ -163,20 +164,20 @@ func (f *fixture) mustRegister(sub *store.Subject, a *virtualAuthenticator) *sto
 }
 
 // assert runs a whole assertion ceremony and returns its result.
-func (f *fixture) assert(sub *store.Subject, a *virtualAuthenticator) (*webauthn.AssertionOutcome, error) {
+func (f *fixture) assert(sub *store.Subject, a *virtual.Authenticator) (*webauthn.AssertionOutcome, error) {
 	f.t.Helper()
 	begin, err := f.svc.BeginAssertion(f.ctx, sub)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := a.get(begin.Options)
+	resp, err := a.Get(begin.Options)
 	if err != nil {
 		f.t.Fatalf("authenticator get: %v", err)
 	}
 	return f.svc.CompleteAssertion(f.ctx, sub, begin.ChallengeID, resp)
 }
 
-func (f *fixture) mustAssert(sub *store.Subject, a *virtualAuthenticator) *webauthn.AssertionOutcome {
+func (f *fixture) mustAssert(sub *store.Subject, a *virtual.Authenticator) *webauthn.AssertionOutcome {
 	f.t.Helper()
 	out, err := f.assert(sub, a)
 	if err != nil {
@@ -233,9 +234,9 @@ func TestRegistrationThenAssertionSucceedsAndRecordsWhatTheAuthenticatorReported
 	cred := f.mustRegister(sub, a)
 
 	stored := f.storedCredential(cred.ID)
-	if !bytes.Equal(stored.CredentialID, a.last.id) {
+	if !bytes.Equal(stored.CredentialID, a.Last.ID) {
 		t.Errorf("stored credential id %x is not the one the authenticator created, %x",
-			stored.CredentialID, a.last.id)
+			stored.CredentialID, a.Last.ID)
 	}
 	if !bytes.Equal(stored.AAGUID, modelA[:]) {
 		t.Errorf("stored AAGUID %x, want %x: the model policy and the binding hash both depend on it",
@@ -256,7 +257,7 @@ func TestRegistrationThenAssertionSucceedsAndRecordsWhatTheAuthenticatorReported
 	if err := cbor.Unmarshal(stored.PublicKey, &cose); err != nil {
 		t.Fatalf("stored public key is not a COSE key: %v", err)
 	}
-	wantX, wantY, err := coordinates(&a.last.key.PublicKey)
+	wantX, wantY, err := virtual.Coordinates(&a.Last.Key.PublicKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +328,7 @@ func TestRegistrationChallengeIsSingleUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := a.create(begin.Options)
+	resp, err := a.Create(begin.Options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +352,7 @@ func TestAssertionChallengeIsSingleUseSoAReplayedAssertionIsRefused(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := a.get(begin.Options)
+	resp, err := a.Get(begin.Options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +387,7 @@ func TestExpiredChallengeIsRefused(t *testing.T) {
 		if want := f.clock.now().Add(ttl); !begin.ExpiresAt.Equal(want) {
 			t.Errorf("ExpiresAt is %v, want %v from the injected clock", begin.ExpiresAt, want)
 		}
-		resp, err := a.create(begin.Options)
+		resp, err := a.Create(begin.Options)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -410,7 +411,7 @@ func TestExpiredChallengeIsRefused(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp, err := a.get(begin.Options)
+		resp, err := a.Get(begin.Options)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -434,7 +435,7 @@ func TestExpiredChallengeIsRefused(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp, err := a.get(begin.Options)
+		resp, err := a.Get(begin.Options)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -466,10 +467,10 @@ func TestChallengeCannotCrossCeremonies(t *testing.T) {
 			"rpId":      testRPID,
 			"allowCredentials": []map[string]any{{
 				"type": "public-key",
-				"id":   base64.RawURLEncoding.EncodeToString(a.last.id),
+				"id":   base64.RawURLEncoding.EncodeToString(a.Last.ID),
 			}},
 		}}
-		resp, err := a.get(crafted)
+		resp, err := a.Get(crafted)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -502,7 +503,7 @@ func TestChallengeCannotCrossCeremonies(t *testing.T) {
 			"user":      map[string]any{"id": optionsString(t, genuine.Options, "publicKey", "user", "id")},
 		}}
 		intruder := f.authenticator(modelA)
-		resp, err := intruder.create(crafted)
+		resp, err := intruder.Create(crafted)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -533,7 +534,7 @@ func TestChallengeIssuedForOneSubjectCannotBeCompletedForAnother(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp, err := a.create(begin.Options)
+		resp, err := a.Create(begin.Options)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -566,7 +567,7 @@ func TestChallengeIssuedForOneSubjectCannotBeCompletedForAnother(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp, err := aliceKey.get(begin.Options)
+		resp, err := aliceKey.Get(begin.Options)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -584,37 +585,37 @@ func TestResponseNotBoundToThisRelyingPartyIsRefused(t *testing.T) {
 	// named, so a refusal can only come from the check under test.
 	cases := []struct {
 		name          string
-		sabotage      func(*virtualAuthenticator)
+		sabotage      func(*virtual.Authenticator)
 		assertionOnly bool
 		why           string
 	}{
 		{
 			name:     "wrong origin",
-			sabotage: func(a *virtualAuthenticator) { a.origin = "https://login.example.test.evil.example" },
+			sabotage: func(a *virtual.Authenticator) { a.Origin = "https://login.example.test.evil.example" },
 			why:      "a response collected by a page on another origin is a phishing relay",
 		},
 		{
 			name: "wrong rpId hash",
-			sabotage: func(a *virtualAuthenticator) {
+			sabotage: func(a *virtual.Authenticator) {
 				sum := sha256.Sum256([]byte("evil.example"))
-				a.rpIDHashOverride = sum[:]
+				a.RPIDHashOverride = sum[:]
 			},
 			why: "authenticator data scoped to another relying party proves nothing here",
 		},
 		{
 			name:          "tampered signature",
-			sabotage:      func(a *virtualAuthenticator) { a.tamperSignature = true },
+			sabotage:      func(a *virtual.Authenticator) { a.TamperSignature = true },
 			assertionOnly: true,
 			why:           "the signature is the only proof of possession",
 		},
 		{
 			name:     "user verification absent while required",
-			sabotage: func(a *virtualAuthenticator) { a.userVerified = false },
+			sabotage: func(a *virtual.Authenticator) { a.UserVerified = false },
 			why:      "with user_verification = required a stolen key alone must not authenticate",
 		},
 		{
 			name:     "user presence absent",
-			sabotage: func(a *virtualAuthenticator) { a.userPresent = false; a.userVerified = false },
+			sabotage: func(a *virtual.Authenticator) { a.UserPresent = false; a.UserVerified = false },
 			why:      "a response produced without a user gesture may have been produced by malware",
 		},
 	}
@@ -674,7 +675,7 @@ func TestOutcomeReportsUserVerificationOfThisAssertionNotOfAnEarlierOne(t *testi
 		t.Error("an assertion carrying the UV flag was reported as unverified")
 	}
 
-	a.userVerified = false
+	a.UserVerified = false
 	out := f.mustAssert(sub, a)
 	if out.UserVerified {
 		t.Error("SUSPECTED SERVICE BUG: an assertion WITHOUT the UV flag was reported as UserVerified. " +
@@ -713,7 +714,7 @@ func TestSignatureCounter(t *testing.T) {
 			f.clock.add(time.Minute)
 		}
 
-		a.forceCounter(1000)
+		a.ForceCounter(1000)
 		f.mustAssert(sub, a)
 		if got := f.storedCredential(cred.ID).SignCount; got != 1000 {
 			t.Errorf("stored counter is %d after a jump to 1000: a counter may advance by any positive amount", got)
@@ -728,7 +729,7 @@ func TestSignatureCounter(t *testing.T) {
 		f.mustAssert(sub, a)
 		f.mustAssert(sub, a)
 
-		a.freezeCounter = true
+		a.FreezeCounter = true
 		out, err := f.assert(sub, a)
 		if err != nil {
 			t.Fatalf("an assertion with a stuck counter was refused (%v): the signal has innocent causes "+
@@ -751,10 +752,10 @@ func TestSignatureCounter(t *testing.T) {
 		sub := f.subject("alice@example.test", "Alice")
 		a := f.authenticator(modelA)
 		cred := f.mustRegister(sub, a)
-		a.forceCounter(50)
+		a.ForceCounter(50)
 		f.mustAssert(sub, a)
 
-		a.forceCounter(7)
+		a.ForceCounter(7)
 		out, err := f.assert(sub, a)
 		if err != nil {
 			t.Fatalf("an assertion with a regressed counter was refused: %v", err)
@@ -771,7 +772,7 @@ func TestSignatureCounter(t *testing.T) {
 		f := newFixture(t)
 		sub := f.subject("alice@example.test", "Alice")
 		a := f.authenticator(modelA)
-		a.freezeCounter = true
+		a.FreezeCounter = true
 		cred := f.mustRegister(sub, a)
 
 		for i := 1; i <= 3; i++ {
@@ -793,7 +794,7 @@ func TestUseOfACounterlessCredentialIsStillRecorded(t *testing.T) {
 	f := newFixture(t)
 	sub := f.subject("alice@example.test", "Alice")
 	a := f.authenticator(modelA)
-	a.freezeCounter = true
+	a.FreezeCounter = true
 	cred := f.mustRegister(sub, a)
 
 	f.clock.add(time.Minute)
@@ -829,13 +830,13 @@ func TestSameCounterFromTwoSeparateChallengesWarnsOnTheSecond(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a.forceCounter(5)
-	respOriginal, err := a.get(first.Options)
+	a.ForceCounter(5)
+	respOriginal, err := a.Get(first.Options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.forceCounter(5)
-	respClone, err := a.get(second.Options)
+	a.ForceCounter(5)
+	respClone, err := a.Get(second.Options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -956,7 +957,7 @@ func TestAForgedAttestationWithABorrowedAAGUIDRegisters(t *testing.T) {
 	sub := f.subject("alice@example.test", "Alice")
 
 	a := f.authenticator(modelA)
-	a.forgePackedAttestation = true
+	a.ForgePackedAttestation = true
 
 	cred, err := f.register(sub, a)
 	if err != nil {
@@ -996,12 +997,12 @@ func TestCredentialLimitExcludeListAndCrossSubjectUniqueness(t *testing.T) {
 		t.Errorf("excludeCredentials %v does not name the credential already enrolled: "+
 			"the same authenticator could be enrolled twice", excluded)
 	}
-	if _, err = first.create(begin.Options); !errors.Is(err, errCredentialExcluded) {
+	if _, err = first.Create(begin.Options); !errors.Is(err, virtual.ErrCredentialExcluded) {
 		t.Errorf("the enrolled authenticator answered a creation request that excludes it (err=%v)", err)
 	}
 
 	second := f.authenticator(modelA)
-	resp, err := second.create(begin.Options)
+	resp, err := second.Create(begin.Options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1019,7 +1020,7 @@ func TestCredentialLimitExcludeListAndCrossSubjectUniqueness(t *testing.T) {
 	// with its own key behind it.
 	bob := f.subject("bob@example.test", "Bob")
 	intruder := f.authenticator(modelA)
-	intruder.nextCredentialID = firstCred.CredentialID
+	intruder.NextCredentialID = firstCred.CredentialID
 	_, err = f.register(bob, intruder)
 	if !errors.Is(err, webauthn.ErrCredentialExists) {
 		t.Errorf("registering Alice's credential id under Bob returned %v, want ErrCredentialExists: "+
@@ -1059,7 +1060,7 @@ func TestCeremoniesBegunTogetherCannotAllStoreACredential(t *testing.T) {
 			t.Fatalf("ceremony %d was refused at begin: all three are begun while the subject "+
 				"holds nothing, so all three pass the check there: %v", i, err)
 		}
-		resp, err := f.authenticator(modelA).create(begin.Options)
+		resp, err := f.authenticator(modelA).Create(begin.Options)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1094,10 +1095,10 @@ func TestSignCountRegressionIsRefusedOnlyUnderThePolicy(t *testing.T) {
 		a := f.authenticator(modelA)
 		cred := f.mustRegister(sub, a)
 
-		a.forceCounter(50)
+		a.ForceCounter(50)
 		f.mustAssert(sub, a)
 
-		a.forceCounter(7)
+		a.ForceCounter(7)
 		if _, err := f.assert(sub, a); !errors.Is(err, webauthn.ErrCeremonyFailed) {
 			t.Fatalf("a counter that went from 50 to 7 returned %v, want ErrCeremonyFailed", err)
 		}
@@ -1120,10 +1121,10 @@ func TestSignCountRegressionIsRefusedOnlyUnderThePolicy(t *testing.T) {
 		a := f.authenticator(modelA)
 		f.mustRegister(sub, a)
 
-		a.forceCounter(50)
+		a.ForceCounter(50)
 		f.mustAssert(sub, a)
 
-		a.forceCounter(50)
+		a.ForceCounter(50)
 		out, err := f.assert(sub, a)
 		if err != nil {
 			t.Fatalf("an assertion whose counter stalled at its stored value was refused: %v", err)
@@ -1139,10 +1140,10 @@ func TestSignCountRegressionIsRefusedOnlyUnderThePolicy(t *testing.T) {
 		a := f.authenticator(modelA)
 		f.mustRegister(sub, a)
 
-		a.forceCounter(50)
+		a.ForceCounter(50)
 		f.mustAssert(sub, a)
 
-		a.forceCounter(7)
+		a.ForceCounter(7)
 		if _, err := f.assert(sub, a); err != nil {
 			t.Fatalf("a regressed counter was refused with the policy off (%v): turning the "+
 				"policy on has to be what changes the behaviour", err)
@@ -1177,7 +1178,7 @@ func TestRevokedCredentialCannotAssert(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp, err := a.get(begin.Options)
+		resp, err := a.Get(begin.Options)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1211,7 +1212,7 @@ func TestRevokedCredentialCannotAssert(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err = lost.get(begin.Options); !errors.Is(err, errNoMatchingCredential) {
+		if _, err = lost.Get(begin.Options); !errors.Is(err, virtual.ErrNoMatchingCredential) {
 			t.Errorf("the allow list still offers the revoked credential (err=%v)", err)
 		}
 
@@ -1221,10 +1222,10 @@ func TestRevokedCredentialCannotAssert(t *testing.T) {
 			"rpId":      testRPID,
 			"allowCredentials": []map[string]any{{
 				"type": "public-key",
-				"id":   base64.RawURLEncoding.EncodeToString(lost.last.id),
+				"id":   base64.RawURLEncoding.EncodeToString(lost.Last.ID),
 			}},
 		}}
-		resp, err := lost.get(crafted)
+		resp, err := lost.Get(crafted)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1251,7 +1252,7 @@ func TestLockedSubjectCannotBeginOrCompleteEitherCeremony(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	regResp, err := f.authenticator(modelA).create(reg.Options)
+	regResp, err := f.authenticator(modelA).Create(reg.Options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1259,7 +1260,7 @@ func TestLockedSubjectCannotBeginOrCompleteEitherCeremony(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loginResp, err := a.get(login.Options)
+	loginResp, err := a.Get(login.Options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1298,13 +1299,13 @@ func TestLockedSubjectCannotBeginOrCompleteEitherCeremony(t *testing.T) {
 
 // discoverableAssert runs a whole usernameless ceremony and reports which
 // subject came back.
-func (f *fixture) discoverableAssert(a *virtualAuthenticator) (*store.Subject, *webauthn.AssertionOutcome, error) {
+func (f *fixture) discoverableAssert(a *virtual.Authenticator) (*store.Subject, *webauthn.AssertionOutcome, error) {
 	f.t.Helper()
 	begin, err := f.svc.BeginDiscoverableAssertion(f.ctx, testTenant)
 	if err != nil {
 		return nil, nil, err
 	}
-	resp, err := a.get(begin.Options)
+	resp, err := a.Get(begin.Options)
 	if err != nil {
 		f.t.Fatalf("authenticator get: %v", err)
 	}
@@ -1361,7 +1362,7 @@ func TestDiscoverableAssertionRefusesAPossessionOnlyResponse(t *testing.T) {
 
 	// A key whose PIN was never entered, which is what a found or stolen
 	// authenticator produces.
-	a.userVerified = false
+	a.UserVerified = false
 
 	if _, _, err := f.discoverableAssert(a); !errors.Is(err, webauthn.ErrCeremonyFailed) {
 		t.Errorf("possession-only usernameless assertion returned %v, want ErrCeremonyFailed", err)
@@ -1417,7 +1418,7 @@ func TestDiscoverableAssertionRefusesAMismatchedUserHandle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := a.get(begin.Options)
+	resp, err := a.Get(begin.Options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1463,7 +1464,7 @@ func TestNamedAndDiscoverableChallengesAreNotInterchangeable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := a.get(named.Options)
+	resp, err := a.Get(named.Options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1476,7 +1477,7 @@ func TestNamedAndDiscoverableChallengesAreNotInterchangeable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp2, err := a.get(disc.Options)
+	resp2, err := a.Get(disc.Options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1495,7 +1496,7 @@ func TestDiscoverableAssertionChallengeIsSingleUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := a.get(begin.Options)
+	resp, err := a.Get(begin.Options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1517,7 +1518,7 @@ func TestDiscoverableAssertionIsTenantScoped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := a.get(begin.Options)
+	resp, err := a.Get(begin.Options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1570,9 +1571,9 @@ func TestACredentialRevokedDuringAStuckCounterAssertionDoesNotAssert(t *testing.
 
 	// Establish a stored counter of 5, then answer a second challenge with the
 	// same value, which is what a copy of the key does.
-	a.forceCounter(5)
+	a.ForceCounter(5)
 	f.mustAssert(sub, a)
-	a.forceCounter(5)
+	a.ForceCounter(5)
 
 	svc, err := webauthn.New(f.cfg, &revokingStore{Store: f.store, now: f.clock.now}, f.clock.now)
 	if err != nil {
@@ -1582,7 +1583,7 @@ func TestACredentialRevokedDuringAStuckCounterAssertionDoesNotAssert(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := a.get(begin.Options)
+	resp, err := a.Get(begin.Options)
 	if err != nil {
 		t.Fatal(err)
 	}

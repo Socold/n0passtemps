@@ -12,6 +12,7 @@ import (
 	"github.com/Socold/n0passtemps/internal/config"
 	"github.com/Socold/n0passtemps/internal/store"
 	"github.com/Socold/n0passtemps/internal/webauthn"
+	"github.com/Socold/n0passtemps/internal/webauthn/virtual"
 )
 
 // The console's ceremonies, and above all the two directions that must not
@@ -47,20 +48,20 @@ func (f *fixture) adminToken(name string, role store.Role, tune ...func(*store.A
 }
 
 // adminRegister runs a whole console enrolment ceremony.
-func (f *fixture) adminRegister(tok *store.AdminToken, a *virtualAuthenticator) (*store.AdminCredential, error) {
+func (f *fixture) adminRegister(tok *store.AdminToken, a *virtual.Authenticator) (*store.AdminCredential, error) {
 	f.t.Helper()
 	begin, err := f.svc.BeginAdminRegistration(f.ctx, tok)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := a.create(begin.Options)
+	resp, err := a.Create(begin.Options)
 	if err != nil {
 		f.t.Fatalf("authenticator create: %v", err)
 	}
 	return f.svc.CompleteAdminRegistration(f.ctx, tok, begin.ChallengeID, resp, "the key on my keyring")
 }
 
-func (f *fixture) mustAdminRegister(tok *store.AdminToken, a *virtualAuthenticator) *store.AdminCredential {
+func (f *fixture) mustAdminRegister(tok *store.AdminToken, a *virtual.Authenticator) *store.AdminCredential {
 	f.t.Helper()
 	cred, err := f.adminRegister(tok, a)
 	if err != nil {
@@ -70,13 +71,13 @@ func (f *fixture) mustAdminRegister(tok *store.AdminToken, a *virtualAuthenticat
 }
 
 // adminAssert runs a whole console sign-in ceremony.
-func (f *fixture) adminAssert(a *virtualAuthenticator) (*webauthn.AdminAssertionResult, error) {
+func (f *fixture) adminAssert(a *virtual.Authenticator) (*webauthn.AdminAssertionResult, error) {
 	f.t.Helper()
 	begin, err := f.svc.BeginAdminAssertion(f.ctx, testTenant)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := a.get(begin.Options)
+	resp, err := a.Get(begin.Options)
 	if err != nil {
 		f.t.Fatalf("authenticator get: %v", err)
 	}
@@ -141,7 +142,7 @@ func TestTheConsoleIsHeldToItsOwnOrigin(t *testing.T) {
 		f.mustAdminRegister(tok, key)
 
 		relayed := f.authenticatorAt(testAppOrigin, modelA)
-		relayed.credentials = key.credentials
+		relayed.Credentials = key.Credentials
 
 		_, err := f.adminAssert(relayed)
 		if !errors.Is(err, webauthn.ErrCeremonyFailed) {
@@ -254,7 +255,7 @@ func TestAdminRoleComesFromTheTokenAndNotTheCredential(t *testing.T) {
 
 	for _, tc := range []struct {
 		name string
-		key  *virtualAuthenticator
+		key  *virtual.Authenticator
 		want store.Role
 	}{
 		{"auditor", auditorKey, store.RoleAuditor},
@@ -302,7 +303,7 @@ func TestAdminCredentialCannotAuthenticateASubject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin named assertion: %v", err)
 	}
-	if _, err := adminKey.get(begin.Options); err == nil {
+	if _, err := adminKey.Get(begin.Options); err == nil {
 		t.Error("the subject's allow list offered the administrative credential")
 	}
 }
@@ -401,7 +402,7 @@ func TestAdminEnrolmentChallengeCannotBeRedirectedToAnotherToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := a.create(begin.Options)
+	resp, err := a.Create(begin.Options)
 	if err != nil {
 		t.Fatalf("authenticator create: %v", err)
 	}
@@ -513,7 +514,7 @@ func TestAdminSignInRefusesTheSameAssertionTwice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := a.get(begin.Options)
+	resp, err := a.Get(begin.Options)
 	if err != nil {
 		t.Fatalf("authenticator get: %v", err)
 	}

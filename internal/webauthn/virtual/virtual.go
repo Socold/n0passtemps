@@ -1,4 +1,17 @@
-package webauthn_test
+// Package virtual is a WebAuthn authenticator implemented in software, for
+// tests.
+//
+// It is a package rather than a test file because two packages need it:
+// internal/webauthn drives the ceremonies directly and internal/api drives them
+// over HTTP, and a ceremony both of them agree on means something only if the
+// same authenticator produced it. Nothing outside a test imports this, so it
+// reaches no binary the project ships; the linker keeps only what main reaches.
+//
+// It is deliberately not a mock. It holds real ECDSA keys, signs real
+// authenticator data and encodes real CBOR, so a test that passes against it
+// tests the wire format rather than an agreement between two halves of this
+// repository.
+package virtual
 
 import (
 	"bytes"
@@ -22,29 +35,29 @@ import (
 
 // Authenticator data flag bits, from WebAuthn Level 2 section 6.1.
 const (
-	flagUserPresent  byte = 0x01
-	flagUserVerified byte = 0x04
-	flagAttestedData byte = 0x40
+	FlagUserPresent  byte = 0x01
+	FlagUserVerified byte = 0x04
+	FlagAttestedData byte = 0x40
 )
 
-// errCredentialExcluded is what a real authenticator reports, through the
+// ErrCredentialExcluded is what a real authenticator reports, through the
 // browser's InvalidStateError, when one of its credentials appears in the
 // exclude list of a creation request.
-var errCredentialExcluded = errors.New("authenticator: a credential on this device is in the exclude list")
+var ErrCredentialExcluded = errors.New("authenticator: a credential on this device is in the exclude list")
 
-// errNoMatchingCredential is the authenticator finding nothing in the allow
+// ErrNoMatchingCredential is the authenticator finding nothing in the allow
 // list that it holds for the requested relying party.
-var errNoMatchingCredential = errors.New("authenticator: no credential on this device matches the allow list")
+var ErrNoMatchingCredential = errors.New("authenticator: no credential on this device matches the allow list")
 
-// virtualCredential is one key pair held by the authenticator.
-type virtualCredential struct {
-	id         []byte
-	key        *ecdsa.PrivateKey
+// Credential is one key pair held by the authenticator.
+type Credential struct {
+	ID         []byte
+	Key        *ecdsa.PrivateKey
 	rpID       string
 	userHandle []byte
 }
 
-// virtualAuthenticator plays the part of the browser and the security key
+// Authenticator plays the part of the browser and the security key
 // together, because the service under test sees only their joint output.
 //
 // It exists so that the ceremony code can be exercised with genuine
@@ -56,21 +69,21 @@ type virtualCredential struct {
 // The signature counter is global to the device rather than per credential.
 // The specification permits either, and a global counter is what several
 // widely deployed hardware keys implement.
-type virtualAuthenticator struct {
-	aaguid      [16]byte
-	origin      string
+type Authenticator struct {
+	AAGUID      [16]byte
+	Origin      string
 	transports  []string
-	credentials map[string]*virtualCredential
+	Credentials map[string]*Credential
 	counter     uint32
 
 	// userPresent and userVerified drive the UP and UV flag bits.
-	userPresent  bool
-	userVerified bool
+	UserPresent  bool
+	UserVerified bool
 
 	// freezeCounter stops the counter advancing, which is how both a
 	// counter-less authenticator (frozen at zero) and a cloned one (frozen at
 	// whatever the clone last saw) look from the relying party's side.
-	freezeCounter bool
+	FreezeCounter bool
 
 	// forcedCounter, when set, is reported by the next operation verbatim and
 	// becomes the device counter.
@@ -79,18 +92,18 @@ type virtualAuthenticator struct {
 	// rpIDHashOverride replaces SHA-256(rpId) in the authenticator data. A
 	// response carrying it is what a phishing relying party would obtain from
 	// a genuine key: valid in every respect, but scoped to the wrong party.
-	rpIDHashOverride []byte
+	RPIDHashOverride []byte
 
 	// tamperSignature makes get sign over a different message. The result is
 	// a well-formed DER signature from the right key that does not verify,
 	// so a refusal is attributable to the cryptographic check and not to a
 	// parsing failure.
-	tamperSignature bool
+	TamperSignature bool
 
 	// nextCredentialID makes the next create reuse this identifier in place
 	// of a random one. A hostile client can submit any identifier it likes,
 	// including one it observed belonging to somebody else.
-	nextCredentialID []byte
+	NextCredentialID []byte
 
 	// forgePackedAttestation makes create produce a packed attestation
 	// statement (section 8.2) signed by a certificate this device made up,
@@ -99,28 +112,28 @@ type virtualAuthenticator struct {
 	// verifier only checks that the statement is internally consistent; that
 	// the certificate chains to nothing is a question only a trust anchor can
 	// ask. It is what software pretending to be a hardware key produces.
-	forgePackedAttestation bool
+	ForgePackedAttestation bool
 
 	// last is the credential most recently created, so a test can compare
 	// what the service stored against what the device actually holds.
-	last *virtualCredential
+	Last *Credential
 }
 
-// newVirtualAuthenticator returns a device that reports user presence and user
+// New returns a device that reports user presence and user
 // verification, the way a key with a PIN or a biometric sensor does.
-func newVirtualAuthenticator(origin string, aaguid [16]byte) *virtualAuthenticator {
-	return &virtualAuthenticator{
-		aaguid:       aaguid,
-		origin:       origin,
+func New(origin string, aaguid [16]byte) *Authenticator {
+	return &Authenticator{
+		AAGUID:       aaguid,
+		Origin:       origin,
 		transports:   []string{"usb"},
-		credentials:  make(map[string]*virtualCredential),
-		userPresent:  true,
-		userVerified: true,
+		Credentials:  make(map[string]*Credential),
+		UserPresent:  true,
+		UserVerified: true,
 	}
 }
 
-// forceCounter arranges for the next operation to report exactly v.
-func (a *virtualAuthenticator) forceCounter(v uint32) { a.forcedCounter = &v }
+// ForceCounter arranges for the next operation to report exactly v.
+func (a *Authenticator) ForceCounter(v uint32) { a.forcedCounter = &v }
 
 // creationOptions is the subset of PublicKeyCredentialCreationOptions a
 // browser and an authenticator act on.
@@ -167,9 +180,9 @@ func readOptions(options, into any) error {
 	return nil
 }
 
-// create performs navigator.credentials.create and returns the
+// Create performs navigator.credentials.create and returns the
 // PublicKeyCredential JSON the browser would POST.
-func (a *virtualAuthenticator) create(options any) ([]byte, error) {
+func (a *Authenticator) Create(options any) ([]byte, error) {
 	var opts creationOptions
 	if err := readOptions(options, &opts); err != nil {
 		return nil, err
@@ -189,8 +202,8 @@ func (a *virtualAuthenticator) create(options any) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("authenticator: excluded id is not base64url: %w", err)
 		}
-		if held, ok := a.credentials[string(id)]; ok && held.rpID == pk.RP.ID {
-			return nil, errCredentialExcluded
+		if held, ok := a.Credentials[string(id)]; ok && held.rpID == pk.RP.ID {
+			return nil, ErrCredentialExcluded
 		}
 	}
 
@@ -198,8 +211,8 @@ func (a *virtualAuthenticator) create(options any) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("authenticator: generate key: %w", err)
 	}
-	credID := a.nextCredentialID
-	a.nextCredentialID = nil
+	credID := a.NextCredentialID
+	a.NextCredentialID = nil
 	if credID == nil {
 		credID = make([]byte, 32)
 		if _, err = rand.Read(credID); err != nil {
@@ -215,7 +228,9 @@ func (a *virtualAuthenticator) create(options any) ([]byte, error) {
 	// Attested credential data, section 6.5.1:
 	// aaguid(16) || credentialIdLength(2, big endian) || credentialId || COSE_Key.
 	var attested bytes.Buffer
-	attested.Write(a.aaguid[:])
+	attested.Write(a.AAGUID[:])
+	// #nosec G115 -- credID is the 32-byte identifier generated above, or the one
+	// a test set through NextCredentialID, so the length is far inside uint16
 	_ = binary.Write(&attested, binary.BigEndian, uint16(len(credID)))
 	attested.Write(credID)
 	attested.Write(coseKey)
@@ -223,7 +238,7 @@ func (a *virtualAuthenticator) create(options any) ([]byte, error) {
 	// Creation reports the device counter without advancing it: section 6.3.2
 	// has a global counter reported at its current value, and only
 	// authenticatorGetAssertion moves it.
-	authData := a.authenticatorData(pk.RP.ID, flagAttestedData, a.currentCounter(), attested.Bytes())
+	authData := a.authenticatorData(pk.RP.ID, FlagAttestedData, a.currentCounter(), attested.Bytes())
 
 	// The client data comes first because a packed statement signs over it.
 	clientData, err := a.clientDataJSON("webauthn.create", pk.Challenge)
@@ -239,7 +254,7 @@ func (a *virtualAuthenticator) create(options any) ([]byte, error) {
 		"attStmt":  map[string]any{},
 		"authData": authData,
 	}
-	if a.forgePackedAttestation {
+	if a.ForgePackedAttestation {
 		if statement, err = a.packedStatement(authData, clientData); err != nil {
 			return nil, err
 		}
@@ -249,9 +264,9 @@ func (a *virtualAuthenticator) create(options any) ([]byte, error) {
 		return nil, err
 	}
 
-	cred := &virtualCredential{id: credID, key: key, rpID: pk.RP.ID, userHandle: userHandle}
-	a.credentials[string(credID)] = cred
-	a.last = cred
+	cred := &Credential{ID: credID, Key: key, rpID: pk.RP.ID, userHandle: userHandle}
+	a.Credentials[string(credID)] = cred
+	a.Last = cred
 
 	return json.Marshal(map[string]any{
 		"id":    base64.RawURLEncoding.EncodeToString(credID),
@@ -265,9 +280,9 @@ func (a *virtualAuthenticator) create(options any) ([]byte, error) {
 	})
 }
 
-// get performs navigator.credentials.get and returns the assertion JSON the
+// Get performs navigator.credentials.get and returns the assertion JSON the
 // browser would POST.
-func (a *virtualAuthenticator) get(options any) ([]byte, error) {
+func (a *Authenticator) Get(options any) ([]byte, error) {
 	var opts requestOptions
 	if err := readOptions(options, &opts); err != nil {
 		return nil, err
@@ -277,7 +292,7 @@ func (a *virtualAuthenticator) get(options any) ([]byte, error) {
 		return nil, errors.New("authenticator: request options lack a challenge or rpId")
 	}
 
-	var cred *virtualCredential
+	var cred *Credential
 	if len(pk.AllowCredentials) == 0 {
 		// An empty allow list is a discoverable request: the relying party has
 		// named nobody, so the device itself chooses from the credentials it
@@ -285,7 +300,7 @@ func (a *virtualAuthenticator) get(options any) ([]byte, error) {
 		// this one takes the lowest identifier so the choice is deterministic
 		// and a test can assert which subject came back.
 		var chosen string
-		for id, held := range a.credentials {
+		for id, held := range a.Credentials {
 			if held.rpID != pk.RPID {
 				continue
 			}
@@ -301,14 +316,14 @@ func (a *virtualAuthenticator) get(options any) ([]byte, error) {
 			}
 			// A credential is scoped to the relying party it was created for,
 			// and the device will not use it for another one.
-			if held, ok := a.credentials[string(id)]; ok && held.rpID == pk.RPID {
+			if held, ok := a.Credentials[string(id)]; ok && held.rpID == pk.RPID {
 				cred = held
 				break
 			}
 		}
 	}
 	if cred == nil {
-		return nil, errNoMatchingCredential
+		return nil, ErrNoMatchingCredential
 	}
 
 	clientData, err := a.clientDataJSON("webauthn.get", pk.Challenge)
@@ -324,18 +339,18 @@ func (a *virtualAuthenticator) get(options any) ([]byte, error) {
 	// The signature covers authenticatorData || SHA-256(clientDataJSON),
 	// section 6.3.3 step 11, as an ASN.1 DER ECDSA signature (section 6.5.5).
 	signed := append(append([]byte(nil), authData...), clientDataHash[:]...)
-	if a.tamperSignature {
+	if a.TamperSignature {
 		signed[len(signed)-1] ^= 0x01
 	}
 	digest := sha256.Sum256(signed)
-	signature, err := ecdsa.SignASN1(rand.Reader, cred.key, digest[:])
+	signature, err := ecdsa.SignASN1(rand.Reader, cred.Key, digest[:])
 	if err != nil {
 		return nil, fmt.Errorf("authenticator: sign: %w", err)
 	}
 
 	return json.Marshal(map[string]any{
-		"id":    base64.RawURLEncoding.EncodeToString(cred.id),
-		"rawId": base64.RawURLEncoding.EncodeToString(cred.id),
+		"id":    base64.RawURLEncoding.EncodeToString(cred.ID),
+		"rawId": base64.RawURLEncoding.EncodeToString(cred.ID),
 		"type":  "public-key",
 		"response": map[string]any{
 			"clientDataJSON":    base64.RawURLEncoding.EncodeToString(clientData),
@@ -360,13 +375,13 @@ var oidFIDOGenCeAAGUID = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 45724, 1, 1, 4}
 // absent is any reason to believe the certificate: it is self-signed and chains
 // to nothing. A relying party with no trust anchors cannot tell the difference,
 // which is the whole point of the test that uses this.
-func (a *virtualAuthenticator) packedStatement(authData, clientData []byte) (map[string]any, error) {
+func (a *Authenticator) packedStatement(authData, clientData []byte) (map[string]any, error) {
 	attestationKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("authenticator: generate attestation key: %w", err)
 	}
 
-	aaguidExtension, err := asn1.Marshal(a.aaguid[:])
+	aaguidExtension, err := asn1.Marshal(a.AAGUID[:])
 	if err != nil {
 		return nil, fmt.Errorf("authenticator: encode aaguid extension: %w", err)
 	}
@@ -424,30 +439,30 @@ func (a *virtualAuthenticator) packedStatement(authData, clientData []byte) (map
 // the one the page was really served from, which is why a test overrides it on
 // the authenticator and not in the options: the relying party never gets to
 // tell the browser where it is.
-func (a *virtualAuthenticator) clientDataJSON(ceremony, challenge string) ([]byte, error) {
+func (a *Authenticator) clientDataJSON(ceremony, challenge string) ([]byte, error) {
 	return json.Marshal(struct {
 		Type        string `json:"type"`
 		Challenge   string `json:"challenge"`
 		Origin      string `json:"origin"`
 		CrossOrigin bool   `json:"crossOrigin"`
-	}{ceremony, challenge, a.origin, false})
+	}{ceremony, challenge, a.Origin, false})
 }
 
 // authenticatorData lays out section 6.1:
 // rpIdHash(32) || flags(1) || signCount(4, big endian) || attestedCredentialData.
-func (a *virtualAuthenticator) authenticatorData(rpID string, extraFlags byte, signCount uint32, attested []byte) []byte {
+func (a *Authenticator) authenticatorData(rpID string, extraFlags byte, signCount uint32, attested []byte) []byte {
 	rpIDHash := sha256.Sum256([]byte(rpID))
 	hash := rpIDHash[:]
-	if a.rpIDHashOverride != nil {
-		hash = a.rpIDHashOverride
+	if a.RPIDHashOverride != nil {
+		hash = a.RPIDHashOverride
 	}
 
 	flags := extraFlags
-	if a.userPresent {
-		flags |= flagUserPresent
+	if a.UserPresent {
+		flags |= FlagUserPresent
 	}
-	if a.userVerified {
-		flags |= flagUserVerified
+	if a.UserVerified {
+		flags |= FlagUserVerified
 	}
 
 	out := make([]byte, 0, 37+len(attested))
@@ -458,7 +473,7 @@ func (a *virtualAuthenticator) authenticatorData(rpID string, extraFlags byte, s
 }
 
 // currentCounter reports the counter without moving it.
-func (a *virtualAuthenticator) currentCounter() uint32 {
+func (a *Authenticator) currentCounter() uint32 {
 	if a.forcedCounter != nil {
 		a.counter = *a.forcedCounter
 		a.forcedCounter = nil
@@ -467,11 +482,11 @@ func (a *virtualAuthenticator) currentCounter() uint32 {
 }
 
 // advanceCounter moves the counter as an assertion does and reports the result.
-func (a *virtualAuthenticator) advanceCounter() uint32 {
+func (a *Authenticator) advanceCounter() uint32 {
 	if a.forcedCounter != nil {
 		return a.currentCounter()
 	}
-	if !a.freezeCounter {
+	if !a.FreezeCounter {
 		a.counter++
 	}
 	return a.counter
@@ -480,15 +495,15 @@ func (a *virtualAuthenticator) advanceCounter() uint32 {
 // encodeCOSEKey renders an ES256 public key as the COSE_Key of RFC 9052
 // section 7: {1: 2 (EC2), 3: -7 (ES256), -1: 1 (P-256), -2: x, -3: y}.
 func encodeCOSEKey(pub *ecdsa.PublicKey) ([]byte, error) {
-	x, y, err := coordinates(pub)
+	x, y, err := Coordinates(pub)
 	if err != nil {
 		return nil, err
 	}
 	return ctap2Encode(map[int]any{1: 2, 3: -7, -1: 1, -2: x, -3: y})
 }
 
-// coordinates returns the fixed-width affine coordinates of a P-256 key.
-func coordinates(pub *ecdsa.PublicKey) (x, y []byte, err error) {
+// Coordinates returns the fixed-width affine coordinates of a P-256 key.
+func Coordinates(pub *ecdsa.PublicKey) (x, y []byte, err error) {
 	// The uncompressed point is 0x04 || X(32) || Y(32), which yields the
 	// coordinates already left-padded to the width COSE demands.
 	point, err := pub.Bytes()
