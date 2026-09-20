@@ -16,8 +16,10 @@ idea.
 | 3, a key the process cannot read | Signing key rotation and the TPM-sealed keyring landed; a second signing key rejected; the signing key itself still open on a decision, not on tooling. See below, [ADR 0018](adr/0018-reducing-the-blast-radius-of-a-central-key.md) and [ADR 0019](adr/0019-seal-the-keyring-to-a-tpm.md) |
 | 6, hosted offering | Not started, and not planned before the on-premise product has users |
 | Maintenance | The style budget below is closed: `make lint` runs whole in CI and reports nothing |
+| Security review | Done, September 2026. Findings fixed and disclosed; see the note below and `docs/audits/` |
 
-Three phase 1 exit criteria deserve an honest note.
+Three phase 1 exit criteria deserve an honest note. One of them, the
+external security review, is now met; the other two are not.
 
 **Client libraries.** The specification asks for SDKs in Node, Python and Go.
 All three live under `sdk/`, each its own package with its own test suite and no
@@ -25,35 +27,64 @@ runtime dependency beyond its standard library, except that Python needs
 `cryptography` for the one Ed25519 verification primitive. None is published to
 a registry yet, which needs accounts that belong to the maintainer.
 
-**Test coverage.** The specification asks for more than 80% of statements and
-the suite reaches 65.6%, or 72.1% counting the PostgreSQL store, which `go test
-./...` reports as zero because its tests are behind the `integration` build tag
-and run in a job of their own. Neither number was being measured against
-anything until 1.1.0: the coverage upload was configured not to fail a build,
-and there was no threshold file, so the gate existed in the specification and
-nowhere else. `COVER_MIN` in the Makefile is now enforced by `make cover` and by
-CI, set to 65 so that it passes today and nothing may fall below it.
+**Test coverage.** The specification asks for more than 80% of statements. The
+suite reaches 72.0%, or **79.8%** counting the PostgreSQL store and the TPM
+provider, which a plain `go test ./...` reports as zero because their tests are
+behind the `integration` build tag and behind a device that has to be present.
+That is short of 80 by two tenths of a point, and the gap is left open rather
+than closed, because closing it now would mean writing tests chosen for the
+denominator instead of for what they prove.
 
-Where the missing third is, in order of what it would be worth:
+Neither number was measured against anything until 1.1.0: the coverage upload
+was configured not to fail a build and there was no threshold file, so the gate
+existed in the specification and nowhere else. `COVER_MIN` and `COVER_MIN_FULL`
+in the Makefile are enforced by `make cover`, `make cover-integration` and by
+CI, each set just under what the suite reaches so that nothing may fall below
+it.
+
+Where the rest is, in order of what it would be worth:
 
 | Package | Statements covered | What is untested |
 |---|---|---|
-| `cmd/n0passtemps-server` | 0.9% | The startup path: wiring, signal handling, shutdown |
-| `internal/crypto/kek` | 40.7% | Mostly the TPM provider, which needs a TPM and skips without one |
-| `cmd/n0passtemps-wizard` | 34.8% | The interactive prompts |
-| `internal/admin/ui` | 68.7% | Template rendering branches |
-| `internal/api` | 74.9% | Error paths on handlers whose happy path is covered |
+| `cmd/n0passtemps-server` | 60.0% | `run` and `main`, which wire everything together and are reached only by starting the process |
+| `internal/crypto/kek` | 43.1% | The TPM provider's error paths, which need a device that fails in a particular way |
+| `internal/admin/ui` | 69.4% | Template rendering branches |
 
-The crypto, audit, assertion, risk, throttle, rbac, totp, metrics and alerts
-packages are all above 87%, and those are the ones a reviewer would look at
-first, which is the reason the aggregate is not the most useful number here.
+The crypto, audit, assertion, risk, throttle, rbac, totp, metrics, alerts and
+store packages are all above 87%, and those are the ones a reviewer looks at
+first, which is why the aggregate is not the most useful number here.
 
-**External security review.** The specification requires one before shipping.
-It has not happened, and nothing in this repository substitutes for it. The
-test suites and the threat model make a reviewer's work shorter; they do not
-replace a second pair of eyes that did not write the code. Anyone deploying
-this in front of something that matters should read
-[THREAT-MODEL.md](THREAT-MODEL.md) with that in mind.
+What moved it from 65.6% was not one change. The WebAuthn ceremony handlers had
+no test that ran them over HTTP, because the tests that drove a real ceremony
+lived in `internal/webauthn` and called the service directly; the software
+authenticator they use is now `internal/webauthn/virtual`, a package both that
+one and `internal/api` share, so a ceremony both accept means the same keys, the
+same CBOR and the same signatures produced it. Beside that: the administrative
+credential store on both engines, the setup wizard over every combination of
+answers, the startup path, the eight model predicates that decide whether a
+token authenticates, and the console's approval and acknowledgement actions.
+
+**External security review: done, and its findings are fixed and disclosed.**
+The specification requires one before shipping, and for two releases this entry
+said it had not happened. It happened in September 2026. The redacted report is
+[docs/audits/2026-09-security-review.md](audits/2026-09-security-review.md), the
+advisories are published, and the fixes shipped in 1.1.1 with the SDK packages
+following in 1.1.2.
+
+The findings are worth knowing about rather than summarising away. Two were
+exploitable: the reference application under `kits/` let a caller add a factor
+to a subject it had not authenticated, and an administrator could satisfy the
+two-person rule alone by rotating their own token mid-request, because an
+administrator was identified by the identifier of their token and a rotation
+mints a new one. The second is why `admin_tokens` now carries a principal that
+outlives rotation. A third was quieter and had defeated an earlier fix: the
+metrics middleware handed a copy of the request down the chain, so the
+multiplexer set the matched route on the copy and every request log line fell
+back to the concrete path, which on a ceremony route is the subject reference.
+
+None of that replaces reading [THREAT-MODEL.md](THREAT-MODEL.md) before putting
+this in front of something that matters. A review is a point in time, and the
+model is what says which attacks were considered at all.
 
 ## Steps that need the maintainer
 
