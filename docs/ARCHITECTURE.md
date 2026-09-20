@@ -1,8 +1,85 @@
 # Architecture
 
-What the packages are, why the shape is what it is, and where each secret
-lives. This document describes the code in `internal/`; it does not restate the
-decisions, which are in [docs/adr](adr/README.md).
+How the pieces fit together, what the packages are, why the shape is what it
+is, and where each secret lives. This document describes the code in
+`internal/`; it does not restate the decisions, which are in
+[docs/adr](adr/README.md).
+
+## How it works end to end
+
+Before the packages, the arrangement an operator has to be able to draw. One
+process sits between an application that already has its own users and an
+authenticator that already exists. It keeps no session, no user directory and no
+copy of your account data; it answers one question, whether the person in front
+of your application is who they claim to be, and signs the answer so that the
+application can check it without asking again.
+
+```
+  -------------- visitor's device --------------     ----- your infrastructure -----
+
+  +---------------------+     +----------------+     +-----------------------------+
+  |  authenticator      |     |  front end     |     |  your application           |
+  |  FIDO2 key, phone,  |<-5->|  in the        |<-4--|                             |
+  |  platform, or a     |     |  browser       |     |  your users, your sessions, |
+  |  TOTP app           |     |                |--1->|  the API key, never the     |
+  |                     |     |                |--6->|  browser                    |
+  +---------------------+     +----------------+     +--------------+--------------+
+   step 5 is a local call, no network hop                           |  2  3  7  8
+                                                                    v
+                                                     +-----------------------------+
+   operator ------------------------------ 9 ------->|  n0passtemps-server         |
+   browser session or admin token,                   |  one static binary,         |
+   behind the IP allow list                          |  no sidecar, no broker      |
+                                                     |                             |
+                                                     |  /v1           API key      |
+                                                     |  /admin/v1     admin token  |
+                                                     |  /admin        session      |
+                                                     |  health, JWKS  no key       |
+                                                     +----+----------+---------+---+
+                                                       10 |       11 |      12 |
+                                                          v          v         v
+                                                +-----------+ +-----------+ +-------------+
+                                                | SQLite    | | keyring,  | | audit sink  |
+                                                | file, or  | | signing   | | optional,   |
+                                                | Postgres  | | key,      | | append-only |
+                                                | cluster   | | pepper    | | and offsite |
+                                                +-----------+ +-----------+ +-------------+
+```
+
+One sign-in, in order. Steps 1 to 8 are the whole of it; 9 to 12 stand
+permanently and are not part of any single request.
+
+| # | Flow | Transport | Credential | What travels |
+|---|---|---|---|---|
+| 1 | front end to your application | yours | your own session | that this person is asking to sign in |
+| 2 | your application to `/v1` | HTTPS | API key, held server side | `POST /v1/subjects`, then `POST /v1/webauthn/{ref}/assert` |
+| 3 | `/v1` back to your application | HTTPS | - | `challenge_id` and `options`. The challenge, the expected user handle and the user-verification requirement stay on the server |
+| 4 | your application to the front end | yours | your own session | `options` only, never `challenge_id` |
+| 5 | browser to authenticator and back | `navigator.credentials`, no network hop | the user gesture | the challenge, and a signature over it. For TOTP or a recovery code the person types the code instead and there is no step 5 at all |
+| 6 | front end to your application | yours | your own session | the credential, forwarded verbatim |
+| 7 | your application to `/v1` | HTTPS | API key | `.../assert/complete`, answered with `subject_id`, a signed assertion and the factors it proves |
+| 8 | your application to `/v1/.well-known/jwks.json` | HTTPS | none, deliberately | the public keys, so the assertion of step 7 is verified locally and cached. See [ADR 0004](adr/0004-return-a-signed-assertion-result.md) |
+| 9 | operator to `/admin` or `/admin/v1` | HTTPS | browser session, or an admin token | administration, behind `admin.ip_allow_list`, which is evaluated before the credential is |
+| 10 | server to its database | local file, or a Postgres connection with an explicit `sslmode` | - | every row of state there is. The process holds none of it after a restart |
+| 11 | server to its key material | file reads at startup, and the environment | - | the keyring, which the loader refuses inside `database.data_dir`, the Ed25519 signing key, and the subject pepper, which arrives in the environment and is unset once read |
+| 12 | server to the audit sink | HTTPS | bearer token | the hash-covered part of each audit entry, and nothing that names a person. Only when `audit.sink.endpoint` is set, and the only outbound connection the code makes besides the database |
+
+What the picture is claiming, and what the rest of this document then shows in
+the code:
+
+- **The browser never reaches the service.** Flows 2, 3, 7 and 8 start in your
+  application because that is where the API key can be kept. A front end that
+  called `/v1` directly would ship the key to every visitor. See
+  [ADR 0002](adr/0002-authenticate-every-call-to-the-public-api-surface.md).
+- **Your application keeps its users and its sessions.** Nothing here logs
+  anybody in. Step 7 returns a fact about a ceremony; turning that fact into a
+  session is yours to do.
+- **The answer survives the answerer.** Step 8 exists so that a verifier does
+  not have to trust the connection of step 7, or be online at all.
+- **The service initiates nothing but 10, 11 and 12**, and 12 is off by
+  default. One library is the exception: with `webauthn.metadata_path` set the
+  metadata decoder asks the CRL and OCSP endpoints named in the BLOB's signing
+  chain whether it is revoked, and fails soft when it cannot reach them.
 
 ## Shape of the whole thing
 

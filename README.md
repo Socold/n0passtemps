@@ -22,6 +22,54 @@ and asks this service only whether the person in front of it is who they claim.
 See [docs/FAQ.md](docs/FAQ.md#can-this-replace-my-identity-provider) for the
 full list of what is out of scope.
 
+## How it works
+
+A sign-in is eight steps, and the browser never touches the service. Your
+application relays both round trips because it is the only place the API key
+can be kept, the browser and the authenticator run the ceremony between
+themselves, and the answer comes back signed so that it can be checked without
+asking again.
+
+```
+  ------------- visitor's device -------------     ----- your infrastructure -----
+
+  +--------------------+     +---------------+     +-----------------------------+
+  |  authenticator     |     |  front end    |     |  your application           |
+  |  FIDO2 key, phone, |<-5->|  in the       |<-4--|                             |
+  |  platform, or a    |     |  browser      |     |  your users, your sessions  |
+  |  TOTP app          |     |               |--1->|  and the API key, which the |
+  |                    |     |               |--6->|  browser never sees         |
+  +--------------------+     +---------------+     +--------------+--------------+
+                                                                  |  2  3  7  8
+                                                                  v
+                                                   +-----------------------------+
+                                                   |  n0passtemps-server         |
+                                                   |  one static binary, its     |
+                                                   |  database and its keys      |
+                                                   +-----------------------------+
+```
+
+1. The front end tells your application that somebody wants to sign in.
+2. Your application, holding the API key server side, resolves the user
+   reference and starts a ceremony on `/v1`.
+3. The service answers with a `challenge_id` and the ceremony `options`. The
+   challenge, the expected user handle and the user-verification requirement
+   stay on the server.
+4. Your application forwards `options` to the browser and keeps `challenge_id`.
+5. The browser and the authenticator run the ceremony between themselves, with
+   no network hop. A TOTP code or a recovery code takes the place of this step.
+6. The front end posts the credential back to your application, which forwards
+   it verbatim.
+7. Your application completes the ceremony on `/v1` and receives `subject_id`, a
+   signed assertion and the factors it proves. Turning that into a session is
+   yours to do; this service does not log anybody in.
+8. Your application verifies the assertion against the JWK Set, offline and
+   cached, so a verifier never has to trust the connection that carried it.
+
+The administrative surface, the database, the key material and the optional
+audit sink are the same picture drawn in full, flow by flow, in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#how-it-works-end-to-end).
+
 ## Lite or complete
 
 One binary and one schema serve both. Moving between them is a configuration
