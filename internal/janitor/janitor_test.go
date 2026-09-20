@@ -1,13 +1,16 @@
 package janitor
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,9 +28,18 @@ var testNow = time.Date(2026, 6, 15, 4, 0, 0, 0, time.UTC)
 type fakeStore struct {
 	store.Store
 
+	// mu guards the call record, because the contention tests run two passes
+	// at once against one store.
+	mu sync.Mutex
+
 	// calls records every store call in order, as "method" or
 	// "method:subject", so a test can assert sequencing.
 	calls []string
+
+	// lock is the sweep lock. The tests that contend share one explicitly; the
+	// others get one on first use, so a test written before the lock existed
+	// still sweeps.
+	lock *leaseTable
 
 	// errs maps a call string to the error it returns.
 	errs map[string]error
@@ -53,11 +65,15 @@ type fakeStore struct {
 }
 
 func (f *fakeStore) note(call string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, call)
 	return f.errs[call]
 }
 
 func (f *fakeStore) called(prefix string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	n := 0
 	for _, c := range f.calls {
 		if c == prefix || strings.HasPrefix(c, prefix+":") {
@@ -65,6 +81,85 @@ func (f *fakeStore) called(prefix string) int {
 		}
 	}
 	return n
+}
+
+// recorded returns a copy of the call record, for the assertions that compare
+// the whole sequence.
+func (f *fakeStore) recorded() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.calls...)
+}
+
+// TryAcquireJanitorLock implements the sweep lock.
+func (f *fakeStore) TryAcquireJanitorLock(_ context.Context, owner string, now time.Time, lease time.Duration) (store.JanitorLock, error) {
+	if f.lock == nil {
+		f.lock = &leaseTable{}
+	}
+	return f.lock.acquire(owner, now, lease)
+}
+
+// leaseTable is the sweep lock the tests contend for: an owner and an expiry,
+// which is the SQLite mechanism in miniature. The PostgreSQL one lives on a
+// connection and cannot be modelled without one, so it is exercised against a
+// live cluster in internal/store/postgres instead.
+type leaseTable struct {
+	mu sync.Mutex
+
+	owner   string
+	expires time.Time
+
+	// err is returned in place of a verdict, for the pass whose database will
+	// not answer at all.
+	err error
+
+	granted  int
+	refused  int
+	released int
+}
+
+func (l *leaseTable) acquire(owner string, now time.Time, lease time.Duration) (store.JanitorLock, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.err != nil {
+		return nil, l.err
+	}
+	if l.owner != "" && now.Before(l.expires) {
+		l.refused++
+		return nil, fmt.Errorf("%w: held by %s", store.ErrLockHeld, l.owner)
+	}
+	l.owner, l.expires = owner, now.Add(lease)
+	l.granted++
+	return &fakeLease{table: l, owner: owner}, nil
+}
+
+func (l *leaseTable) counts() (granted, refused, released int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.granted, l.refused, l.released
+}
+
+func (l *leaseTable) heldBy() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.owner
+}
+
+type fakeLease struct {
+	table *leaseTable
+	owner string
+}
+
+func (f *fakeLease) Release(context.Context) error {
+	f.table.mu.Lock()
+	defer f.table.mu.Unlock()
+	if f.table.owner != f.owner {
+		return fmt.Errorf("the lease of %q had already been taken over", f.owner)
+	}
+	f.table.owner, f.table.expires = "", time.Time{}
+	f.table.released++
+	return nil
 }
 
 func (f *fakeStore) DeleteExpiredChallenges(_ context.Context, before time.Time) (int64, error) {
@@ -489,6 +584,262 @@ func TestApprovalsSweepFollowsFeature(t *testing.T) {
 				t.Errorf("calls = %v: the other sweeps must run whatever the feature setting", st.calls)
 			}
 		})
+	}
+}
+
+// newLoggingJanitor builds a janitor whose log can be read back, for the
+// assertions about what an operator sees. The handler is at debug level so that
+// a line demoted to debug still turns up and can be checked for its level.
+func newLoggingJanitor(cfg *config.Config, st store.Store, owner string, clock func() time.Time) (*Janitor, *bytes.Buffer) {
+	buf := &bytes.Buffer{}
+	log := slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	j := New(cfg, st, audit.NewRecorder(st, log), nil, log, clock)
+	j.owner = owner
+	return j, buf
+}
+
+// levelsOf returns the level of every log line whose message is msg.
+func levelsOf(t *testing.T, buf *bytes.Buffer, msg string) []string {
+	t.Helper()
+	var out []string
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("log line %q is not json: %v", line, err)
+		}
+		if rec["msg"] == msg {
+			level, _ := rec["level"].(string)
+			out = append(out, level)
+		}
+	}
+	return out
+}
+
+func TestSweepLock(t *testing.T) {
+	const skipped = "janitor pass skipped: another replica holds the sweep lock"
+
+	t.Run("a lock held elsewhere skips the pass without an error", func(t *testing.T) {
+		lock := &leaseTable{}
+		st := &fakeStore{lock: lock, due: []*store.ErasureRequest{erasure("er-1", "sub-1")}}
+		cfg := testConfig()
+		cfg.Audit.RetentionDays = 30
+
+		j, logs := newLoggingJanitor(cfg, st, "replica-a", func() time.Time { return testNow })
+
+		// Another replica took the lock a moment ago and is sweeping now.
+		if _, err := lock.acquire("replica-b", testNow, j.sweepTimeout); err != nil {
+			t.Fatalf("seed the lock: %v", err)
+		}
+
+		res := j.Sweep(context.Background())
+
+		if !res.Skipped {
+			t.Error("the pass was not reported as skipped, so a caller cannot tell it from a pass that found nothing to do")
+		}
+		if len(res.Errors) != 0 {
+			t.Errorf("errors = %v, want none: losing the lock is the normal outcome on every replica but one, not a fault", res.Errors)
+		}
+		if got := st.recorded(); len(got) != 0 {
+			t.Errorf("the skipped pass touched the store: %v", got)
+		}
+		if owner := lock.heldBy(); owner != "replica-b" {
+			t.Errorf("the lock is held by %q, want replica-b: the losing pass took it or cleared it", owner)
+		}
+
+		// An operator looking at a replica that does nothing must find the
+		// reason in the log, so the first skipped pass is not at debug.
+		if levels := levelsOf(t, logs, skipped); len(levels) != 1 || levels[0] != "INFO" {
+			t.Errorf("the first skipped pass logged %v, want one INFO line: a silent replica cannot be told from a broken one", levels)
+		}
+	})
+
+	t.Run("a repeated skip is demoted and taking the lock again is announced", func(t *testing.T) {
+		lock := &leaseTable{}
+		st := &fakeStore{lock: lock}
+		j, logs := newLoggingJanitor(testConfig(), st, "replica-a", func() time.Time { return testNow })
+
+		held, err := lock.acquire("replica-b", testNow, j.sweepTimeout)
+		if err != nil {
+			t.Fatalf("seed the lock: %v", err)
+		}
+		for i := 0; i < 3; i++ {
+			if res := j.Sweep(context.Background()); !res.Skipped {
+				t.Fatalf("pass %d swept although the lock was held elsewhere", i)
+			}
+		}
+
+		// One line per interval per idle replica would be noise, so only the
+		// transition is at info.
+		want := []string{"INFO", "DEBUG", "DEBUG"}
+		if levels := levelsOf(t, logs, skipped); !reflect.DeepEqual(levels, want) {
+			t.Errorf("three skipped passes logged %v, want %v", levels, want)
+		}
+
+		// The holder finishes, and this replica takes over. The transition back
+		// is worth a line of its own: it is how an operator sees which replica
+		// is now doing the work.
+		if err := held.Release(context.Background()); err != nil {
+			t.Fatalf("release the seeded lock: %v", err)
+		}
+		if res := j.Sweep(context.Background()); res.Skipped {
+			t.Fatal("the pass was skipped although the lock had been given back")
+		}
+		if levels := levelsOf(t, logs, "janitor sweep lock taken after a skipped pass"); !reflect.DeepEqual(levels, []string{"INFO"}) {
+			t.Errorf("taking the lock again logged %v, want one INFO line", levels)
+		}
+		if st.called("challenges") != 1 {
+			t.Errorf("the challenge sweep ran %d times, want 1", st.called("challenges"))
+		}
+	})
+
+	t.Run("a lock that cannot be taken at all is reported", func(t *testing.T) {
+		// Not a busy sibling but an unreachable database. The pass is still
+		// skipped, and the difference from a lost race is that this one is on
+		// the record as a fault.
+		boom := errors.New("database is unreachable")
+		st := &fakeStore{lock: &leaseTable{err: boom}}
+		j, logs := newLoggingJanitor(testConfig(), st, "replica-a", func() time.Time { return testNow })
+
+		res := j.Sweep(context.Background())
+
+		if !res.Skipped {
+			t.Error("the pass was not reported as skipped")
+		}
+		if len(res.Errors) != 1 || !errors.Is(res.Errors[0], boom) {
+			t.Errorf("errors = %v, want the lock failure: a janitor that cannot reach its database must not look healthy", res.Errors)
+		}
+		if got := st.recorded(); len(got) != 0 {
+			t.Errorf("the pass swept although the lock failed: %v", got)
+		}
+		if levels := levelsOf(t, logs, "janitor pass skipped: the sweep lock could not be taken"); !reflect.DeepEqual(levels, []string{"ERROR"}) {
+			t.Errorf("the failed lock logged %v, want one ERROR line", levels)
+		}
+	})
+
+	t.Run("the lock is given back after the pass", func(t *testing.T) {
+		lock := &leaseTable{}
+		st := &fakeStore{lock: lock}
+		j, _ := newLoggingJanitor(testConfig(), st, "replica-a", func() time.Time { return testNow })
+
+		if res := j.Sweep(context.Background()); res.Skipped {
+			t.Fatal("the first pass was skipped although nothing held the lock")
+		}
+		if owner := lock.heldBy(); owner != "" {
+			t.Errorf("the lock is still held by %q after the pass: the next interval would wait out a lease nobody holds", owner)
+		}
+		if _, _, released := lock.counts(); released != 1 {
+			t.Errorf("the lock was released %d times, want 1", released)
+		}
+	})
+
+	t.Run("a release still runs when the caller is cancelled", func(t *testing.T) {
+		// A pass usually ends at a shutdown, and a release that inherited the
+		// cancelled context would never run, leaving the lock to expire.
+		lock := &leaseTable{}
+		st := &fakeStore{lock: lock}
+		j, _ := newLoggingJanitor(testConfig(), st, "replica-a", func() time.Time { return testNow })
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		j.Sweep(ctx)
+
+		if owner := lock.heldBy(); owner != "" {
+			t.Errorf("the lock is still held by %q after a cancelled pass", owner)
+		}
+	})
+
+	t.Run("a lease left by a dead holder stops the sweep for one lease and no longer", func(t *testing.T) {
+		// The holder was killed mid-sweep, so it never released anything and
+		// never will. Only the expiry can free the lock.
+		lock := &leaseTable{}
+		st := &fakeStore{lock: lock}
+		now := testNow
+		j, _ := newLoggingJanitor(testConfig(), st, "replica-a", func() time.Time { return now })
+
+		if _, err := lock.acquire("replica-dead", now, j.sweepTimeout); err != nil {
+			t.Fatalf("seed the lock: %v", err)
+		}
+
+		if res := j.Sweep(context.Background()); !res.Skipped {
+			t.Error("the pass ran while the dead holder's lease was still live")
+		}
+
+		now = testNow.Add(j.sweepTimeout)
+		res := j.Sweep(context.Background())
+
+		if res.Skipped {
+			t.Error("a replica killed mid-sweep wedged the deployment: the lease outlived the holder without ever expiring")
+		}
+		if st.called("challenges") != 1 {
+			t.Errorf("the challenge sweep ran %d times after the lease expired, want 1", st.called("challenges"))
+		}
+		// The lease is exactly as long as one pass may run, so on the default
+		// five-minute interval a killed holder costs no pass at all.
+		if j.sweepTimeout != 2*time.Minute {
+			t.Errorf("the sweep timeout is %v: the lease is taken for that long, and the value is what an operator is told a dead holder costs", j.sweepTimeout)
+		}
+	})
+}
+
+// gateStore holds a pass inside the store until the test lets it out, so that a
+// second janitor meets the lock while the first genuinely holds it. Two
+// sequential passes would not: the first gives the lock back before the second
+// asks for it.
+type gateStore struct {
+	*fakeStore
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *gateStore) DeleteExpiredChallenges(ctx context.Context, before time.Time) (int64, error) {
+	g.entered <- struct{}{}
+	<-g.release
+	return g.fakeStore.DeleteExpiredChallenges(ctx, before)
+}
+
+func TestSweepLockUnderContention(t *testing.T) {
+	lock := &leaseTable{}
+	shared := &fakeStore{lock: lock}
+	gated := &gateStore{
+		fakeStore: shared,
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+
+	a, _ := newLoggingJanitor(testConfig(), gated, "replica-a", func() time.Time { return testNow })
+	b, _ := newLoggingJanitor(testConfig(), shared, "replica-b", func() time.Time { return testNow })
+
+	done := make(chan Result, 1)
+	go func() { done <- a.Sweep(context.Background()) }()
+
+	<-gated.entered
+	resB := b.Sweep(context.Background())
+	close(gated.release)
+	resA := <-done
+
+	if resA.Skipped {
+		t.Error("the replica holding the lock skipped its own pass")
+	}
+	if !resB.Skipped || len(resB.Errors) != 0 {
+		t.Errorf("the second replica returned %+v, want a skipped pass with no error", resB)
+	}
+	if got := shared.called("challenges"); got != 1 {
+		t.Errorf("the challenge sweep ran %d times for one interval, want 1: both replicas swept it", got)
+	}
+	if granted, refused, _ := lock.counts(); granted != 1 || refused != 1 {
+		t.Errorf("the lock was granted %d times and refused %d, want 1 and 1", granted, refused)
+	}
+
+	// The lock returns to the deployment rather than to the replica that held
+	// it, so the next interval goes to whichever replica asks first.
+	if res := b.Sweep(context.Background()); res.Skipped {
+		t.Error("the second replica was skipped again after the first had finished: the lock was not handed on")
+	}
+	if got := shared.called("challenges"); got != 2 {
+		t.Errorf("the challenge sweep ran %d times over two intervals, want 2", got)
 	}
 }
 

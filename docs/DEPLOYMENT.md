@@ -871,6 +871,58 @@ Then, in order:
 Everything after that is in [ADMIN-GUIDE.md](ADMIN-GUIDE.md), including the rule
 that the last usable full administrator cannot be revoked and why.
 
+## Running more than one replica
+
+Supported on PostgreSQL, and only there. What decides it is not the application
+but the engine: the replicas share one database, they hold no state of their own
+between requests, and SQLite admits one writer in one process.
+
+| Engine | Replicas | Why |
+|---|---|---|
+| PostgreSQL | As many as the connection budget allows | Real concurrency. Multiply `database.max_open_conns` by the replica count and keep the total under the server's `max_connections` |
+| SQLite | One | No concurrent writers across processes or pods. Form 4 therefore means `replicas: 1` and a PersistentVolumeClaim, as its prerequisites say |
+
+Three things are shared once the replicas share a database, and each is worth
+knowing before the second replica starts.
+
+**The rate limits are shared.** The throttle keeps no state in the process, so a
+caller's attempts count once across the deployment rather than once per replica.
+Nothing to configure.
+
+**The audit chain stays one chain.** Appends serialise across every replica
+through an advisory lock, which is what keeps two replicas from chaining two
+entries onto the same predecessor. It bounds the audited request rate for the
+deployment as a whole; [MONITORING.md](MONITORING.md) says what to watch.
+
+**The janitor sweeps once per interval, not once per replica.** Every replica
+runs its own janitor, and each pass first takes a deployment-wide sweep lock.
+The replica that gets it sweeps; the others skip that pass and say so in the
+log. The sweeps are idempotent, so the lock removes duplicated work rather than
+preventing damage: a deployment where it never worked would be correct and
+merely busier.
+
+A replica killed mid-sweep does not hold the lock. On PostgreSQL it is a
+session-level advisory lock, which the server drops when the holder's connection
+ends, so the next pass anywhere finds it free; the one slow case is a replica
+whose host vanishes without closing anything, where the lock lasts until the
+server's TCP keepalives give up on the session. On SQLite it is a lease row
+valid for one sweep timeout, two minutes, so a killed holder costs nothing at
+the default five-minute `features.janitor_interval` and at most one pass at a
+shorter one.
+
+Nothing needs configuring for any of this, and there is no leader election to
+run: a replica that loses the lock is not degraded, it is idle for that
+interval. [MONITORING.md](MONITORING.md) has the log lines that tell an idle
+replica from a broken janitor.
+
+Two warnings about SQLite, since nothing enforces the row above. Two processes
+opening one file over a network mount is not a supported deployment, and the
+usual symptom is a startup refusal about `journal_mode`, because some network
+mounts cannot do write-ahead logging. The janitor lease is a real lease on
+SQLite and does coordinate two such processes, but it coordinates housekeeping
+only: the rest of the schema still assumes one writer, so do not read the lease
+as support for sharing a file.
+
 ## Related documents
 
 | Document | What it covers |

@@ -50,6 +50,15 @@ var (
 	// and the clone check compares counters: a value that wrapped into the
 	// valid range can only make that check pass where it should have failed.
 	ErrCorruptRow = errors.New("store: stored value out of range")
+
+	// ErrLockHeld is returned when a lock could not be taken because somebody
+	// else holds it.
+	//
+	// Like ErrStaleWrite it is not a fault. It is how the replica that lost the
+	// race is told so, and the answer to it is to do nothing: a caller that
+	// retried or reported a problem would turn the normal steady state of every
+	// replica but one into noise.
+	ErrLockHeld = errors.New("store: lock is held elsewhere")
 )
 
 // AuditFilter narrows an audit log query. Zero values mean "no constraint".
@@ -150,6 +159,7 @@ type Store interface {
 	ApprovalStore
 	ErasureStore
 	SealedStore
+	JanitorLockStore
 }
 
 // TenantStore provisions and reads tenants.
@@ -583,4 +593,48 @@ type SealedStore interface {
 	// unconditional write would put back a value derived from the one that was
 	// replaced. It returns ErrNotFound when the row has gone.
 	ReplaceSealed(ctx context.Context, kind SealedKind, id string, old, replacement []byte) error
+}
+
+// JanitorLock is a held janitor lock. The only thing its holder can do with it
+// is give it back.
+//
+// An implementation must also work when Release is never called, because a
+// replica killed mid-sweep never calls it. See JanitorLockStore.
+type JanitorLock interface {
+	// Release gives the lock back, so that the next interval is free for
+	// whichever replica gets there first rather than having to wait for a
+	// holder that has already finished.
+	Release(ctx context.Context) error
+}
+
+// JanitorLockStore coordinates the janitor sweeps across replicas.
+//
+// The janitor runs in process, so a deployment of several replicas performs
+// every sweep once per replica. Each sweep is an idempotent conditional delete,
+// so the duplication is waste and not damage, and this lock removes the waste
+// and nothing else. Nothing a sweep does may come to depend on holding it:
+// losing the race is a skipped pass, not an error, and two replicas that both
+// sweep one interval still leave the same database behind.
+//
+// The two engines implement it with different primitives, because they offer
+// different ones, and each difference is argued where it applies. What they
+// agree on is that the lock is deployment-wide rather than per tenant, that an
+// attempt which loses reports ErrLockHeld instead of waiting, and that a holder
+// which dies without releasing it loses it within lease.
+type JanitorLockStore interface {
+	// TryAcquireJanitorLock takes the lock, or reports ErrLockHeld when
+	// another replica holds it.
+	//
+	// It never blocks on the holder. Waiting would land this replica at the
+	// start of a sweep the holder has just completed, which is the duplicated
+	// work the lock exists to remove, and a wait bounded by somebody else's
+	// sweep would hold this pass open past its own timeout.
+	//
+	// owner names the calling replica, for the operator reading the lock and
+	// for Release. now is that replica's own clock, and lease is how long the
+	// lock survives a holder that never releases it, which is what stops a
+	// replica killed mid-sweep from holding it for ever. An implementation
+	// whose primitive is bound to the connection rather than to a clock
+	// ignores both, and says so.
+	TryAcquireJanitorLock(ctx context.Context, owner string, now time.Time, lease time.Duration) (JanitorLock, error)
 }

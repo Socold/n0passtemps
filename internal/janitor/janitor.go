@@ -16,16 +16,34 @@
 // The service ships as one binary, and an operator who has to install a
 // separate scheduler to keep it healthy will eventually not. Running the sweeps
 // in-process means a correctly deployed service is a maintained service. The
-// cost is that a deployment running several replicas performs each sweep once
-// per replica. Every sweep is idempotent and expressed as a conditional
-// delete, so the duplication is wasteful rather than harmful; a coordinating
-// lock belongs with the multi-replica work in a later phase.
+// cost is that a deployment running several replicas would perform each sweep
+// once per replica, which the lock below removes.
+//
+// # The sweep lock
+//
+// One pass per interval across the deployment, rather than one per replica. The
+// lock is taken before the pass and given back after it, and a replica that
+// cannot take it skips its pass.
+//
+// Skipping is not a failure and nothing below treats it as one. Every sweep is
+// an idempotent conditional delete, so two replicas sweeping the same interval
+// leave exactly the same database behind; the lock removes wasted work and
+// takes on no correctness duty in exchange. A deployment whose lock never
+// worked at all would be as correct as this one and merely busier, which is the
+// property to keep whenever this code is changed.
+//
+// What the lock is made of differs by engine, because the engines offer
+// different primitives: a session-level advisory lock on PostgreSQL, released
+// by the server the instant a holder's connection dies, and a lease row with an
+// expiry on SQLite. Both are argued at their implementation, in
+// internal/store/{postgres,sqlite}/janitor.go.
 package janitor
 
 import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -51,6 +69,16 @@ type Janitor struct {
 	// sweepTimeout bounds one pass. A sweep that hangs on a slow database must
 	// not hold the interval open indefinitely, or the next pass never starts.
 	sweepTimeout time.Duration
+
+	// owner names this replica in the sweep lock, so that an operator reading
+	// the lock or a log line can tell which process is doing the sweeping.
+	owner string
+
+	// skipping records whether the previous pass lost the lock, so a replica
+	// that is not the one sweeping says so once instead of every interval. It
+	// is read and written only by a pass, and a Janitor runs one pass at a
+	// time.
+	skipping bool
 }
 
 // New builds a Janitor.
@@ -69,7 +97,33 @@ func New(cfg *config.Config, st store.Store, rec *audit.Recorder, al *alerts.Eng
 		log:          log,
 		now:          clock,
 		sweepTimeout: 2 * time.Minute,
+		owner:        replicaOwner(),
 	}
+}
+
+// releaseTimeout bounds giving the lock back.
+//
+// It is short and it is separate from the sweep timeout, because the release
+// runs after the pass and often during a shutdown. A release that waited as long
+// as a sweep may would delay the exit; one that fails costs the next interval at
+// worst, since the lock is dropped when this process's connection ends or when
+// its lease runs out.
+const releaseTimeout = 5 * time.Second
+
+// replicaOwner names this process in the sweep lock.
+//
+// The host and the process identifier together, because neither is enough
+// alone: two replicas of one deployment share neither, while two processes on
+// one host share the host and two pods restarted in turn can be given the same
+// name. A hostname that cannot be read is not worth refusing to sweep over, so
+// it degrades to the identifier; the owner is a label for an operator and the
+// condition on a release, never a credential.
+func replicaOwner() string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "unknown"
+	}
+	return host + "/" + strconv.Itoa(os.Getpid())
 }
 
 // SetKEKProbe wires in the keyring status, so an overdue rotation raises an
@@ -118,6 +172,11 @@ type Result struct {
 	Erasures    int64
 	AuditPruned int64
 
+	// Skipped is true when the pass did not run because another replica held
+	// the sweep lock. It is the normal outcome on every replica but one, so a
+	// skipped pass reports no counts and, by itself, no error.
+	Skipped bool
+
 	// Errors holds whatever failed, so a caller sees every problem from one
 	// pass rather than only the first.
 	Errors []error
@@ -129,11 +188,46 @@ type Result struct {
 // are collected rather than returned at the first sign of trouble. A database
 // that is briefly unavailable should produce one noisy interval, not a janitor
 // that has quietly given up on five of its six duties.
+//
+// The pass begins by taking the deployment's sweep lock and ends by giving it
+// back. Losing it means another replica is doing this interval, and the pass
+// returns having done nothing; see the package comment on why that is not a
+// failure.
 func (j *Janitor) Sweep(ctx context.Context) Result {
-	ctx, cancel := context.WithTimeout(ctx, j.sweepTimeout)
+	parent := ctx
+	ctx, cancel := context.WithTimeout(parent, j.sweepTimeout)
 	defer cancel()
 
 	now := j.now().UTC()
+
+	// The lease asked for is the sweep timeout exactly. It has to be at least
+	// that long, or a lease could run out under a sweep that is still running
+	// and let a second replica start another one; and no longer than that,
+	// because on an engine that expires leases rather than noticing a dead
+	// connection this is also how long a replica killed mid-sweep keeps the
+	// lock. The sweep timeout is the only duration that is both.
+	lock, err := j.store.TryAcquireJanitorLock(ctx, j.owner, now, j.sweepTimeout)
+	switch {
+	case errors.Is(err, store.ErrLockHeld):
+		j.reportSkipped(ctx)
+		return Result{Skipped: true}
+	case err != nil:
+		// Not a busy sibling but a database that will not answer, so it is
+		// reported as the fault it is. The pass is still skipped rather than
+		// attempted: a sweep whose database is unreachable has nothing it can
+		// do, and the error is already on the record.
+		j.log.ErrorContext(ctx, "janitor pass skipped: the sweep lock could not be taken",
+			slog.String("owner", j.owner), slog.Any("error", err))
+		return Result{Skipped: true, Errors: []error{err}}
+	}
+	defer j.releaseLock(parent, lock)
+
+	if j.skipping {
+		j.skipping = false
+		j.log.InfoContext(ctx, "janitor sweep lock taken after a skipped pass",
+			slog.String("owner", j.owner))
+	}
+
 	var res Result
 
 	if n, err := j.store.DeleteExpiredChallenges(ctx, now); err != nil {
@@ -330,9 +424,60 @@ func (j *Janitor) report(ctx context.Context, res Result) {
 	j.log.InfoContext(ctx, "janitor pass completed", attrs...)
 }
 
+// reportSkipped logs a pass another replica is doing.
+//
+// The first pass to lose the lock says so at info, because a replica that
+// appears to be doing nothing is otherwise indistinguishable from a broken one,
+// and the operator asking why needs the answer in the log rather than in this
+// comment. Every pass after it says so at debug: the state has not changed, and
+// one line per interval per idle replica for the life of the deployment is
+// noise. Taking the lock again is logged where it happens, so the pair of
+// transitions is what an operator reads.
+//
+// It stays out of the alert engine on purpose. A skipped pass is the correct
+// steady state of every replica but one, so an alert type for it would fire on
+// every healthy multi-replica deployment; the condition actually worth alerting
+// on is no successful pass anywhere, which the counts on "janitor pass
+// completed" and the error level on a failed one already carry.
+func (j *Janitor) reportSkipped(ctx context.Context) {
+	const msg = "janitor pass skipped: another replica holds the sweep lock"
+	if j.skipping {
+		j.log.DebugContext(ctx, msg, slog.String("owner", j.owner))
+		return
+	}
+	j.skipping = true
+	j.log.InfoContext(ctx, msg, slog.String("owner", j.owner))
+}
+
+// releaseLock gives the sweep lock back.
+//
+// The context is derived from the caller's without its cancellation, because a
+// pass often ends for the very reason that the service is shutting down, and a
+// release inheriting that cancelled context would not run at all. The cost of
+// not releasing is bounded but real: the next pass then waits for the lease to
+// expire, or for this process's connection to be noticed, which is exactly the
+// wait the release exists to avoid.
+func (j *Janitor) releaseLock(parent context.Context, lock store.JanitorLock) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), releaseTimeout)
+	defer cancel()
+
+	if err := lock.Release(ctx); err != nil {
+		// Worth a warning and not an error: the lock is released by its own
+		// expiry or by the connection ending, so the deployment recovers on its
+		// own and loses at most one interval.
+		j.log.WarnContext(ctx, "janitor sweep lock not released",
+			slog.String("owner", j.owner), slog.Any("error", err))
+	}
+}
+
 // Once runs a single pass and returns its result. It exists for the
 // administrative command line and for tests, which should not have to wait for
 // an interval.
+//
+// It takes the sweep lock like any other pass, so a one-off run against a
+// deployment that is already sweeping comes back with Skipped set rather than
+// running a second pass beside the first. The caller reads that field: an empty
+// result and a skipped one are not the same answer.
 func (j *Janitor) Once(ctx context.Context) Result { return j.Sweep(ctx) }
 
 // Starter runs a Janitor in a goroutine and waits for it on shutdown.

@@ -49,6 +49,45 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   [docs/WEBAUTHN.md](docs/WEBAUTHN.md) has the reasoning under "Usernameless
   sign-in".
 
+- **A multi-replica janitor lock**, from [docs/ROADMAP.md](docs/ROADMAP.md)
+  section 2.4. The janitor runs in process, so a deployment of several replicas
+  used to perform every sweep once per replica. Each sweep is an idempotent
+  conditional delete, so that was waste rather than damage, and the lock removes
+  the waste without taking on any correctness duty in exchange: a pass that
+  loses the lock is skipped, not failed, and a deployment whose lock never
+  worked would be as correct as one whose lock does and merely busier.
+
+  `TryAcquireJanitorLock` joins the store interface, with the new sentinel
+  `ErrLockHeld` for the attempt that loses. The two engines implement it
+  differently, because they offer different primitives. On PostgreSQL it is a
+  session-level advisory lock, `pg_try_advisory_lock` on one connection held for
+  the length of the pass, which the server drops the moment the holder's
+  connection dies: a replica killed with SIGKILL mid-sweep frees it as fast as
+  the kernel closes its sockets, and no expiry has to run out first. On SQLite
+  it is a lease row with an expiry, in the new `janitor_leases` table, taken for
+  exactly as long as one sweep may run, which is two minutes; a holder killed
+  mid-sweep therefore costs nothing at the default five-minute interval. It is a
+  real lease there and not a no-op: one process and one file is the only
+  supported arrangement, but nothing prevents two processes from opening one
+  file over a network mount, and the engine's own write lock does nothing about
+  two processes that have each taken their turn at it and moved on to the sweep.
+  The PostgreSQL migration declares `janitor_leases` and leaves it empty, so
+  that both engines still declare the same schema.
+
+  What an operator reads: the first pass a replica skips logs
+  `janitor pass skipped: another replica holds the sweep lock` at info, every
+  pass after it logs the same message at debug, and taking the lock again logs
+  `janitor sweep lock taken after a skipped pass` at info. A replica doing
+  nothing because a sibling holds the lock is therefore distinguishable from a
+  broken one without a line every interval for the life of the deployment. There
+  is no new alert type, deliberately: a skipped pass is the correct steady state
+  of every replica but one. A lock that cannot be taken at all, as opposed to
+  one held elsewhere, is a database that will not answer and is logged at error.
+
+  [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) has what is supported per engine
+  under "Running more than one replica", and
+  [docs/MONITORING.md](docs/MONITORING.md) has the log lines.
+
 ## [1.1.0] - 2026-09-19
 
 ### Added
