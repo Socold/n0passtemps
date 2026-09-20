@@ -289,8 +289,8 @@ for this, and it is the item most often skipped.
 
 ### A new dependency needs an argument
 
-Six direct dependencies, each of which earns its place;
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) says why for each. A seventh needs
+Nine direct dependencies, each of which earns its place;
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) says why for each. A tenth needs
 a paragraph in the pull request answering three questions: what it does that the
 standard library does not, what its own transitive closure is, and what happens
 to this project if it is abandoned.

@@ -442,7 +442,7 @@ needs an HSM or an external KMS, which this service does not provide.
 
 ## Dependency policy
 
-Eight direct dependencies, and each one earns its place:
+Nine direct dependencies, and each one earns its place:
 
 | Module | Why it is not written here |
 |---|---|
@@ -453,6 +453,7 @@ Eight direct dependencies, and each one earns its place:
 | `golang.org/x/crypto` | Argon2id. |
 | `github.com/google/uuid` | Identifier generation. |
 | `github.com/google/go-tpm` | The TPM 2.0 command encoding behind the `tpm` KEK provider, which seals the keyring's file key to the machine's TPM, and behind the wizard command that creates the sealed keyring. The marshalling of those structures is not something to write by hand, and the module was already in the build: `go-webauthn/webauthn` requires it for the TPM attestation format. See [ADR 0019](adr/0019-seal-the-keyring-to-a-tpm.md). |
+| `github.com/go-webauthn/x` | Certificate revocation checking, which `internal/webauthn/metadata.go` asks about every certificate in an attestation chain. It comes from the same authors as the relying party library and is already in its closure, so it adds nothing beyond a name in go.mod. It was listed as indirect there until 2026-09-20, which understated the count by one: the import has been direct since the ceremonies were first driven against the store. |
 | `github.com/fxamacker/cbor/v2` | Imported by test code only: the software authenticator that drives the ceremonies end to end in `internal/webauthn` encodes its attestation objects and COSE keys in CTAP2 canonical CBOR. No production package imports it directly, and it adds nothing to the closure either, since `go-webauthn/webauthn` decodes with the same module. |
 
 Everything else is the standard library. The JWS is assembled and parsed by

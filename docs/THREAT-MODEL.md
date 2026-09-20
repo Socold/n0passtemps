@@ -431,7 +431,7 @@ sufficiently convincing phishing page.
 
 ### 7. A malicious dependency
 
-**Starts with** commit access to one of the eight direct dependencies, or to
+**Starts with** commit access to one of the nine direct dependencies, or to
 anything in their transitive closure, or to a GitHub Action used by the
 workflows.
 
@@ -451,7 +451,7 @@ workflows.
 
 | Control | Effect |
 |---|---|
-| Eight direct dependencies | Each argued for in [ARCHITECTURE.md](ARCHITECTURE.md). The JWS is hand-written rather than taken from a JWT library, and the administration interface is `html/template` rather than React, which keeps Node.js and its transitive closure out of the build and out of CI entirely; see [ADR 0012](adr/0012-server-rendered-administration-interface.md) |
+| Nine direct dependencies | Each argued for in [ARCHITECTURE.md](ARCHITECTURE.md). The JWS is hand-written rather than taken from a JWT library, and the administration interface is `html/template` rather than React, which keeps Node.js and its transitive closure out of the build and out of CI entirely; see [ADR 0012](adr/0012-server-rendered-administration-interface.md) |
 | `go.sum` and `go mod verify` | A published version cannot change under a fixed hash: the Go command checks every download against `go.sum`. `go mod verify` re-hashes the module cache on disk, which on a runner may have been restored rather than downloaded. It runs in the `security` workflow, in the gate job of the `release` workflow before anything is built, and in `make tidy`; the `ci` workflow does not run it |
 | `govulncheck`, weekly and on every push | A new advisory turns the security workflow red without a commit |
 | `gosec`, CodeQL, `gitleaks`, Trivy, dependency review | The `security` workflow. Trivy fails the run on a high or critical vulnerability that has a fix, in the dependencies or in the built image; everything else it finds is reported to code scanning |

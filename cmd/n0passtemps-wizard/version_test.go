@@ -107,3 +107,61 @@ func firstVersionIn(s string) string {
 	}
 	return m[1]
 }
+
+// TestTheDocumentedDependencyCountIsTheRealOne holds the number four documents
+// state to what go.mod actually declares.
+//
+// It is not a vanity figure. docs/THREAT-MODEL.md counts a supply-chain
+// attacker's entry points with it, so a number that drifts low understates the
+// attack surface in the one document written to describe it. It had drifted
+// twice: the review found "six" where there were eight, corrected three places
+// and missed CONTRIBUTING.md, and go.mod itself listed go-webauthn/x as
+// indirect while internal/webauthn imported it directly, which hid a ninth.
+func TestTheDocumentedDependencyCountIsTheRealOne(t *testing.T) {
+	raw, err := os.ReadFile("../../go.mod")
+	if err != nil {
+		t.Fatalf("read go.mod: %v", err)
+	}
+
+	// The first require block holds the direct ones; indirect entries carry the
+	// marker and the second block is entirely indirect.
+	block := regexp.MustCompile(`(?s)require \((.*?)\n\)`).FindSubmatch(raw)
+	if block == nil {
+		t.Fatal("go.mod has no require block")
+	}
+	direct := 0
+	for _, line := range strings.Split(string(block[1]), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "//") || strings.Contains(line, "// indirect") {
+			continue
+		}
+		direct++
+	}
+	if direct == 0 {
+		t.Fatal("no direct dependencies were found; the shape of go.mod has changed")
+	}
+
+	words := map[int]string{6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve"}
+	want, ok := words[direct]
+	if !ok {
+		t.Fatalf("go.mod declares %d direct dependencies and this test has no word for that", direct)
+	}
+
+	for _, doc := range []string{"../../docs/ARCHITECTURE.md", "../../docs/THREAT-MODEL.md",
+		"../../CONTRIBUTING.md", "../../README.md"} {
+		body, rerr := os.ReadFile(doc)
+		if rerr != nil {
+			t.Fatalf("read %s: %v", doc, rerr)
+		}
+		stated := regexp.MustCompile(`(?i)\b(six|seven|eight|nine|ten|eleven|twelve) direct`).FindAllStringSubmatch(string(body), -1)
+		if len(stated) == 0 {
+			continue
+		}
+		for _, m := range stated {
+			if !strings.EqualFold(m[1], want) {
+				t.Errorf("%s says %q direct dependencies and go.mod declares %d",
+					strings.TrimPrefix(doc, "../../"), m[1], direct)
+			}
+		}
+	}
+}

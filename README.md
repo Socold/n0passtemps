@@ -414,7 +414,7 @@ an orthography choice. Recovery codes are
 | An approval runs what was approved, for the person who asked | Approvals are redeemed by the original requester, bound to the operation, the requester and the payload, and spent once | [ADR 0013](docs/adr/0013-approvals-are-redeemed-not-executed.md) |
 | No administrative token in a log stream | The first token is created by a one-shot command that writes to the operator's terminal | [ADR 0014](docs/adr/0014-bootstrap-by-explicit-command.md) |
 | One anti-replay surface, not two | TOTP only, with a single high-water mark advanced by compare-and-swap | [ADR 0011](docs/adr/0011-drop-hotp.md) |
-| The build has no Node.js in it | Server-rendered interface, embedded templates, eight direct Go dependencies | [ADR 0012](docs/adr/0012-server-rendered-administration-interface.md) |
+| The build has no Node.js in it | Server-rendered interface, embedded templates, nine direct Go dependencies | [ADR 0012](docs/adr/0012-server-rendered-administration-interface.md) |
 | Personal data pseudonymised at rest | Subject references stored as an HMAC under a separate pepper, plus an envelope-encrypted copy. No substring search, because that would undo the encryption | [docs/GDPR.md](docs/GDPR.md) |
 | Secrets never in a log line | Redaction enforced in the log handler, not at the call site | [docs/MONITORING.md](docs/MONITORING.md) |
 
