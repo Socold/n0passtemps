@@ -982,6 +982,118 @@ With `features.kek_rotation_reminder` on, the janitor raises the
 `kek.rotation_interval`. The keyring file records no history, so the age is
 anchored on the oldest audit entry, which errs towards reporting early.
 
+## Verifying a backup
+
+Three artefacts are backed up separately, on purpose: the database, the keyring
+and the pepper. Nothing about holding all three proves that they belong
+together, and the moment an operator usually finds out is during a restore,
+which is the worst moment available.
+
+```bash
+export N0PASSTEMPS_SUBJECT_PEPPER=...     # from wherever you keep it
+n0passtemps-wizard verify \
+  -db /backup/n0passtemps-2026-09-18.db \
+  -keyring /backup/keyring.json
+```
+
+A trio that opens:
+
+```
+Database:  /backup/n0passtemps-2026-09-18.db
+Keyring:   /backup/keyring.json (mode 0600, current version 1, retained [1])
+Pepper:    N0PASSTEMPS_SUBJECT_PEPPER (32 bytes)
+
+The database is open read-only, so verifying it cannot change it. Nothing
+below writes, migrates or upgrades anything.
+
+Integrity:  SQLite reports the file structure as ok
+Schema:     4 migrations applied, through 0004_janitor_lease
+
+Sealed records, across every tenant, by the key version they were sealed
+under:
+
+  subjects.ref_sealed          version 1      412 records  key present
+  totp_secrets.secret_sealed   version 1      143 records  key present
+
+Unsealed 2 records and every one authenticated.
+Recomputed a subject's lookup value from its sealed reference under the
+pepper, and it matches the value stored on the row.
+  subject    b7779ae8-86ca-4a21-87b0-6e8e01fcb8d0
+
+The trio opens.
+```
+
+The report then states what that proved and what it did not, which is the half
+worth reading twice: what was covered is one record per key version per sealed
+column, plus one subject's lookup value.
+
+### It is a routine, not a rescue
+
+The point of the command is that it runs on a schedule, against the backup you
+have not needed yet. The exit status is the interface, so it goes in a cron job:
+
+```cron
+# Sundays, an hour after the weekly backup. Anything on stderr is mailed.
+30 4 * * 0  N0PASSTEMPS_SUBJECT_PEPPER=$(cat /etc/n0passtemps/pepper) \
+            /usr/local/bin/n0passtemps-wizard verify \
+              -db /backup/n0passtemps-latest.db \
+              -keyring /backup/keyring.json >/dev/null
+```
+
+| Status | Meaning | What to do |
+|---|---|---|
+| 0 | The trio opens | Nothing. This is the answer you wanted before the disaster, not during it |
+| 1 | The trio does not open | Read the line on stderr; it names which of the three is wrong. [TROUBLESHOOT.md](TROUBLESHOOT.md) has a verdict-by-verdict table |
+| 2 | Verification could not run | No verdict was reached. A path is wrong, the pepper is not exported, the database holds nothing sealed, or it came from a newer build |
+
+Two statuses rather than one, because "your backup will not open" and "you
+typed the path wrongly" need different reactions, and reporting both as failure
+teaches an operator to ignore the alert.
+
+### What it actually checks
+
+- It **decrypts**. Parsing a keyring proves only that it is a keyring; opening
+  an envelope-encrypted record proves it is *this database's* keyring, because
+  the payload is authenticated and AES-GCM rejects a wrong key rather than
+  returning plausible plaintext. One record per key version per sealed column,
+  or every record with `-all`.
+- It **recomputes a lookup value**. The stored reference is unsealed with the
+  keyring, hashed again under the pepper, and matched against the `ref_hmac`
+  the row is found by. That needs both secrets to be the right ones, so it is
+  the check that ties the trio together rather than testing two of its corners.
+- It reads the **key version out of every sealed record's header**, which needs
+  no key at all, and reports the counts per version against the versions the
+  keyring holds. A keyring taken before a rotation therefore produces the
+  diagnosis and not a shrug: `the keyring has no key version 2, which 143
+  records in totp_secrets.secret_sealed are sealed under`.
+- It says so precisely, unlike the API surface, which deliberately says
+  nothing. The difference is the audience: this runs on your host, against your
+  backup, for somebody who already holds all three secrets.
+- It prints no key material, no pepper, no token, no recovery code and no
+  subject reference. Counts, versions, identifiers and verdicts only.
+
+It does **not** write to the database. The file is opened through SQLite's
+read-only mode, so a write is refused by SQLite rather than merely avoided, and
+the command does not use the store package at all, so the migration runner is
+not reachable from it. Reading a database in write-ahead-log mode does make
+SQLite create a `-shm` index file beside it; the backup's own bytes, database
+and log alike, are untouched. If the directory must stay exactly as it is, run
+the check against a copy.
+
+### Two things it cannot check
+
+`subject.seal_reference = false` leaves nothing to recompute the pepper from.
+The command says so and exits 2 rather than reporting a trio it only half
+checked. Pass `-ref` with a reference you know is enrolled and it checks the
+pepper against that subject's stored lookup value instead. That path is weaker
+and the message says why: a miss means either a wrong pepper or a reference
+that was never enrolled here, and the two are indistinguishable from outside.
+
+PostgreSQL is out of scope, and the help text gives the reason: a `pg_dump`
+archive cannot be read without restoring it into a server first, so "here are
+my three artefacts" has no meaning for it. [DEPLOYMENT.md](DEPLOYMENT.md) gives
+the restore-and-check sequence instead.
+
 ## Verifying the audit chain
 
 ```bash

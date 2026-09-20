@@ -7,6 +7,17 @@ import (
 	"strings"
 )
 
+// DecodePepper reads a pepper from the textual form an operator supplies, so a
+// tool outside the server can read the same value the server would without
+// building a Service, which needs a store and a sealer.
+//
+// The length is not checked here. A caller that is reporting on a backup wants
+// to say how many bytes it found; New adds the MinPepperBytes check for the
+// running service.
+func DecodePepper(raw string) ([]byte, error) {
+	return decodePepper(raw)
+}
+
 // decodePepper reads the pepper from its textual form.
 //
 // An encoding may be named with a prefix, "hex:", "base64:" or "raw:", and

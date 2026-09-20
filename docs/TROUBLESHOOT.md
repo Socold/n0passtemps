@@ -847,6 +847,124 @@ Recover the service, in this order:
 | Test the restore. Restore a database and a keyring into a scratch deployment and confirm a TOTP code verifies | An untested backup is a belief, not a backup |
 | Keep `features.kek_rotation_reminder` on and read the health report | A rotation that was started and never finished leaves two retained versions, and `retained_versions` above one says so |
 | Never let the server generate a key | It does not, and the refusal is deliberate: a key that appears by itself is a key nobody has backed up |
+| Run `n0passtemps-wizard verify` against the backup on the same schedule as the backup | It is the cheap version of testing the restore, and it fails loudly while there is still time to find the right keyring |
+
+## A backup does not verify
+
+### Symptom
+
+`n0passtemps-wizard verify` exits non-zero and prints one line to stderr,
+beginning `n0passtemps-wizard verify:`.
+
+### Confirm
+
+Nothing to confirm: the line says which artefact is wrong. The exit status says
+how seriously to take it.
+
+| Status | Meaning |
+|---|---|
+| 0 | The trio opens |
+| 1 | The trio does not open. A finding about the backup |
+| 2 | Verification could not run, so no verdict was reached. Usually the invocation, not the backup |
+
+A missing file is deliberately status 2, because a file that is not there
+cannot be told apart from a path typed wrongly. A file that is there and wrong
+is status 1.
+
+### Cause and fix, by verdict
+
+**`the keyring has no key version 2, which 143 records in
+totp_secrets.secret_sealed are sealed under`**
+
+The keyring predates a rotation, or a version was pruned while records still
+referenced it. The version is read out of each record's header and needs no key
+at all, which is why the count is exact. Find the keyring that holds version 2:
+the backup taken after the rotation, the orchestrator's secret store, the
+configuration management repository. If every copy is gone, those records are
+unreadable and [The key encryption keyring is
+lost](#the-key-encryption-keyring-is-lost) says exactly what that costs, which
+is less than it sounds.
+
+**`record <id> in subjects.ref_sealed is sealed under key version 1 and that
+key did not open it`**
+
+The version numbering matches and the key behind it does not. Either this is a
+different keyring that happens to start at version 1, which is the usual cause
+because `kek init` always writes version 1, or the record is damaged. The
+message names both because an authenticated cipher cannot distinguish them: one
+that could would be an oracle. Check whether the keyring is the one this
+database was written with before concluding the database is corrupt.
+
+**`the pepper does not derive the stored lookup value of subject <id>`**
+
+The keyring is right and the pepper is not this database's. Reached by
+unsealing that subject's reference and hashing it again, so it is a definite
+answer rather than a guess. Find the right pepper; with the wrong one no
+existing subject can be found at all, which is a worse failure than losing the
+keyring.
+
+**`N0PASSTEMPS_SUBJECT_PEPPER holds 16 bytes and at least 32 are required`**, or
+**`does not decode as a pepper`**
+
+The value in the environment is not the value `n0passtemps-wizard pepper`
+produced. The decoder refuses to guess: prefix the value with `hex:`, `base64:`
+or `raw:` to say what it is. The server would refuse to start with this value
+too, so fixing it is not optional.
+
+**`kek: "..." is mode 0644, must not be readable by group or other`**
+
+The archive lost the mode, which `tar` does when it is unpacked by a different
+user or extracted without `-p`. `chmod 600` the restored file. The server
+refuses this file as well, so it is a real finding and not a pedantry about
+backups.
+
+**`... does not read as a SQLite database`**, or **`SQLite reports ... as
+damaged`**
+
+The file is truncated or corrupt. `PRAGMA quick_check` is what reports it, so
+the finding is structural and not about the sealed columns. Almost always a
+copy taken while the service was writing: a plain `cp` of a live database in
+write-ahead-log mode is not a backup. Use SQLite's own `.backup`, or stop the
+service first. [DEPLOYMENT.md](DEPLOYMENT.md) gives both.
+
+**`records in ... do not begin with an envelope header`**
+
+The column has been damaged in place, or written by something other than this
+service. A hand-edited row is the likeliest cause. The identifier of the first
+one is printed; read that row and the ones around it before anything else.
+
+**`the database has migration [9999] applied and this binary only carries 4`**
+
+The backup was written by a newer release. Verification is refused rather than
+attempted: the tables it walks may well still be there, but a binary that does
+not know what changed cannot claim it covered everything. Use the wizard from
+the release that wrote the database.
+
+**`nothing in this database is sealed`**
+
+The database is migrated and empty, so it cannot demonstrate that this keyring
+opens anything. Verify one that has at least one subject or one TOTP enrolment
+in it.
+
+**`no subject in this database has a sealed reference`**
+
+`subject.seal_reference` was off, so there is nothing to recompute the pepper
+against. The keyring and the database were verified and the pepper was not, and
+status 2 says exactly that. Pass `-ref` with a reference you know is enrolled
+to check the pepper against that subject's stored lookup value.
+
+**`no subject matches the lookup value this pepper derives for the reference
+given`**
+
+With `-ref`, either the pepper is wrong or that reference was never enrolled
+here. The two cannot be told apart from outside, so confirm the reference
+before replacing the pepper.
+
+### Prevention
+
+Put the check in the cron entry that takes the backup, not in a runbook nobody
+reads. [ADMIN-GUIDE.md](ADMIN-GUIDE.md#verifying-a-backup) has the entry, and
+what the command proves and does not prove.
 
 ## Related documents
 

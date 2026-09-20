@@ -98,16 +98,26 @@ func (s *Service) Close() {
 	s.pepper = nil
 }
 
-// RefHMAC derives the lookup key for a reference.
+// RefHMAC derives the lookup key for a reference under a pepper.
 //
 // The domain separator means this value cannot be confused with, or substituted
 // for, any other digest in the service.
-func (s *Service) RefHMAC(ref string) []byte {
-	mac := hmac.New(sha256.New, s.pepper)
+//
+// It is a function rather than only a method so that a tool verifying a backup
+// can recompute a stored lookup value without building a Service. The
+// construction exists once: a second copy of it elsewhere would drift, and a
+// drifted domain separator makes every existing subject unfindable.
+func RefHMAC(pepper []byte, ref string) []byte {
+	mac := hmac.New(sha256.New, pepper)
 	mac.Write([]byte("n0passtemps/subject-ref/v1"))
 	mac.Write([]byte{0})
 	mac.Write([]byte(ref))
 	return mac.Sum(nil)
+}
+
+// RefHMAC derives the lookup key for a reference under this Service's pepper.
+func (s *Service) RefHMAC(ref string) []byte {
+	return RefHMAC(s.pepper, ref)
 }
 
 // ValidateRef checks a reference before it is used.

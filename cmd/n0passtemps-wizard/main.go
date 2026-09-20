@@ -33,6 +33,7 @@ var commands = []struct {
 	{"assertion-key", "manage the Ed25519 key that signs assertions (init, inspect)", runAssertionKey},
 	{"pepper", "generate the subject reference pepper", runPepper},
 	{"check", "validate a configuration file without starting the service", runCheck},
+	{"verify", "check that a database, a keyring and a pepper still open together", runVerify},
 }
 
 func main() {
@@ -49,7 +50,7 @@ func main() {
 		if c.name == args[0] {
 			if err := c.run(args[1:]); err != nil {
 				fmt.Fprintf(os.Stderr, "n0passtemps-wizard %s: %v\n", c.name, err)
-				os.Exit(1)
+				os.Exit(exitCodeFor(err))
 			}
 			return
 		}
@@ -58,6 +59,19 @@ func main() {
 	fmt.Fprintf(os.Stderr, "n0passtemps-wizard: unknown command %q\n\n", args[0])
 	usage()
 	os.Exit(2)
+}
+
+// exitCodeFor maps a command's error to a process exit status.
+//
+// Every command reports 1 for a failure, as before. verify adds one status,
+// because it is written to be run from a cron job and the difference between
+// "your backup will not open" and "I could not run" is the difference between
+// paging someone and fixing a path. See the sentinels in verify.go.
+func exitCodeFor(err error) int {
+	if errors.Is(err, errCannotVerify) {
+		return 2
+	}
+	return 1
 }
 
 func usage() {

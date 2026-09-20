@@ -386,6 +386,33 @@ separately, and test that you can still read the sealed data afterwards, because
 a restored database with the wrong keyring loses exactly the TOTP secrets and
 the readable subject references.
 
+#### Checking that the three artefacts still belong together
+
+There are three of them, kept apart on purpose, and holding all three proves
+nothing about whether they fit. `verify` answers that without a restore. It
+opens the database read-only, unseals real records under the keyring and
+recomputes a subject lookup value under the pepper:
+
+```bash
+docker run --rm \
+  -v "$PWD":/backup:ro \
+  -e N0PASSTEMPS_SUBJECT_PEPPER \
+  --entrypoint /usr/local/bin/n0passtemps-wizard \
+  ghcr.io/socold/n0passtemps:1.1.0 \
+  verify -db /backup/n0passtemps-2026-09-18.db -keyring /backup/keyring.json
+```
+
+The mount is `:ro` because nothing here needs to write; drop the `:ro` only if
+the database is in write-ahead-log mode and SQLite has to build its `-shm`
+index beside it. Exit status 0 means the trio opens, 1 means it does not, and 2
+means no verdict was reached, so this belongs in the same cron entry as the
+backup itself. [ADMIN-GUIDE.md](ADMIN-GUIDE.md#verifying-a-backup) has the
+routine and [TROUBLESHOOT.md](TROUBLESHOOT.md) the verdicts.
+
+Run it against the backup, not only against the live file. A live database and
+the keyring the running service already loaded will pass by construction; the
+copy in the archive is the one nobody has opened.
+
 ### Upgrade
 
 ```bash
@@ -496,6 +523,16 @@ trusting it:
 curl -sS -H "Authorization: Bearer $ADMIN_TOKEN" \
   'https://auth.example.com/admin/v1/audit/verify?from_seq=1'
 ```
+
+`n0passtemps-wizard verify` does not cover this form. A `pg_dump` archive
+cannot be read without restoring it into a server first, so handing the command
+three artefacts has no meaning here; and once restored, the promise that a
+verification cannot write to what it is verifying would rest on the role's
+privileges rather than on how a file was opened. Restore into the scratch
+database as above, point a spare configuration at it with a read-only role,
+start it, and check the two things the trio actually protects: that
+`GET /admin/v1/health` reports the keyring healthy, and that a TOTP code
+verifies for a subject you can reach. Then verify the chain.
 
 A `pg_dump` and `pg_restore` round trip preserves the chain, because the
 PostgreSQL implementation canonicalises a JSON document through the server
@@ -633,6 +670,22 @@ sudo -u n0passtemps sqlite3 /var/lib/n0passtemps/n0passtemps.db \
 `/etc/n0passtemps/kek` and the pepper in the environment file are backed up
 separately, to a different destination, and restored by hand. Do not add
 `/etc/n0passtemps` to the same archive as `/var/lib/n0passtemps`.
+
+Which leaves the question the separation creates: do those three still open
+together? Check it on a schedule rather than during a restore:
+
+```bash
+export N0PASSTEMPS_SUBJECT_PEPPER=...
+n0passtemps-wizard verify \
+  -db /backup/n0passtemps-$(date +%F).db \
+  -keyring /etc/n0passtemps/kek/keyring.json
+```
+
+It opens the database read-only, unseals real records under the keyring and
+recomputes a subject lookup value under the pepper. Exit status 0 means the
+trio opens, 1 means it does not, 2 means no verdict was reached.
+[ADMIN-GUIDE.md](ADMIN-GUIDE.md#verifying-a-backup) has the cron entry and what
+the command does and does not cover.
 
 ### Upgrade
 
@@ -780,6 +833,13 @@ neither a restart nor a reschedule, and that is correct with PostgreSQL. Back up
 the database with the tooling the cluster's PostgreSQL already uses, and back up
 the Secret outside the cluster, because a cluster loss otherwise takes the
 keyring with it.
+
+`n0passtemps-wizard verify` does not cover this form either, and for the same
+reason as Form 2: the backup is a PostgreSQL archive rather than a file the
+command can open. Verify by restoring into a scratch database, as Form 2
+describes. A SQLite deployment here, which means `replicas: 1` and a
+PersistentVolumeClaim, can run the check against a copy of the claim's database
+file in any pod carrying the image.
 
 ### Upgrade
 

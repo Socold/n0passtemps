@@ -88,6 +88,60 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   under "Running more than one replica", and
   [docs/MONITORING.md](docs/MONITORING.md) has the log lines.
 
+- **A `verify` subcommand on the wizard**, from
+  [docs/ROADMAP.md](docs/ROADMAP.md) section 2.4, which answers whether a
+  database, a keyring and a pepper still open together. The three are backed up
+  separately on purpose, and nothing until now confirmed that a given trio
+  fits; the moment an operator found out was during a restore. It unseals real
+  records
+  under the keyring and recomputes a subject's lookup value under the pepper,
+  so it reports whether the keyring opens what this database holds rather than
+  whether three files parse. AES-GCM rejects a wrong key instead of returning
+  plausible plaintext, which is what makes one decryption sufficient. Sampling
+  is one record per key version per sealed column; `-all` sweeps every record.
+  The key version is read out of each record's header, which needs no key, so a
+  keyring taken before a rotation produces a diagnosis and not a shrug: `the
+  keyring has no key version 2, which 143 records in totp_secrets.secret_sealed
+  are sealed under`. Messages are deliberately precise here, unlike the API
+  surface: this runs on the operator's own host against their own backup, for
+  somebody who already holds all three secrets. Counts, versions, identifiers
+  and verdicts are printed; key material, the pepper, tokens, recovery codes
+  and subject references are not.
+
+  The exit status is the interface, because the command belongs in a cron job.
+  `0` the trio opens, `1` it does not, `2` verification could not run and no
+  verdict was reached. A missing file is in the second class, because it cannot
+  be told apart from a path typed wrongly; a file that is there and wrong is in
+  the first. A truncated database, a keyring of the wrong mode, a pepper of the
+  wrong length and a sealed column damaged in place each produce their own
+  verdict rather than a panic.
+
+  The database is opened read-only, and structurally so. SQLite's `mode=ro`
+  gives the file an `O_RDONLY` handle and refuses every write against it,
+  including a migration, and the command does not use the store package at all,
+  so the migration runner is not reachable from it. `immutable=1` was rejected
+  deliberately: it makes SQLite ignore the write-ahead log, so a database copied
+  together with its log would verify against a stale view of itself.
+
+  SQLite only, with the reason in the help text. A PostgreSQL backup is a
+  `pg_dump` archive, which cannot be read without restoring it into a server
+  first, and once restored the promise that verification cannot write would rest
+  on the role's privileges rather than on how a file was opened.
+  [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) gives the restore-and-check sequence
+  for those deployments instead.
+
+  `subject.DecodePepper` and `subject.RefHMAC` are exported so a tool outside
+  the server can read a pepper and recompute a lookup value without building a
+  `subject.Service`, which needs a store and a sealer. The HMAC construction
+  and its domain separator still exist once: a second copy would drift, and a
+  drifted separator makes every existing subject unfindable.
+
+  [docs/ADMIN-GUIDE.md](docs/ADMIN-GUIDE.md) has the routine and the cron entry
+  under "Verifying a backup", [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) has it
+  beside each form's backup procedure, and
+  [docs/TROUBLESHOOT.md](docs/TROUBLESHOOT.md) has every verdict and what to do
+  about it.
+
 ## [1.1.0] - 2026-09-19
 
 ### Added
