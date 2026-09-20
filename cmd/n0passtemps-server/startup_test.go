@@ -346,3 +346,18 @@ func TestEnsureTenantReportsAStoreItCannotRead(t *testing.T) {
 		t.Errorf("the failure was reported as ErrNotFound: %v", err)
 	}
 }
+
+// testLogger writes to w, so a test can assert on what the startup path said.
+func testLogger(w io.Writer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelWarn}))
+}
+
+// auditEntriesOfType reads the chain back, in sequence order.
+func auditEntriesOfType(t *testing.T, st store.Store, eventType string) []*store.AuditEntry {
+	t.Helper()
+	got, err := st.QueryAudit(t.Context(), "acme", store.AuditFilter{EventType: eventType, Limit: 50})
+	if err != nil {
+		t.Fatalf("query audit: %v", err)
+	}
+	return got
+}
