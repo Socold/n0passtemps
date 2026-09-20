@@ -636,6 +636,77 @@ Two things that are independent of platform:
   without TLS. The configuration validator permits `http` for `localhost`,
   `127.0.0.1` and `::1` and for nothing else.
 
+## Checking a platform yourself
+
+The table above says what to expect. This says how to see it, because nobody
+has run these ceremonies on Windows, macOS or Linux against a real
+authenticator: the test suites use a software one, which agrees with the
+specification where a real device only mostly does.
+
+It takes about twenty minutes per platform and needs no deployment. Report what
+you find through the platform report issue template, whether it matches this
+document or not; a run that matched is worth as much as one that did not,
+because it is the only thing that turns the table above from reasoning into
+evidence.
+
+### Set up, once
+
+Run the service and the reference kit on the machine that has the
+authenticator. `localhost` is a secure context by specification, so no TLS and
+no certificate are involved.
+
+```
+n0passtemps-server -config config.toml     # rp_id = "localhost"
+go run ./kits/login -addr 127.0.0.1:5173 -open-enrolment
+```
+
+`-open-enrolment` lets a subject with no factor yet enrol one, which is what a
+first run needs and what a real deployment should not have on. Then open
+<http://localhost:5173>.
+
+### The two ceremonies
+
+1. **Enrol.** Sign in with a subject reference, follow the prompt, and let the
+   platform authenticator create the credential. Note what the operating system
+   showed you: Windows and macOS each display their own chooser, and what
+   appears there is the `label` the application sent.
+2. **Authenticate.** Sign out, sign in again with the same reference. Do it
+   twice, so there are two assertions to compare.
+
+### What to read afterwards
+
+Everything below is on the credential, which an administrative token reads:
+
+```
+curl -H "Authorization: Bearer $ADMIN" \
+  http://localhost:8080/admin/v1/subjects/$SUBJECT_ID/credentials
+```
+
+| Field | What it tells you |
+|---|---|
+| `sign_count` | Zero on both assertions means a synchronised passkey, and the clone signal is unavailable for that credential. A number that advanced means a real counter, and `webauthn.sign_count_regression` is meaningful there |
+| `backup_eligible`, `backup_state` | Both set on a synchronised passkey. Watch whether `backup_state` differs between the two assertions |
+| `aaguid` | Present with attestation, and stable per platform version. Absent means the authenticator reported none |
+| `transports` | `internal` for a platform authenticator, `usb`/`nfc`/`ble` for a roaming key |
+| `attestation_type` | `none` unless the deployment asked for attestation and the platform provided it |
+| `user_verified` | Whether the ceremony proved identity rather than possession. A Windows PIN satisfies this as much as a fingerprint does |
+
+And on the assertion the kit received, the `amr` claim: `webauthn` alone, or
+`webauthn` and `webauthn_uv` together when the user was verified.
+
+### What would be a finding
+
+Anything that contradicts the table above, and in particular:
+
+- A ceremony the browser refuses before it reaches the authenticator. On Safari
+  this is usually the user gesture being lost while the options request was in
+  flight, which is a real defect in the integrating page rather than a browser
+  quirk to document.
+- An authenticator the browser never offers at all. On Linux this is almost
+  always the `udev` rule, which is worth confirming rather than assuming.
+- `binding_changed` raised between two assertions from one unchanged device.
+- A counter that goes backwards on a platform the table says has a real one.
+
 ## What a successful assertion returns
 
 ```json

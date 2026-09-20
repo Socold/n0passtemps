@@ -500,6 +500,29 @@ shape before the first real backend could argue with it.
 Work that is owed rather than proposed. It is listed with counts so that it can
 be burned down deliberately instead of drifting.
 
+### No platform has been checked against a real authenticator
+
+The specification budgets two to three days of testing on Windows, macOS and
+Linux, and none of it has happened. Every ceremony this repository runs is
+driven by the software authenticator in `internal/webauthn/virtual`, which
+agrees with the specification where a real device only mostly does. The platform
+table in [WEBAUTHN.md](WEBAUTHN.md) is therefore reasoning, not evidence, and it
+is the document an integrator reads before deciding whether this works for their
+users.
+
+What was owed and is now done is the part that does not need hardware: the
+procedure. "Checking a platform yourself" in that document says what to run,
+which six fields to read off the credential afterwards and what would count as a
+finding, and `.github/ISSUE_TEMPLATE/platform_report.yml` collects the answer.
+Twenty minutes per platform rather than a day working out what to look at.
+
+What remains needs a machine with the authenticator attached, so it is
+deliberately not on a list of things to do here. The most likely way it gets
+done is the first operator who deploys on Windows, which is why the form asks
+for a run that matched as readily as one that did not: a report saying the table
+was right is the only thing that turns it into evidence, and a form that
+collected only failures would leave it as reasoning for ever.
+
 ### The style budget in golangci-lint
 
 The pinned linter could not run at all until 1.1.0: `v2.6.0` cannot read the

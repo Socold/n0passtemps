@@ -1,0 +1,132 @@
+name: Platform report
+description: Report what a real authenticator did on Windows, macOS, Linux, Android or iOS
+title: "[platform] "
+labels:
+  - platform
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The test suites drive the ceremonies with a software authenticator,
+        which agrees with the specification where a real device only mostly
+        does. Nobody has run them against Windows Hello, Touch ID or a roaming
+        key on Linux, so the platform table in
+        [docs/WEBAUTHN.md](https://github.com/Socold/n0passtemps/blob/main/docs/WEBAUTHN.md#platform-notes)
+        is reasoning rather than evidence.
+
+        **A run that matched the table is worth reporting.** It is the only
+        thing that turns that table into something an integrator can rely on,
+        and a form that only collected failures would leave it as reasoning for
+        ever.
+
+        The procedure is in
+        [Checking a platform yourself](https://github.com/Socold/n0passtemps/blob/main/docs/WEBAUTHN.md#checking-a-platform-yourself)
+        and takes about twenty minutes.
+
+        Do not paste a credential identifier, an admin bearer token or a subject
+        reference. The fields below need none of them.
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows Hello
+        - macOS, Touch ID
+        - macOS, a roaming key
+        - iOS or iPadOS
+        - Linux, a roaming key over USB
+        - Linux, a roaming key over NFC
+        - Android
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Operating system and browser versions
+      placeholder: "Windows 11 26H1, Edge 141"
+    validations:
+      required: true
+
+  - type: input
+    id: authenticator
+    attributes:
+      label: Authenticator
+      description: The platform one, or the make and model of the key.
+      placeholder: "Windows Hello, PIN only (no biometric hardware)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: Did both ceremonies complete
+      options:
+        - Yes, enrolment and both assertions
+        - Enrolment worked, an assertion did not
+        - Enrolment did not work
+    validations:
+      required: true
+
+  - type: textarea
+    id: credential
+    attributes:
+      label: The credential, as the administrative API returned it
+      description: >-
+        From GET /admin/v1/subjects/{id}/credentials. Remove credential_id and
+        subject_id; everything else in it is what this report is about.
+      render: json
+    validations:
+      required: true
+
+  - type: input
+    id: counter
+    attributes:
+      label: sign_count after each of the two assertions
+      description: >-
+        Two numbers. Zero twice means a synchronised passkey and no clone
+        signal for that credential, which is expected on some platforms and a
+        finding on others.
+      placeholder: "0 then 0"
+    validations:
+      required: true
+
+  - type: input
+    id: backup_state
+    attributes:
+      label: backup_state after each of the two assertions
+      placeholder: "true then true"
+    validations:
+      required: true
+
+  - type: textarea
+    id: amr
+    attributes:
+      label: The amr claim of the assertion
+      description: >-
+        webauthn alone, or webauthn and webauthn_uv together when the user was
+        verified. Paste the claim rather than the whole token.
+      placeholder: '["webauthn","webauthn_uv"]'
+    validations:
+      required: true
+
+  - type: textarea
+    id: divergence
+    attributes:
+      label: Anything that contradicted the platform table
+      description: >-
+        Write "nothing" if it all matched. That answer is the useful one often
+        enough to be worth typing.
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: What the operating system showed the user
+      description: >-
+        Which chooser appeared, what it named the credential, whether the
+        label the application sent was visible, and anything a user would have
+        found confusing. None of this is visible from the server side.

@@ -444,7 +444,7 @@ Security Top 10 2023, and GDPR Articles 15, 17 and 32.
 | [docs/TROUBLESHOOT.md](docs/TROUBLESHOOT.md) | Symptom first: it will not start, WebAuthn fails, a user is locked out, the keyring is lost |
 | [docs/FAQ.md](docs/FAQ.md) | Short answers, including what this is not |
 | [docs/RBAC.md](docs/RBAC.md) | The 27 permissions against the three roles, and which are dual-approval candidates |
-| [docs/WEBAUTHN.md](docs/WEBAUTHN.md) | The ceremony here specifically, the challenge store, the user handle, attestation, the counter, platform notes |
+| [docs/WEBAUTHN.md](docs/WEBAUTHN.md) | The ceremony here specifically, the challenge store, the user handle, attestation, the counter, platform notes, and the procedure for checking a platform against a real authenticator |
 | [docs/GDPR.md](docs/GDPR.md) | Lawful basis, the personal data inventory, the Article 15 and 17 paths, how the chain survives erasure |
 | [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) | Assets, trust boundaries, eleven attackers, and what is not mitigated |
 | [docs/MONITORING.md](docs/MONITORING.md) | What to scrape, the Prometheus endpoint, the thirteen alert types and their responses, log fields, database tuning |
