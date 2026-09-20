@@ -7,7 +7,123 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Security
+
+This release is the result of a security review of the whole service. Findings
+that could be used against a running deployment were fixed first and are
+described here in the terms an operator needs to judge their own exposure; the
+reproduction steps are not, and each one that warrants it carries a published
+advisory.
+
+- **The reference sign-in backend gave a visitor the run of the API key it
+  holds.** Every route in `kits/login` relayed `subject_ref` from the request
+  body and checked its own session on none of them, so anybody who could reach
+  the page could issue a subject's recovery codes, spend one, and be signed in
+  as them. The five routes that add or replace a factor now require a session
+  and take the subject from it. Only deployments that copied or ran the kit are
+  affected; the server was never the weak part.
+
+- **Dual approval could be satisfied by one administrator.** An `admin_full`
+  token could queue an operation, rotate itself, approve with the successor and
+  redeem with the predecessor, because an administrator was identified by the
+  identifier of their token and a rotation mints a new one while the old stays
+  valid. Migration 0006 adds `principal_id`, which a rotation carries forward,
+  and the rule compares principals. No backfill is required.
+
+- **An unauthenticated caller could grow the process without bound.** The
+  request method was used as a Prometheus label unchanged, and `net/http`
+  accepts any token as a method, so each invented one created a counter and a
+  histogram that live as long as the process. Methods outside the standard set
+  are folded into `other`.
+
+- **One visitor could lock out every user of an application, or one user's
+  passkey.** The `/v1` routes are called from an application's backend, so the
+  only address the service saw belonged to the caller and every failure shared
+  one bucket; and every failure was charged to one bucket per subject, so wrong
+  TOTP codes locked that subject out of their authenticator as well. The
+  per-address limit now follows the address the application declares in
+  `X-End-User-IP`, the per-subject budget is per factor, and the WebAuthn budget
+  is counted and reported without being enforced, because nothing in that
+  ceremony is guessed and enforcing it only ever served the attacker.
+
+- **An action could be taken without an audit entry.** Events are recorded after
+  the change they describe has committed, and a failed append was logged while
+  the request succeeded. Closing the connection at that moment, or putting a NUL
+  in a free-text field, which PostgreSQL refuses in JSONB and SQLite accepts,
+  was enough. The append no longer ends with the request, and a NUL is replaced
+  before it is stored.
+
+- **A sealed record could be moved between rows, subjects and tenants.** The
+  envelope bound a ciphertext to nothing but its own header, so somebody who
+  could write to the database without holding the keyring could put their own
+  TOTP seed on a victim's row, or move another tenant's sealed reference into a
+  subject of their own and read it back. Sealing now takes a binding context;
+  see [ADR 0021](docs/adr/0021-bind-sealed-records-to-the-row-they-live-in.md).
+  Existing records stay readable and are lifted by the next `kek/rewrap` pass,
+  which is also the pass that proves none are left.
+
+- **A console session outlived the token it was made with.** Revoking an
+  administrator left their open session working for the rest of its lifetime,
+  including deciding approval requests. The token is read on every console
+  request.
+
+- **`require_attestation` verified nothing without a metadata BLOB**, because
+  the library returns early when it holds none and the AAGUID that
+  `allowed_aaguids` matches on is declared by the client. The combination is
+  refused at startup. With a BLOB loaded, a key could register and then never
+  sign in again, which is also fixed.
+
+- **The console's passkeys accepted any origin the public surface accepted**,
+  which is the anti-phishing property a passkey exists for.
+  `webauthn.admin_origins` names the console's own.
+
+- **The audit chain could be truncated without the verifier noticing**: a
+  checkpoint was attested by nothing, an erased entry's personal fields were
+  covered by nothing, and one entry written by a machine with a backwards clock
+  could take every recent entry with it at the next retention pass. All three
+  are closed, and the external sink refuses redirects, follows `prev_hash`
+  rather than the numbering, and sends a heartbeat so silence is visible.
+
+- **An erasure left identifiers behind** in the alerts table and in the free
+  text of erasure requests, and the SQLite database was left readable by any
+  local account when the data directory already existed at 0755.
+
 ### Added
+
+- **A coverage floor the build enforces**, `COVER_MIN` in the Makefile, checked
+  by `make cover` and by a step of its own in CI.
+
+  The specification makes coverage above 80% a gate before merge. What existed
+  was an upload to a coverage service configured with `fail_ci_if_error: false`,
+  and no `codecov.yml` setting a threshold, so nothing failed a build at any
+  percentage. The reasoning behind that flag is right and is kept: a coverage
+  service having an outage is not a reason to block a merge. It is the wrong
+  place for the gate, not the wrong judgement, so the floor is now read out of
+  the Makefile and enforced against the profile the job already produces, and
+  the service stays advisory.
+
+  The floor is set to 65, which is where the suite actually is, rather than to
+  the 80 the specification asks for. A gate declared above the line and switched
+  off is the failure mode this replaces. [docs/ROADMAP.md](docs/ROADMAP.md)
+  carries the distance still to cover.
+
+- **Two tests that hold the documentation to the code.** Both are the shape of
+  `TestTheCatalogueIsTheVocabulary`, which already does this for the audit event
+  names, and both were written because the drift they catch had happened.
+
+  `TestTheSpecificationIsTheAPISurface` compares every route `router.go`
+  registers against every operation `api/openapi.yaml` declares, in both
+  directions. `GET /v1/metrics` shipped, was scraped, was documented in
+  MONITORING.md and in EXTENSIONS.md, and was absent from the specification,
+  which for a product whose support model is documentation is the one file an
+  integrator cannot work around.
+
+  `TestTheCatalogueIsTheAlertTypes` holds the alert table in MONITORING.md to
+  what `internal/alerts` declares, names and severities both, and
+  `TestTheReadmeCountsTheAlertTypes` holds the prose count in README.md to the
+  same set. The count had read "ten" through three additions. It is worth
+  saying that the test found a third occurrence that a careful reading of the
+  file had missed, which is the entire argument for having it.
 
 - **A keyring sealed to the machine's TPM**, `kek.provider = "tpm"`, with
   `n0passtemps-wizard kek seal` to convert an existing one.
@@ -183,7 +299,176 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   The vocabulary is published as a closed set, so it is checked against
   `internal/audit/events.go` by a test rather than by hand, in both directions.
 
+- **Registry publication for the Node and Python SDKs**, as `sdk-npm` and
+  `sdk-pypi` in `release.yml`, on the same `v*` tag as everything else and after
+  the GitHub release exists.
+
+  Both publish through trusted publishing, so no API token is stored in this
+  repository or anywhere else: the registry verifies an OIDC claim naming this
+  repository, this workflow file and the deployment environment. The npm job
+  also passes `--provenance`, which gives the tarball the signed statement the
+  container image already had. Both refuse to publish a version the tag does not
+  name, which is the one mistake neither registry lets anybody take back.
+
+  The jobs are skipped until the deployment environments exist, so a release
+  does not fail on a registry nobody has set up yet.
+  [docs/ROADMAP.md](docs/ROADMAP.md) lists the three settings that remain with
+  the maintainer.
+
+- **A test suite for the administrative credential store**, on both engines.
+
+  `internal/store/sqlite/admincred.go` had fourteen functions and no test. It is
+  the table [ADR 0017](docs/adr/0017-administrative-sign-in-with-webauthn.md)
+  added to keep an operator's authenticator apart from a subject's, and the ADR
+  says in as many words that getting that separation wrong in one direction
+  turns every enrolled user into an administrator. The PostgreSQL half is a
+  deliberate near-copy rather than a shared table of cases, because the
+  statements differ between the engines and a behaviour that matches should
+  match because both were written to, not because one file ran twice.
+
+- **A test suite for the setup wizard**, covering every combination of answers.
+
+  The property it checks is the one the tool promises and an operator cannot
+  check for themselves: that the generated `config.toml` loads and validates.
+
+### Changed
+
+- **`server.allow_plaintext` is no longer set by the container image.** A
+  `docker run -p 8080:8080` that relied on it now stops at the validator. The
+  compose files set it next to the loopback publication that justifies it.
+
+- **Configurations that were accepted are now refused at startup**: a
+  `trusted_proxy_cidrs` or `ip_allow_list` prefix wide enough to admit
+  everything, an administrative surface reachable beyond loopback with no allow
+  list whether or not the console is enabled, a zero read, write or idle
+  timeout, a `max_body_bytes` above 16 MiB, an unknown operation in
+  `dual_approval_operations`, risk weights that are all zero, and `LITE_MODE`
+  contradicting its prefixed form. Under lite mode, settings named by the
+  environment are now honoured rather than silently overridden.
+
+- **A tag no longer publishes on its own.** The release workflow runs the gate
+  and an integration pass first, the container scans block on fixable findings,
+  and the archives carry a provenance attestation and an SBOM.
+
+- **Kubernetes ingress is closed until a namespace is labelled.** The policy
+  named every namespace; the example allow list is now a documentation range
+  that has to be replaced.
+
+
+- **`(*Config).Validate` is one method per section.** It was a single function
+  over every setting in the file, at 134 branches the largest thing in the
+  repository by a wide margin, and it was already organised into sections by
+  comment: Tenant, Server, Database, KEK, and so on down to Features. Each of
+  those is now a method returning its own problems, in the shape
+  `validateAuditSink` already had, and `Validate` is the list of them.
+
+  Nothing about what is checked changed, and the check that says so is the
+  useful part: the file carries 102 message literals and carries the same 102
+  after the move. `validateAdmin` is the one section that writes as well as
+  reads, forcing the session cookie Secure behind TLS, and its comment now says
+  so rather than leaving it to be discovered.
+
+- **The style budget is closed and `make lint` runs whole in CI.** All six
+  categories report nothing, `UNCLEARED_LINTERS` is gone from the Makefile, and
+  `lint-cleared` survives only as an alias so older scripts keep working.
+
+  Five were cleared by fixing findings. `gocyclo` was closed by moving its
+  threshold from 15 to 35, which is the one place the budget lost its argument
+  rather than winning it, so it is written down as such. 15 was set on the
+  reasoning that anything above it is a function doing two jobs; that was true
+  of `(*Config).Validate` at 134 and false of the other thirteen, which are a
+  SQL statement splitter tracking quote state, the startup path, a JWS verifier,
+  an interactive setup and four handlers. 35 is one above the largest function
+  in the tree, so it holds the line where it is and would still have caught
+  Validate by a factor of four.
+
+  Two `gocritic` checks are refused by name in `.golangci.yml` rather than
+  cleared, with the reasoning beside them, as `sloppyReassign` already is.
+  `hugeParam` and `rangeValCopy` both ask to replace a copy with an alias, and
+  every site they fire on is a descriptor the callee must not change.
+  `Recorder.Success`, `.Failure`, `.Denied` and `.Errored` each set `ev.Outcome`
+  on their own copy of an `audit.Event` before passing it on, so taking a
+  pointer there would write the outcome back into the caller's event: a style
+  fix that silently changes what gets audited.
+
+  Clearing `revive` was not only doc comments. `openStore` took a
+  `context.Context` that neither engine's `Open` accepts and
+  `clientThrottleDims` took the `*Caller` left behind when the per-key dimension
+  moved to `MeterAPIKey`; both parameters are removed rather than renamed to
+  `_`. Two tests whose parameter is unused because the race detector and a nil
+  dereference are what fail them now say so, so that the next reader does not
+  add an assertion that tests nothing.
+
+- **`api.APIError` is `api.Error`.** The package is imported as `api`, and
+  `url.Error` and `net.Error` are the shape the standard library uses for this.
+  Internal to `internal/api`, so nothing outside the module sees it.
+
 ### Fixed
+
+- **The setup wizard refused to write anything for any listener that was not
+  loopback**, and blamed itself while doing it.
+
+  Answering `0.0.0.0:8080` to the listen address question -- the obvious answer
+  for a container, and the address the compose file the wizard itself generates
+  publishes behind -- ended the run on:
+
+  > the generated configuration does not validate, which is a bug in this tool
+  > rather than in your answers
+
+  and left the directory empty. It was right that it was a bug in the tool.
+  `renderConfig` wrote the TLS paths, the proxy settings and the console's allow
+  list as commented examples, so the file it validated before writing was one
+  the service refuses, and the two questions whose answers would have made it
+  valid were never asked. In a product whose support model is documentation and
+  a GitHub issue tracker, an operator met a tool telling them it was broken and
+  had nothing to go on.
+
+  The listen address is now probed like the relying party and the origin already
+  were, so a malformed one is re-asked. A listener that needs TLS accounted for
+  asks one further question, with the three arrangements the validator itself
+  names: this process terminates TLS, a reverse proxy in front does, or
+  something outside constrains who can reach the port, which is what the
+  generated compose file arranges by publishing to `127.0.0.1`. Enabling the
+  console on such a listener asks for its allow list. The answers are written as
+  settings rather than as comments.
+
+  A test now renders every combination of answers and loads the result, which is
+  what the interactive path cannot do.
+
+- **`make ci` could not pass on any machine.** `test-race` inherited the
+  `export CGO_ENABLED := 0` the Makefile sets for everything, and the race
+  detector is built on cgo, so the target failed with "-race requires cgo"
+  wherever it was run. It went unnoticed because the CI workflow does not call
+  it: that job runs the same command inline with `CGO_ENABLED` set to 1 in the
+  step. The gate CONTRIBUTING.md asks a contributor to run before opening a pull
+  request was the only one that was broken, which is the worst of the three
+  places it could have been.
+
+- **`make secrets` could not install the scanner it names.** gitleaks moved to
+  the `gitleaks` organisation and its module still declares the path
+  `github.com/zricethezav/gitleaks/v8`, so `go install github.com/gitleaks/...`
+  ends in a version constraints conflict rather than a binary. CI calls the
+  action instead, so again only the local gate was affected.
+
+- **`make sec` produced a goroutine dump rather than a scan.** The pinned
+  `govulncheck` v1.1.4 vendors `golang.org/x/tools` v0.29.0, whose SSA builder
+  panics with `unexpected expr: *ast.KeyValueExpr` on the toolchain this project
+  builds with. Raised to v1.8.0, which reports no vulnerability in any code this
+  module calls. This is the same failure as the golangci-lint pin recorded in
+  [docs/ROADMAP.md](docs/ROADMAP.md): a pinned analyser eventually stops
+  understanding the language it is pointed at, and a pin is a thing to revisit
+  rather than a thing to set.
+
+- **`GET /v1/metrics` was missing from `api/openapi.yaml`.** The scope was
+  described in the document's prose and the route was not in `paths`, so a
+  client generated from the specification had no metrics endpoint. Added with
+  the exposition's content type and the `503` a deployment with no registry
+  answers. A test now checks the whole surface both ways.
+
+- **README.md said there were ten alert types.** There are thirteen:
+  `risk.high`, `enrolment_ticket.factor_override` and `audit.sink_failing` were
+  added without the three prose statements that count them being revisited.
+  MONITORING.md was correct throughout.
 
 - **The `route` log field carried the path, not the matched route.** On the
   ceremony routes the path is the subject reference, and the documentation asks
