@@ -5,6 +5,46 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2026-09-21
+
+This release exists so the SDK packages reach their registries. 1.1.2 was cut
+for the same reason and did not manage it: both publish jobs ran and both
+failed, one on a registry setting that does not exist yet and one on a fault in
+the workflow itself. Applications integrating over HTTP need nothing from it,
+and the server, the container image and the binaries are unchanged from 1.1.1.
+
+### Fixed
+
+- **The npm publish could not have worked, whatever the registry was told.**
+  The job publishes through trusted publishing and deliberately sets no token.
+  npm documents that as needing CLI 11.5.1 or later, and Node 22 ships npm 10,
+  which has no OIDC support at all and falls back to reading a token out of the
+  environment. With none set it failed with a `404` on the PUT, which says
+  nothing about the version being the cause. The job now installs a pinned npm
+  of its own, for the reason every other tool here is pinned and more so: a
+  publish is the one step that cannot be taken back.
+
+### Changed
+
+- **The pinned actions move forward**, and the four CodeQL ones move together.
+  Dependabot tracks `init`, `autobuild`, `analyze` and `upload-sarif`
+  separately and had opened pull requests for two of them, which would have run
+  a version 4 init against a version 3 analyze. `actions/setup-node` reaches
+  7.0.0, whose removal of the dummy `NODE_AUTH_TOKEN` helps trusted publishing
+  rather than hindering it; `docker/login-action` reaches 4.6.0 and
+  `pypa/gh-action-pypi-publish` 1.14.2. `fxamacker/cbor` reaches 2.9.4.
+
+- **The coverage threshold the specification asks for is met**, at 80.0% of
+  statements counting the PostgreSQL store and the TPM provider. The WebAuthn
+  ceremony routes, which are the product, had no test that ran them over HTTP;
+  the software authenticator that internal/webauthn used is now a package both
+  it and internal/api share, so a ceremony they both accept was produced by the
+  same keys and the same signatures. Beside that: the administrative credential
+  store on both engines, the setup wizard over every combination of answers, the
+  startup path and the three commands an operator is told to run, the model
+  predicates that decide whether a credential still works, and the console's
+  approval and acknowledgement actions.
+
 ## [1.1.2] - 2026-09-20
 
 ### Fixed
