@@ -167,7 +167,7 @@ jobs:
           cache-dependency-path: go.sum
 
       - name: Initialise CodeQL
-        uses: github/codeql-action/init@f079b8493333aace61c81488f8bd40919487bd9f # v3.25.7
+        uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           languages: go
           # security-extended adds the queries that matter for an
