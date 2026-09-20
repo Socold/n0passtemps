@@ -5,6 +5,23 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-09-20
+
+### Fixed
+
+- **The SDK packages of 1.1.1 are published.** The release workflow refuses to
+  publish a package whose version does not match the tag, and the three SDK
+  version strings were left at 1.1.0 when 1.1.1 was cut, so npm and PyPI
+  received nothing while the server release went out complete.
+
+  The tag was not moved to repair it. A published tag that changes is the
+  problem [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) raises about depending on
+  one, and v1.1.1 already carried an attested set of archives and a container
+  image. This release carries the same SDK changes under a version that matches.
+
+  Applications integrating over HTTP need nothing from this release. The server,
+  the container image and the binaries of 1.1.1 are unchanged.
+
 ## [1.1.1] - 2026-09-20
 
 ### Security
@@ -1368,6 +1385,7 @@ FIDO2, TOTP, single-use recovery codes, one static binary, SQLite or PostgreSQL.
   call booking. No response time is promised, because one person maintains this
   project.
 
+[1.1.2]: https://github.com/Socold/n0passtemps/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/Socold/n0passtemps/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/Socold/n0passtemps/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/Socold/n0passtemps/releases/tag/v1.0.0

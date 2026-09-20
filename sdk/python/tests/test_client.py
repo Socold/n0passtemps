@@ -185,7 +185,7 @@ class RequestShapeTests(ServerCase):
                 self.assertEqual(raw, document)
 
     def test_the_version_is_the_packaged_one(self) -> None:
-        self.assertEqual(n0passtemps.__version__, "1.1.0")
+        self.assertEqual(n0passtemps.__version__, "1.1.2")
 
     def test_reference_is_one_path_segment(self) -> None:
         self.server.reply = json_reply(200, SUBJECT)

@@ -1,6 +1,6 @@
 {
   "name": "n0passtemps",
-  "version": "1.1.0",
+  "version": "1.1.2",
   "description": "Client SDK for the n0passtemps passwordless authentication server: API client, offline assertion verification and WebAuthn browser helpers.",
   "type": "module",
   "license": "MIT",
