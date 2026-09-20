@@ -552,6 +552,22 @@ jobs:
           node-version: "22"
           registry-url: https://registry.npmjs.org
 
+      - name: Install an npm that can publish through OIDC
+        # Trusted publishing needs npm 11.5.1 or later; Node 22 ships npm 10,
+        # which has no OIDC support at all and falls back to reading a token
+        # out of the environment. Since this job deliberately sets none, the
+        # publish would fail against the registry with a 404 rather than
+        # saying what was missing.
+        #
+        # Pinned for the reason every other tool here is pinned: a publish is
+        # the one step that cannot be taken back, so what performs it is a
+        # deliberate version rather than whatever the runner happened to ship.
+        run: |
+          npm install --global npm@${NPM_VERSION}
+          npm --version
+        env:
+          NPM_VERSION: "12.0.2"
+
       - name: Check the package version against the tag
         # A package published under a version the tag does not name is the one
         # mistake here that cannot be corrected afterwards.
