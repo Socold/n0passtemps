@@ -25,8 +25,8 @@ COVER_FILE  ?= coverage.out
 # floor. The gap between the two numbers is almost entirely
 # internal/store/postgres, whose 147 functions are tested only under the tag and
 # therefore read as zero here.
-COVER_MIN   ?= 68.0
-COVER_MIN_FULL ?= 76.0
+COVER_MIN   ?= 71.0
+COVER_MIN_FULL ?= 79.0
 IMAGE       ?= ghcr.io/socold/n0passtemps
 DOCKERFILE  ?= deploy/Dockerfile
 
