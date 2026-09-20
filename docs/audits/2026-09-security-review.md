@@ -9,17 +9,16 @@ with automated reviewers, and every finding kept here was checked against the
 code by hand before it was believed. It is published so that the next person to
 look knows what has been looked at, what was found, and what was not covered.
 
-**Status of the fixes.** Everything listed as fixed is on `main` and is not yet
-in a release. `v1.1.0` is still the current release and still carries these
-findings. An operator running it should read the table below, decide which
-findings reach their deployment, and follow the release that carries the fixes.
-Advisories accompany that release, as [SECURITY.md](../../SECURITY.md)
-describes.
+**Status of the fixes.** Everything listed as fixed is released in `v1.1.1`.
+`v1.1.0` and earlier carry these findings, and an operator running one should
+read the table below, decide which findings reach their deployment, and
+upgrade. Each finding that warrants one has an advisory on the repository's
+security tab, as [SECURITY.md](../../SECURITY.md) describes.
 
 **What this document deliberately leaves out.** The reproduction steps. Several
 of these are straightforward to exploit against a deployment that has not
-upgraded, and a public page that makes the sequence easy to copy helps the wrong
-reader first. Each entry says what an attacker gains and what they need to
+upgraded yet, and a public page that makes the sequence easy to copy helps the
+wrong reader first. Each entry says what an attacker gains and what they need to
 start, which is what an operator needs to judge their own exposure.
 
 ## Method
@@ -169,7 +168,7 @@ None of this describes a way in.
   to write to the database can still insert an authenticator. Binding sealed
   records does not change that, and saying otherwise would overstate it.
 
-## If you are running v1.1.0
+## If you are running v1.1.0 or earlier
 
 The findings that need no credential are the reference kit, the metrics label,
 and the two denial-of-service paths in the rate limiter. The kit is the urgent
