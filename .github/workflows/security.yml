@@ -65,7 +65,7 @@ jobs:
         run: gosec -conf .gosec.json -no-fail -exclude-generated -fmt sarif -out gosec.sarif ./...
 
       - name: Upload the gosec findings
-        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         with:
           sarif_file: gosec.sarif
           category: gosec
@@ -167,7 +167,7 @@ jobs:
           cache-dependency-path: go.sum
 
       - name: Initialise CodeQL
-        uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        uses: github/codeql-action/init@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         with:
           languages: go
           # security-extended adds the queries that matter for an
@@ -175,10 +175,10 @@ jobs:
           queries: security-extended
 
       - name: Build for the CodeQL database
-        uses: github/codeql-action/autobuild@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        uses: github/codeql-action/autobuild@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
 
       - name: Analyse
-        uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         with:
           category: /language:go
 
@@ -209,7 +209,7 @@ jobs:
           exit-code: "0"
 
       - name: Upload the filesystem findings
-        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
@@ -259,7 +259,7 @@ jobs:
           exit-code: "0"
 
       - name: Upload the image findings
-        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image
