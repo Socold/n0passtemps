@@ -12,8 +12,9 @@ idea.
 | 0, foundations | Done |
 | 1, authentication core | Done, see the two notes below |
 | Launch | Tagged `v1.0.0`, then `v1.1.0`. Registry publication below is the maintainer's |
-| 2, this document | Credential rotation, risk signals and enrolment tickets landed; all three themes answered |
-| 6, hosted offering | Not started, and not planned before phase 2 has users |
+| 2, this document | Complete. All three specified themes answered, and all five candidates of 2.4 landed |
+| 6, hosted offering | Not started, and not planned before the on-premise product has users |
+| Maintenance | The style budget below is the only work this document still owes |
 
 Two phase 1 exit criteria deserve an honest note.
 
@@ -188,7 +189,10 @@ in full.
 
 ### 2.4 Candidates not in the specification
 
-Found while building 1.0.0, in rough order of value.
+Found while building 1.0.0, in rough order of value. All five have landed, so
+this section is a record of what they turned out to cost rather than a list of
+intentions. Each one is worth reading for the part the original entry got
+wrong.
 
 **Discoverable-credential sign-in: landed.** Unreleased; see
 [../CHANGELOG.md](../CHANGELOG.md) and the reasoning in
@@ -237,11 +241,38 @@ paste is still accepted". A deployment-wide switch would have had no floor under
 it, and a console that can lock out its only administrator permanently is worse
 than one with a pasted token.
 
-| Item | Why |
-|---|---|
-| Administrative sign-in with WebAuthn | The administration interface authenticates with a bearer token pasted into a form. A passwordless product whose own console does not use passkeys is an awkward demonstration |
-| A `verify` subcommand for backups | Operators back up the database, the keyring and the pepper separately. Nothing checks that a given trio still opens |
-| Multi-replica janitor lock | Each replica runs every sweep. Harmless, since the sweeps are idempotent, and wasteful |
+**A `verify` subcommand for backups: landed.** Unreleased; see
+[../CHANGELOG.md](../CHANGELOG.md), the routine in
+[ADMIN-GUIDE.md](ADMIN-GUIDE.md) under "Verifying a backup" and the verdicts in
+[TROUBLESHOOT.md](TROUBLESHOOT.md).
+
+The entry said nothing checks that a given trio still opens, which was the
+point, but it understated what checking means. Parsing the three artefacts
+proves nothing: the command has to decrypt real records under the keyring and
+recompute a stored lookup value under the pepper, because that is the only
+thing that ties all three together rather than testing two of its corners. The
+second surprise was that being precise here is correct. Everything else in this
+project refuses to say which check failed; this runs on the operator's own host
+against their own backup, for somebody who already holds all three secrets, so
+a useful diagnosis costs nothing. That reasoning is written where the code is,
+because it is exactly the kind of thing a later reader would "harden" into
+uselessness.
+
+**Multi-replica janitor lock: landed.** Unreleased; see
+[../CHANGELOG.md](../CHANGELOG.md) and "Running more than one replica" in
+[DEPLOYMENT.md](DEPLOYMENT.md).
+
+The entry called it harmless and wasteful, and that was right, which is why the
+lock had to stay harmless too: losing the race is not an error anywhere in the
+code and the sweeps are still idempotent, so a deployment whose lock never
+worked would be exactly as correct as this one and merely busier. What the
+entry did not anticipate is that the two engines need different mechanisms and
+that only one of them is a real lock. PostgreSQL takes a session-level advisory
+lock the server drops when the connection dies. SQLite takes a lease row, and
+its single-writer property serialises the statement that takes the lease and
+never the sweep it guards, so it coordinates nothing by itself; one process to
+one file remains the only supported arrangement and the lease is what stands
+between two processes that share a file anyway.
 
 ## Maintenance backlog
 
