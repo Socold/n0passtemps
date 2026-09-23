@@ -27,6 +27,7 @@ superseded by a new record rather than edited in place. See
 | [0014](0014-bootstrap-by-explicit-command.md) | Bootstrap the first administrator by explicit command | accepted |
 | [0015](0015-enrolment-tickets-instead-of-magic-links.md) | Enrolment tickets instead of magic links | accepted |
 | [0016](0016-ship-the-audit-chain-to-an-external-witness.md) | Ship the audit chain to an external witness, and only the chain fields | accepted |
+| [0017](0017-administrative-sign-in-with-webauthn.md) | Administrative sign-in with WebAuthn, over a separate credential space | accepted |
 
 Records 0013 and 0014 are of a different kind. The specification is silent on
 both questions, how an approved operation comes to run and where the first
@@ -41,3 +42,9 @@ Record 0016 is of the same kind as 0013 and 0014. The specification does not ask
 for an external audit sink at all; the threat model does, as the only thing that
 would close the one gap the hash chain cannot, so it records a design choice
 rather than a deviation.
+
+Record 0017 is of the same kind as 0013, 0014 and 0016. The specification does
+not ask the administration interface to authenticate with WebAuthn; it is a
+roadmap item, and what the record fixes is the thing that makes it safe, namely
+that an administrative credential and a subject credential are separate spaces in
+both directions.

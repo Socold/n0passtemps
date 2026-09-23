@@ -558,6 +558,23 @@ type Admin struct {
 	// Empty means no restriction, which is why Validate warns when the UI is
 	// enabled on a non-loopback listener without one.
 	IPAllowList []string `toml:"ip_allow_list"`
+
+	// PasskeyRequired stops an administrative token being pasted into the
+	// console's sign-in form once that token has a passkey enrolled.
+	//
+	// It is off by default, and the scope is deliberately per token rather
+	// than deployment-wide. A token with no passkey still signs in by being
+	// pasted, whatever this is set to, which is what keeps the setting from
+	// being able to lock a deployment out: the bootstrap command mints a
+	// token, that token has no passkey, and so it can always be used to get
+	// back in. A deployment-wide refusal would have no such floor, and the
+	// first administrator to lose a key would need the setting changed and
+	// the service restarted before anybody could sign in at all.
+	//
+	// It changes nothing on the /admin/v1 API, which authenticates with a
+	// bearer token because its caller is a script. This is about the form
+	// field a person types into.
+	PasskeyRequired bool `toml:"passkey_required"`
 }
 
 // Logging configures structured output.

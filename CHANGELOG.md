@@ -9,6 +9,72 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **Administrative sign-in with WebAuthn**, from
+  [docs/ROADMAP.md](docs/ROADMAP.md) section 2.4. An administrator signs in to
+  `/admin` with a passkey instead of pasting a long-lived bearer token into a
+  form field. A passwordless product whose own console asks for a pasted secret
+  was an awkward demonstration, and the secret is the credential itself: it ended
+  up in browser form history, in a password manager entry nobody audits, and on
+  the screen of whoever was standing behind the operator.
+
+  **An administrative credential is not a subject credential, in either
+  direction.** This is the property the feature turns on, because the second
+  direction would make every enrolled user of a deployment an administrator of
+  it. Three things enforce it, and each would do on its own. The rows live in
+  separate tables, `admin_credentials` and `webauthn_credentials`, and neither
+  lookup path reads the other, so a forgotten predicate cannot reach across
+  because no such predicate exists. The relying-party user handle is derived
+  under a different domain separator, so an authenticator creates a distinct
+  credential for an administrative enrolment rather than replacing a subject's,
+  and a response carrying a handle from the other space fails the comparison
+  every completion makes. And neither registration will store a credential
+  identifier the other table already holds, which turns "no credential is both"
+  into a stored fact rather than a consequence of how handles are built. The
+  ceremony state is separated the same way, in `admin_webauthn_challenges`: a
+  console sign-in and a subject usernameless sign-in are otherwise
+  indistinguishable as rows, so one table would let a caller start one and finish
+  it through the other's endpoint. Both cross-use directions have tests.
+
+  **A passkey carries no authority.** The role, the expiry and the revocation are
+  read from the administrative token the credential names, and `AdminCredential`
+  has no role field. Enrolling one is therefore not a privilege change and is not
+  held for a second administrator: there would be nothing to weigh, and a queue
+  would mean an administrator who has lost a key waits for somebody else to wake
+  up. It carries no `internal/rbac` permission either, because it is part of how
+  you authenticate rather than something you do as an administrator, and
+  `/admin/sign-in` and `/admin/sign-out` carry none. What bounds it is that every
+  route acts on the caller's own token and there is no form that names another
+  administrator's, for the reason there is no route to rotate one.
+
+  **The session is the one the console already issues**, with the same cookie
+  attributes, the same idle and absolute deadlines and the same request token on
+  every form. A refused passkey says one fixed sentence whether the credential is
+  unknown, withdrawn, or attached to a token that has expired or been revoked;
+  which of them it was is on the `admin.auth_failed` entry, because the operator
+  reading the history is the defender. A successful sign-in is `admin.authorised`
+  with `"method": "passkey"`, and a pasted token now carries
+  `"method": "sign-in token"`, so the two are one query. Enrolment and withdrawal
+  are `admin_credential.enrolled` and `admin_credential.revoked`.
+
+  **The bearer token does not go away.** It is how the first administrator exists
+  at all and the way back in when a key is lost. The new
+  `admin.passkey_required` refuses a pasted token once *that token* has a
+  passkey; the scope is the token and not the deployment, so a token with no
+  passkey is always accepted, `-bootstrap-admin` always produces one that can be
+  pasted, and the setting can never leave a deployment with nobody able to sign
+  in. Withdrawing the last passkey reopens the form immediately.
+
+  No seventh screen: signing in with a passkey is the sign-in screen, and
+  managing them is a section of the dashboard. Migration
+  `0005_admin_credentials` adds the two tables for both engines; the janitor's
+  existing challenge sweep collects the new challenge table too, rather than
+  gaining a sweep of its own. See
+  [ADR 0017](docs/adr/0017-administrative-sign-in-with-webauthn.md), the passkey
+  section of [docs/ADMIN-GUIDE.md](docs/ADMIN-GUIDE.md), `admin` in
+  [docs/CONFIGURATION.md](docs/CONFIGURATION.md) and the cross-cutting limit in
+  [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) that says what this does not
+  close.
+
 - **Usernameless sign-in**, `POST /v1/webauthn/assert/discoverable` and
   `.../complete`, behind the existing `webauthn` scope. There is no
   `subject_ref` in the path: the options carry no allow list, so the browser

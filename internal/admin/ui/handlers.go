@@ -111,6 +111,8 @@ var notices = map[string]string{
 	"alert-acknowledged":    "The alert has been marked as seen.",
 	"request-approved":      "The request has been approved.",
 	"request-rejected":      "The request has been rejected.",
+	"passkey-added":         "The passkey has been added to your sign-in.",
+	"passkey-withdrawn":     "The passkey has been withdrawn from your sign-in.",
 }
 
 // statusLabels describe a person's state without naming the column value.
@@ -203,6 +205,7 @@ type messageData struct {
 func (h *Handler) renderSignInRefusal(w http.ResponseWriter, r *http.Request, problem string) {
 	pd := h.newPage(r, nil, "Sign in")
 	pd.Problem = problem
+	pd.Data = signInData{PasskeyOffered: h.passkeysOffered()}
 	h.render(w, r, http.StatusUnauthorized, "signin", pd)
 }
 
@@ -340,6 +343,12 @@ type dashboardData struct {
 	PendingApprovals int
 	Features         []featureLine
 	Sessions         int
+
+	// Passkeys is the operator's own sign-in: the keys enrolled for the token
+	// they are signed in with, and the controls to add or withdraw one. It is
+	// a section here rather than a screen of its own, because ADR 0012 counted
+	// six screens as the reason this interface has no build toolchain.
+	Passkeys passkeyView
 }
 
 // healthSummary is the health report in the terms an operator can act on.
@@ -409,6 +418,8 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		{Name: "Deletion waits before the record is destroyed", On: cfg.Features.DeferredErasure},
 		{Name: "Repeated sign-in failures are slowed down", On: cfg.Throttle.Enabled},
 	}
+
+	data.Passkeys = h.passkeySection(r, sess)
 
 	pd := h.newPage(r, sess, "Overview")
 	pd.Data = data

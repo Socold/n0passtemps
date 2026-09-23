@@ -217,6 +217,26 @@ personal fields rather than to the fields themselves; without that erasure
 compromise from 1.0.0 there would have been no projection that is both
 verifiable and free of personal data.
 
+**Administrative sign-in with WebAuthn: landed.** Unreleased; see
+[../CHANGELOG.md](../CHANGELOG.md),
+[ADR 0017](adr/0017-administrative-sign-in-with-webauthn.md), the passkey
+section of [ADMIN-GUIDE.md](ADMIN-GUIDE.md) and the cross-cutting limit in
+[THREAT-MODEL.md](THREAT-MODEL.md).
+
+The interesting part was not the ceremony, which the relying party already ran
+for subjects. It was deciding what separates an administrative credential from a
+subject credential, because getting that wrong in one direction turns every
+enrolled user into an administrator. The answer is a separate table, a
+domain-separated user handle and a refusal by each registration to store an
+identifier the other already holds, with a separate challenge table so that
+neither ceremony can be completed through the other's route.
+
+The other thing the item did not anticipate: the pasted token cannot go away, so
+"use a passkey" had to become "use a passkey, and decide per token whether the
+paste is still accepted". A deployment-wide switch would have had no floor under
+it, and a console that can lock out its only administrator permanently is worse
+than one with a pasted token.
+
 | Item | Why |
 |---|---|
 | Administrative sign-in with WebAuthn | The administration interface authenticates with a bearer token pasted into a form. A passwordless product whose own console does not use passkeys is an awkward demonstration |

@@ -192,7 +192,7 @@ func run() error {
 		}
 	}
 
-	adminUI, err := buildAdminUI(cfg, st, recorder, subjects, limiter, log)
+	adminUI, err := buildAdminUI(cfg, st, recorder, subjects, rp, limiter, log)
 	if err != nil {
 		return fmt.Errorf("administration interface: %w", err)
 	}

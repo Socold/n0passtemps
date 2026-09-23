@@ -85,6 +85,21 @@ const (
 	EventAdminAuthorised   = "admin.authorised"
 	EventAdminDenied       = "admin.denied"
 
+	// Console passkeys.
+	//
+	// Enrolling and withdrawing one has its own pair rather than reusing the
+	// credential family, because those events name a subject and these name an
+	// administrative token. A reader filtering credential.revoked to answer
+	// "whose authenticator was withdrawn" must not find an entry about an
+	// operator's own sign-in among the answers.
+	//
+	// A sign-in with a passkey is not a third event: it is admin.authorised,
+	// with the method in the detail, because what an operator wants from the
+	// history is every successful administrative sign-in in one query and not
+	// two families to remember to union.
+	EventAdminCredentialEnrolled = "admin_credential.enrolled"
+	EventAdminCredentialRevoked  = "admin_credential.revoked"
+
 	// Dual approval.
 	EventApprovalRequested = "approval.requested"
 	EventApprovalGranted   = "approval.granted"

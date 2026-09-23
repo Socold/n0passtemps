@@ -56,6 +56,7 @@ import (
 	"github.com/Socold/n0passtemps/internal/store"
 	"github.com/Socold/n0passtemps/internal/subject"
 	"github.com/Socold/n0passtemps/internal/throttle"
+	"github.com/Socold/n0passtemps/internal/webauthn"
 )
 
 //go:embed templates/*.html
@@ -104,6 +105,18 @@ type Deps struct {
 	// service disables the lookup and the reveal; the rest of the interface
 	// works without it.
 	Subjects *subject.Service
+
+	// WebAuthn drives the console's own passkey ceremonies. It is the same
+	// relying party the public surface uses, because the relying party
+	// identifier and the acceptable origins are one deployment-wide fact and
+	// two services would be two chances to disagree about them. What is not
+	// shared is the credentials: the console's live in their own table and
+	// neither surface can reach the other's. See internal/webauthn/admin.go.
+	//
+	// A nil service leaves the console on pasted tokens alone, and the passkey
+	// controls are not rendered. That is the correct behaviour rather than a
+	// degraded one: a deployment may reasonably not want a second way in.
+	WebAuthn *webauthn.Service
 }
 
 // Handler serves the administration interface.
@@ -258,6 +271,18 @@ func (h *Handler) routes() {
 	mux.HandleFunc("GET /admin/sign-in", h.handleSignInForm)
 	mux.HandleFunc("POST /admin/sign-in", h.handleSignInSubmit)
 	mux.HandleFunc("POST /admin/sign-out", h.handleSignOut)
+
+	// The console's own passkeys. They add no screen: signing in with one is
+	// the sign-in screen, and managing them is a section of the dashboard,
+	// which is where an operator already looks to see what their sign-in is.
+	// ADR 0012 counted six screens as the reason a build toolchain was not
+	// worth it, and a seventh would erode the count and the three-click rule
+	// together.
+	mux.HandleFunc("POST /admin/sign-in/passkey/begin", h.handlePasskeySignInBegin)
+	mux.HandleFunc("POST /admin/sign-in/passkey/complete", h.handlePasskeySignInComplete)
+	mux.HandleFunc("POST /admin/passkeys/begin", h.handlePasskeyEnrolBegin)
+	mux.HandleFunc("POST /admin/passkeys/complete", h.handlePasskeyEnrolComplete)
+	mux.HandleFunc("POST /admin/passkeys/{credential_id}/withdraw", h.handlePasskeyWithdraw)
 
 	mux.HandleFunc("GET /admin/subjects", h.handleSubjectList)
 	mux.HandleFunc("GET /admin/subjects/{subject_id}", h.handleSubjectDetail)
@@ -542,6 +567,8 @@ var eventNames = map[string]string{
 	"admin_token.revoked":             "Administrator sign-in withdrawn",
 	"admin.auth_failed":               "Administrator sign-in refused",
 	"admin.authorised":                "Administrator signed in",
+	"admin_credential.enrolled":       "Administrator added a passkey",
+	"admin_credential.revoked":        "Administrator passkey withdrawn",
 	"admin.denied":                    "Administrator action refused",
 	"admin.subjects_listed":           "Looked at the list of people",
 	"admin.subject_ref_revealed":      "Looked at a person's reference",

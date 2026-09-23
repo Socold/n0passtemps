@@ -77,13 +77,25 @@ func (s *Store) ConsumeChallenge(ctx context.Context, tenantID, id string, now t
 // are kept until then so that a replayed completion arriving inside the
 // original window is refused by ConsumeChallenge rather than by a missing row,
 // which keeps the two cases indistinguishable to the caller.
+//
+// The console's ceremony state lives in its own table, so that neither ceremony
+// can be completed through the other's route, and is collected here rather than
+// by a sweep of its own. One statement covers both, so the count the janitor
+// logs describes a state the database was actually in.
 func (s *Store) DeleteExpiredChallenges(ctx context.Context, before time.Time) (int64, error) {
-	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM webauthn_challenges WHERE expires_at < $1`, before)
+	var total int64
+	err := s.pool.QueryRow(ctx, `
+		WITH subject_rows AS (
+			DELETE FROM webauthn_challenges WHERE expires_at < $1 RETURNING 1
+		), admin_rows AS (
+			DELETE FROM admin_webauthn_challenges WHERE expires_at < $1 RETURNING 1
+		)
+		SELECT (SELECT COUNT(*) FROM subject_rows) + (SELECT COUNT(*) FROM admin_rows)`,
+		before).Scan(&total)
 	if err != nil {
 		return 0, fmt.Errorf("postgres: delete expired challenges: %w", mapError(err))
 	}
-	return tag.RowsAffected(), nil
+	return total, nil
 }
 
 func scanChallenge(sc rowScanner) (*store.Challenge, error) {

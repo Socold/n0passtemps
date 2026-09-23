@@ -88,17 +88,34 @@ func (s *Store) ConsumeChallenge(ctx context.Context, tenantID, id string, now t
 // are kept until then so that a replayed completion arriving inside the
 // original window is refused by ConsumeChallenge rather than by a missing row,
 // which keeps the two cases indistinguishable to the caller.
+//
+// The console's ceremony state lives in its own table, so that neither ceremony
+// can be completed through the other's route, and is collected here rather than
+// by a sweep of its own. The two deletes share a transaction so that the count
+// the janitor logs describes a state the database was actually in.
 func (s *Store) DeleteExpiredChallenges(ctx context.Context, before time.Time) (int64, error) {
-	res, err := s.write.ExecContext(ctx,
-		`DELETE FROM webauthn_challenges WHERE expires_at < ?`, formatTime(before))
+	var total int64
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
+		for _, table := range []string{"webauthn_challenges", "admin_webauthn_challenges"} {
+			// #nosec G202 -- table comes from this literal slice and from nowhere else; the instant travels as a ?
+			// parameter
+			res, err := tx.ExecContext(ctx,
+				`DELETE FROM `+table+` WHERE expires_at < ?`, formatTime(before))
+			if err != nil {
+				return mapError(err)
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("sqlite: count deleted challenges: %w", err)
+			}
+			total += n
+		}
+		return nil
+	})
 	if err != nil {
-		return 0, fmt.Errorf("sqlite: delete expired challenges: %w", mapError(err))
+		return 0, fmt.Errorf("sqlite: delete expired challenges: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("sqlite: count deleted challenges: %w", err)
-	}
-	return n, nil
+	return total, nil
 }
 
 func scanChallenge(sc rowScanner) (*store.Challenge, error) {

@@ -324,6 +324,19 @@ func (s *Service) CompleteRegistration(ctx context.Context, subject *store.Subje
 		return nil, fmt.Errorf("webauthn: look up credential: %w", err)
 	}
 
+	// The same identifier must not already name an administrative credential
+	// either. Deriving the user handle under a different domain separator
+	// already makes an authenticator produce distinct credentials for the two
+	// spaces, so this should never fire; refusing on it turns "no credential is
+	// both a subject's and an administrator's" from a consequence of how
+	// handles are built into a property of what is stored, which is the form a
+	// later reader can check.
+	if _, err := s.store.GetAdminCredentialByID(ctx, subject.TenantID, s.cfg.RPID, credential.ID); err == nil {
+		return nil, ErrCredentialExists
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return nil, fmt.Errorf("webauthn: look up administrative credential: %w", err)
+	}
+
 	rec := &store.Credential{
 		ID:              uuid.NewString(),
 		TenantID:        subject.TenantID,
@@ -491,17 +504,33 @@ func (s *Service) CompleteAssertion(ctx context.Context, subject *store.Subject,
 		return nil, ErrCeremonyFailed
 	}
 
-	return s.recordAssertion(ctx, rec, validated, parsed)
+	return s.recordAssertion(ctx, s.store, rec, validated, parsed)
+}
+
+// credentialWriter is the three writes a completed assertion makes to the
+// credential it used.
+//
+// It exists so that recordAssertion is the only place in the service that
+// touches a signature counter, whichever table the credential came from. The
+// subject store satisfies it directly; the console's credentials are written
+// through the adapter in admin.go. The alternative, a second copy of the
+// bookkeeping for the second table, would be a second place for the clone
+// signal and the replay guard to drift apart, and that drift is silent: a
+// counter check that stopped refusing a replay still looks like a working
+// sign-in.
+type credentialWriter interface {
+	TouchCredential(ctx context.Context, tenantID, id string, usedAt time.Time) error
+	MarkCloneWarning(ctx context.Context, tenantID, id string) error
+	AdvanceSignCount(ctx context.Context, tenantID, id string, expectedPrev, next uint32, usedAt time.Time) error
 }
 
 // recordAssertion turns a validated assertion into an outcome and records what
 // the ceremony did to the credential.
 //
-// The named and the discoverable completion paths share it. The counter
-// bookkeeping is the part of an assertion easiest to get subtly wrong, and a
-// second copy would be a second place for the clone signal and the replay
-// guard to drift apart.
-func (s *Service) recordAssertion(ctx context.Context, rec *store.Credential, validated *lib.Credential, parsed *protocol.ParsedCredentialAssertionData) (*AssertionOutcome, error) {
+// The named, the discoverable and the console completion paths share it. The
+// counter bookkeeping is the part of an assertion easiest to get subtly wrong,
+// so w decides which table the writes land in and nothing else varies.
+func (s *Service) recordAssertion(ctx context.Context, w credentialWriter, rec *store.Credential, validated *lib.Credential, parsed *protocol.ParsedCredentialAssertionData) (*AssertionOutcome, error) {
 	outcome := &AssertionOutcome{
 		Credential: rec,
 		// Read from the authenticator data of THIS ceremony, not from the
@@ -532,7 +561,7 @@ func (s *Service) recordAssertion(ctx context.Context, rec *store.Credential, va
 	if noCounter {
 		// There is no counter to advance, so only the use is recorded. This is
 		// the common case: most passkeys report zero for ever.
-		if err := s.store.TouchCredential(ctx, rec.TenantID, rec.ID, usedAt); err != nil {
+		if err := w.TouchCredential(ctx, rec.TenantID, rec.ID, usedAt); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				// Revoked between the listing above and now. The assertion
 				// must not succeed on a credential that is no longer valid.
@@ -541,14 +570,14 @@ func (s *Service) recordAssertion(ctx context.Context, rec *store.Credential, va
 			return nil, fmt.Errorf("webauthn: record credential use: %w", err)
 		}
 	} else if counterStuck {
-		if err := s.store.MarkCloneWarning(ctx, rec.TenantID, rec.ID); err != nil {
+		if err := w.MarkCloneWarning(ctx, rec.TenantID, rec.ID); err != nil {
 			return nil, fmt.Errorf("webauthn: record clone warning: %w", err)
 		}
-		if err := s.store.TouchCredential(ctx, rec.TenantID, rec.ID, usedAt); err != nil && !errors.Is(err, store.ErrNotFound) {
+		if err := w.TouchCredential(ctx, rec.TenantID, rec.ID, usedAt); err != nil && !errors.Is(err, store.ErrNotFound) {
 			return nil, fmt.Errorf("webauthn: record credential use: %w", err)
 		}
 	} else {
-		err := s.store.AdvanceSignCount(ctx, rec.TenantID, rec.ID,
+		err := w.AdvanceSignCount(ctx, rec.TenantID, rec.ID,
 			rec.SignCount, validated.Authenticator.SignCount, usedAt)
 		if errors.Is(err, store.ErrStaleWrite) {
 			// Another completion moved the counter first. This one is either a
@@ -711,7 +740,7 @@ func (s *Service) CompleteDiscoverableAssertion(ctx context.Context, tenantID, c
 		return nil, nil, ErrCeremonyFailed
 	}
 
-	outcome, err := s.recordAssertion(ctx, rec, validated, parsed)
+	outcome, err := s.recordAssertion(ctx, s.store, rec, validated, parsed)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -725,14 +754,7 @@ func (s *Service) persistChallenge(ctx context.Context, tenantID, subjectID stri
 		return "", time.Time{}, fmt.Errorf("webauthn: marshal session: %w", err)
 	}
 
-	// The challenge bytes are indexed unique, so the same challenge cannot be
-	// registered twice even if the generator were ever to repeat.
-	challengeBytes, err := base64.RawURLEncoding.DecodeString(session.Challenge)
-	if err != nil {
-		// The library emits unpadded base64url; fall back to the string form
-		// rather than failing the ceremony over an encoding detail.
-		challengeBytes = []byte(session.Challenge)
-	}
+	challengeBytes := decodeChallenge(session.Challenge)
 
 	now := s.now().UTC()
 	expires := now.Add(s.cfg.ChallengeTTL.Duration)
@@ -752,6 +774,21 @@ func (s *Service) persistChallenge(ctx context.Context, tenantID, subjectID stri
 		return "", time.Time{}, fmt.Errorf("webauthn: store challenge: %w", err)
 	}
 	return c.ID, expires, nil
+}
+
+// decodeChallenge turns the library's encoded challenge into the bytes the
+// column holds.
+//
+// The bytes are indexed unique, so the same challenge cannot be registered
+// twice even if the generator were ever to repeat. The library emits unpadded
+// base64url; a value that does not decode falls back to its string form rather
+// than failing the ceremony over an encoding detail, which keeps this shared by
+// both surfaces without either having to care.
+func decodeChallenge(encoded string) []byte {
+	if b, err := base64.RawURLEncoding.DecodeString(encoded); err == nil {
+		return b
+	}
+	return []byte(encoded)
 }
 
 // consumeChallenge marks the challenge used and returns its session data.

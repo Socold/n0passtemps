@@ -3,8 +3,19 @@
 {{define "content"}}
 <section class="card narrow">
   <h1>Sign in</h1>
-  <p>Paste the administrator sign-in token you were given. It was shown once, when
-  it was created, and cannot be shown again.</p>
+
+  {{with .Data}}{{if .PasskeyOffered}}
+  <div id="passkey-sign-in" hidden>
+    <p>Sign in with the passkey or security key you registered here.</p>
+    <button type="button" id="passkey-sign-in-button">Sign in with a passkey</button>
+    <p class="problem" id="passkey-sign-in-problem" role="alert" hidden></p>
+    <p class="hint">Nothing to type, and nothing that can be read over your
+    shoulder or left in your browser history.</p>
+  </div>
+  {{end}}{{end}}
+
+  <p>Or paste the administrator sign-in token you were given. It was shown once,
+  when it was created, and cannot be shown again.</p>
 
   <form method="post" action="/admin/sign-in" class="stack">
     <label for="token">Administrator sign-in token</label>

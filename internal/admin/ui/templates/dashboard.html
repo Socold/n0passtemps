@@ -53,5 +53,69 @@
     </ul>
   </article>
 </section>
+
+{{if .Passkeys.Offered}}
+<section class="card">
+  <h2>Your sign-in</h2>
+  {{if .Passkeys.Rows}}
+  <p>{{.Passkeys.Active}} of {{len .Passkeys.Rows}}
+  {{if eq (len .Passkeys.Rows) 1}}passkey is{{else}}passkeys are{{end}} still in use.</p>
+  <table>
+    <caption class="visually-hidden">Passkeys registered for your administrator sign-in</caption>
+    <thead>
+      <tr><th scope="col">Name</th><th scope="col">Added</th><th scope="col">Last used</th><th scope="col">State</th><th scope="col"></th></tr>
+    </thead>
+    <tbody>
+      {{range .Passkeys.Rows}}
+      <tr>
+        <td>{{.Label}}{{if .MayHaveBeenCopied}} <span class="warn">May have been copied</span>{{end}}</td>
+        <td>{{datetime .AddedAt}}</td>
+        <td>{{datetime .LastUsedAt}}</td>
+        <td>{{if .Withdrawn}}Withdrawn {{datetime .WithdrawnAt}}{{else}}In use{{end}}</td>
+        <td>
+          {{if not .Withdrawn}}
+          <form method="post" action="/admin/passkeys/{{.ID}}/withdraw" class="stack tight"
+                data-confirm="Withdraw this passkey? This cannot be undone.">
+            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+            <label for="passkey-reason-{{.ID}}">Reason</label>
+            <input id="passkey-reason-{{.ID}}" name="reason" type="text" required>
+            <button type="submit" class="danger">Withdraw</button>
+          </form>
+          {{end}}
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="calm">You sign in by pasting your administrator token. Add a passkey
+  and you will not have to paste it again.</p>
+  {{end}}
+
+  <div id="passkey-enrol" data-csrf="{{$.CSRF}}" hidden>
+    <label for="passkey-label">Name this passkey</label>
+    <input id="passkey-label" type="text" maxlength="64"
+           placeholder="The key on my keyring" aria-describedby="passkey-help">
+    <button type="button" id="passkey-enrol-button">Add a passkey</button>
+    <p class="problem" id="passkey-enrol-problem" role="alert" hidden></p>
+    <p id="passkey-help" class="hint">The passkey signs you in as this
+    administrator and carries no authority of its own: what you may do still
+    comes from your token. It cannot sign anybody in as one of the people this
+    deployment authenticates.</p>
+  </div>
+
+  {{if .Passkeys.Required}}
+  <p class="hint">This deployment requires the passkey once you have one, so your
+  token will stop being accepted in the form above. If you lose every passkey,
+  an administrator with access to the host can mint you a fresh token with
+  <code>-bootstrap-admin</code>, and a fresh token has no passkey, so it can be
+  pasted.</p>
+  {{else}}
+  <p class="hint">Your token still works as well. Set
+  <code>admin.passkey_required</code> to stop it being accepted once you hold a
+  passkey.</p>
+  {{end}}
+</section>
+{{end}}
 {{end}}
 {{end}}

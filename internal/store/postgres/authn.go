@@ -148,6 +148,21 @@ func (s *Store) GetAdminTokenBySelector(ctx context.Context, selector string) (*
 	return scanAdminToken(row)
 }
 
+// GetAdminTokenByID implements store.AuthnStore.
+//
+// Unlike the selector lookup, the tenant is an input rather than a result. The
+// caller already knows which deployment it serves, and a credential naming a
+// token from another one must find nothing rather than resolve to it.
+func (s *Store) GetAdminTokenByID(ctx context.Context, tenantID, id string) (*store.AdminToken, error) {
+	if tenantID == "" || id == "" {
+		return nil, errors.New("postgres: admin token lookup requires a tenant and an id")
+	}
+	row := s.pool.QueryRow(ctx,
+		`SELECT `+adminTokenColumns+` FROM admin_tokens WHERE tenant_id = $1 AND id = $2`,
+		tenantID, id)
+	return scanAdminToken(row)
+}
+
 // ListAdminTokens implements store.AuthnStore.
 func (s *Store) ListAdminTokens(ctx context.Context, tenantID string) ([]*store.AdminToken, error) {
 	rows, err := s.pool.Query(ctx, `

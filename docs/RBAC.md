@@ -122,6 +122,22 @@ person's next credential, under their name and with their role. That is
 impersonation. Replacing another administrator's token is `admin_token.revoke`
 followed by `admin_token.create`, and the second is approval-gated.
 
+The console's own passkeys carry no permission at all, and the omission is the
+decision rather than an oversight. Enrolling or withdrawing a passkey for your
+own administrator sign-in is part of how you authenticate, not something you do
+as an administrator: it changes no record anybody else can see, and the role a
+passkey sign-in produces is read from the administrative token, never from the
+credential. The console's other authentication routes, `/admin/sign-in` and
+`/admin/sign-out`, carry no permission either, and these sit beside them.
+
+A permission would also have had to be granted to all three roles to be useful,
+since an auditor who cannot enrol a passkey is an auditor who can never stop
+pasting a token, and a permission every role holds unconditionally is not a
+boundary. What bounds these routes instead is that each acts on the caller's own
+administrative token and on no other: there is no form that names a colleague's
+token, for the reason there is no route to rotate one. See
+[ADR 0017](adr/0017-administrative-sign-in-with-webauthn.md).
+
 `api_key.rotate` is not self-service and is reserved to `admin_full`. Its
 response carries a working credential for the public surface, so it sits with
 `api_key.create`. Like `api_key.create`, it is not a dual-approval candidate.

@@ -355,6 +355,77 @@ func (k *APIKey) Usable(now time.Time) bool {
 	return true
 }
 
+// AdminCredential is a passkey that signs an administrator into the console.
+//
+// It is deliberately a different type over a different table from Credential,
+// and the two are never interchangeable. An administrative credential must not
+// authenticate a subject, and a subject's credential must not sign anybody into
+// the console; the second direction is the dangerous one, because it would turn
+// every enrolled user of the deployment into an administrator. Keeping the two
+// in separate relations makes that a property of where a row lives rather than
+// of a predicate a query has to remember to carry.
+//
+// AdminTokenID names the administrative token the credential signs in as. The
+// role is read from that token and never from here, which is why there is no
+// role field: a credential proves who is signing in and carries no authority of
+// its own.
+//
+// The remaining fields have the same meaning as on Credential, including the
+// signature counter, the clone signal and the binding commitment, because the
+// ceremony bookkeeping is shared rather than duplicated.
+type AdminCredential struct {
+	ID              string          `json:"id"`
+	TenantID        string          `json:"tenant_id"`
+	AdminTokenID    string          `json:"admin_token_id"`
+	CredentialID    []byte          `json:"credential_id"`
+	PublicKey       []byte          `json:"-"`
+	AAGUID          []byte          `json:"aaguid,omitempty"`
+	AttestationType AttestationType `json:"attestation_type"`
+	Transports      []string        `json:"transports"`
+	SignCount       uint32          `json:"sign_count"`
+	CloneWarning    bool            `json:"clone_warning"`
+	BackupEligible  bool            `json:"backup_eligible"`
+	BackupState     bool            `json:"backup_state"`
+	UserVerified    bool            `json:"user_verified"`
+	BindingHash     []byte          `json:"-"`
+	Label           string          `json:"label,omitempty"`
+	RPID            string          `json:"rp_id"`
+	CreatedAt       time.Time       `json:"created_at"`
+	LastUsedAt      *time.Time      `json:"last_used_at,omitempty"`
+	RevokedAt       *time.Time      `json:"revoked_at,omitempty"`
+	RevokedReason   string          `json:"revoked_reason,omitempty"`
+}
+
+// Revoked reports whether the credential has been withdrawn. Withdrawal is
+// final here for the reason it is final on a subject credential; see
+// Credential.Revoked and docs/adr/0010.
+func (c *AdminCredential) Revoked() bool { return c.RevokedAt != nil }
+
+// AdminChallenge is the server-side state of an in-flight console ceremony.
+//
+// It is the counterpart of Challenge over its own table, and the separation is
+// what keeps the console's ceremonies and the subject ceremonies from being
+// completed through each other's routes. A console sign-in ceremony and a
+// subject usernameless ceremony are otherwise indistinguishable as rows: both
+// name no identity and both require user verification, so a shared table would
+// let a caller choose which endpoint's checks a ceremony is finished under.
+//
+// AdminTokenID names the token an enrolment ceremony was started for and is
+// empty for a sign-in ceremony, which has no identity yet by definition. Each
+// completion requires the other's value to be absent.
+type AdminChallenge struct {
+	ID           string     `json:"id"`
+	TenantID     string     `json:"tenant_id"`
+	AdminTokenID string     `json:"admin_token_id,omitempty"`
+	Ceremony     Ceremony   `json:"ceremony"`
+	Challenge    []byte     `json:"-"`
+	RPID         string     `json:"rp_id"`
+	SessionData  []byte     `json:"-"`
+	CreatedAt    time.Time  `json:"created_at"`
+	ExpiresAt    time.Time  `json:"expires_at"`
+	ConsumedAt   *time.Time `json:"consumed_at,omitempty"`
+}
+
 // ThrottleState is one fixed-window counter.
 type ThrottleState struct {
 	BucketKey string `json:"bucket_key"`

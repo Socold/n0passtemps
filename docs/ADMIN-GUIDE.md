@@ -22,6 +22,10 @@ token as a bearer credential, which is what this guide uses. `/admin`, when
 token pasted into `GET /admin/sign-in` and then carries a session cookie bounded
 by `admin.session_ttl`. Both sit behind the same network allow list.
 
+The console also takes a passkey in place of the pasted token, over its own
+credential space; see
+[Signing in to the console with a passkey](#signing-in-to-the-console-with-a-passkey).
+
 ## The three roles
 
 | Role | Can read | Can also do | Cannot |
@@ -398,6 +402,80 @@ back is `-bootstrap-admin -force` on the host.
 
 Audited as `admin_token.rotated`, with the actor and `predecessor_id` always the
 same token.
+
+### Signing in to the console with a passkey
+
+The console takes a passkey instead of a pasted token, and this is the way to
+use it. It needs `admin.ui_enabled`, a `webauthn.rp_id` and origins that cover
+wherever `/admin` is served, and a browser on a secure origin.
+
+Nothing here changes `/admin/v1`. That surface takes a bearer token because its
+caller is a script, and a script has no authenticator to touch.
+
+**Enrol a key.** Sign in to `/admin` with your token as usual, and look at the
+"Your sign-in" section of the overview screen. Name the key something you will
+recognise on a list, press "Add a passkey", and confirm on the device. The name
+is for you; the service does not read it.
+
+You enrol for the token you are signed in with and for no other. There is no
+form that names a colleague's token, for the reason there is no route to rotate
+one: what the ceremony produces signs in as that token, which would be
+impersonation rather than help. A colleague enrols their own, from their own
+session.
+
+It is not held for a second administrator either. The passkey carries no
+authority: what you may do still comes from your token, and the role on the
+screen after a passkey sign-in is the role on the token record. Enrolling one
+changes nothing anybody would weigh, and a queue would mean an administrator who
+has just lost a key waits for somebody else to wake up.
+
+Every role may do this, `admin_auditor` included. It is part of how you
+authenticate, not something you do as an administrator, which is why it carries
+no permission and why signing in and signing out carry none either.
+
+Audited as `admin_credential.enrolled`.
+
+**Sign in.** On `/admin/sign-in`, press "Sign in with a passkey" and confirm on
+the device. You are not asked who you are first: the key says which
+administrative sign-in it belongs to. The session that results is the ordinary
+one, with the same `admin.session_ttl` and the same idle bound.
+
+A refused passkey says only "That passkey was not accepted", whatever went
+wrong. The history says which: look at `admin.auth_failed` and read the
+`reason` on the entry. An unknown key, a withdrawn one, a token that has expired
+and a token that has been revoked each produce a different reason there and the
+same sentence on the screen.
+
+Audited as `admin.authorised` with `"method": "passkey"`. A sign-in with a
+pasted token carries `"method": "sign-in token"`, so the two are one query.
+
+**Require it.** With `admin.passkey_required` set, an administrative token stops
+being accepted in the form once that token has a passkey enrolled. The setting
+is scoped to the token, not to the deployment: a token with no passkey is still
+accepted whatever it is set to. That is what stops the setting locking a
+deployment out, and it is why it is safe to turn on with one administrator.
+
+**When a passkey is lost.** In order:
+
+1. Sign in with another passkey you hold, or with your token if the deployment
+   does not require one, and withdraw the lost key from the overview screen. A
+   reason is required and is kept with the record. Withdrawal is final, as it is
+   for a user's authenticator and for the same reason; see
+   [ADR 0010](adr/0010-revocation-is-final.md).
+2. If `admin.passkey_required` is on and that was your last key, withdrawing it
+   reopens the form for your token, so the token works again immediately.
+3. If you cannot sign in at all, the way back is the host. Somebody with access
+   to it runs `n0passtemps-server -config <path> -bootstrap-admin -force`, which
+   mints a fresh `admin_full` token; a fresh token has no passkey, so it can be
+   pasted whatever `admin.passkey_required` says. Then revoke the token whose
+   key is gone, and mint a named replacement.
+
+There is deliberately no remote recovery secret for this. Whoever can run that
+command already holds the configuration, the keyring and the database, so it
+grants nothing new; a recovery code that worked over the network would be a
+second console credential nobody rotates.
+
+Audited as `admin_credential.revoked`.
 
 ### Why the last full administrator cannot be revoked
 

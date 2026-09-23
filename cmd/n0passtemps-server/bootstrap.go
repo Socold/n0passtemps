@@ -17,6 +17,7 @@ import (
 	"github.com/Socold/n0passtemps/internal/store"
 	"github.com/Socold/n0passtemps/internal/subject"
 	"github.com/Socold/n0passtemps/internal/throttle"
+	"github.com/Socold/n0passtemps/internal/webauthn"
 
 	adminui "github.com/Socold/n0passtemps/internal/admin/ui"
 )
@@ -89,16 +90,22 @@ func mintBootstrapToken(ctx context.Context, cfg *config.Config, st store.Store,
 // Returning nil rather than a handler that refuses every request means the
 // routes are never registered at all, so a disabled interface presents no
 // surface to probe.
-func buildAdminUI(cfg *config.Config, st store.Store, rec *audit.Recorder, subjects *subject.Service, limiter *throttle.Limiter, log *slog.Logger) (*adminui.Handler, error) {
+func buildAdminUI(cfg *config.Config, st store.Store, rec *audit.Recorder, subjects *subject.Service, rp *webauthn.Service, limiter *throttle.Limiter, log *slog.Logger) (*adminui.Handler, error) {
 	if !cfg.Admin.UIEnabled {
 		log.Info("administration interface disabled by configuration")
 		return nil, nil
 	}
+	// The relying party is the one the public surface uses. The identifier and
+	// the acceptable origins are one deployment-wide fact, and a second service
+	// would be a second chance to disagree about them; the credentials stay
+	// apart because they live in different tables, not because the ceremonies
+	// are driven by different objects.
 	return adminui.New(adminui.Deps{
 		Config:   cfg,
 		Store:    st,
 		Recorder: rec,
 		Subjects: subjects,
+		WebAuthn: rp,
 		Limiter:  limiter,
 		Logger:   log,
 		Clock:    time.Now,

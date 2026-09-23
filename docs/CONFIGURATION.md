@@ -749,6 +749,7 @@ only what the receiver has acknowledged.
 | `admin.session_ttl` | duration | `30m` | `N0PASSTEMPS_ADMIN_SESSION_TTL` | Bounds an administrator's browser session. |
 | `admin.session_cookie_secure` | bool | `true` | `N0PASSTEMPS_ADMIN_SESSION_COOKIE_SECURE` | Marks the session cookie `Secure`. Forced on whenever TLS is terminated in process or a trusted proxy is declared. |
 | `admin.ip_allow_list` | list of CIDR | empty | `N0PASSTEMPS_ADMIN_IP_ALLOW_LIST` | Restricts the whole `/admin` surface to named networks. Applied before authentication, and a caller outside it receives 404 rather than 403. |
+| `admin.passkey_required` | bool | `false` | `N0PASSTEMPS_ADMIN_PASSKEY_REQUIRED` | Refuses an administrative token pasted into the console once that token has a passkey enrolled, so the operator signs in with the key instead. Scoped to the token and not to the deployment. |
 
 Refused by the validator:
 
@@ -759,6 +760,18 @@ Refused by the validator:
 The first two apply only when `admin.ui_enabled` is true. The CIDR check applies
 always, because the allow list guards the `/admin/v1` API as well as the
 interface.
+
+`admin.passkey_required` is refused by nothing, and the scope is why. It asks a
+question per token rather than per deployment: a token that holds no usable
+passkey is accepted in the form whatever this is set to. That floor is what makes
+it safe to turn on with a single administrator, because
+`n0passtemps-server -bootstrap-admin` mints a token with no passkey and so
+always produces a way back in. Withdrawing the last passkey has the same effect
+for an existing token, immediately.
+
+It changes nothing on `/admin/v1`, which takes a bearer token because its caller
+is a script. See [ADR 0017](adr/0017-administrative-sign-in-with-webauthn.md) and
+the passkey section of [ADMIN-GUIDE.md](ADMIN-GUIDE.md).
 
 ## logging
 

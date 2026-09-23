@@ -148,6 +148,7 @@ type Store interface {
 	TenantStore
 	SubjectStore
 	CredentialStore
+	AdminCredentialStore
 	TOTPStore
 	RecoveryStore
 	TicketStore
@@ -262,6 +263,78 @@ type CredentialStore interface {
 	// credential without an explicit override, which would otherwise be an
 	// easy way to lock a user out permanently.
 	CountActiveCredentials(ctx context.Context, tenantID, subjectID string) (int, error)
+}
+
+// AdminCredentialStore manages the passkeys that sign an administrator into
+// the console, and the ceremony state those sign-ins need.
+//
+// Nothing here reads or writes webauthn_credentials, and nothing in
+// CredentialStore reads or writes admin_credentials. That is the point of the
+// split rather than an accident of how it was written: an administrative
+// credential must not authenticate a subject, and a subject's credential must
+// not sign anybody into the console. With one relation the separation would be
+// a predicate every query has to carry; with two it is a property of where the
+// row lives, and a forgotten clause cannot reach across because there is no
+// clause that would.
+type AdminCredentialStore interface {
+	// CreateAdminCredential stores a newly enrolled passkey. A second
+	// enrolment of the same credential identifier under the same relying
+	// party violates adc_credential_uq and surfaces as ErrConflict.
+	CreateAdminCredential(ctx context.Context, c *AdminCredential) error
+
+	// GetAdminCredentialByID is the console sign-in lookup: the authenticator
+	// reports a credential identifier and the relying party it was created
+	// for, and the pair addresses the unique index directly.
+	//
+	// A revoked credential is still returned, as on the subject side, because
+	// the enrolment path uses this to refuse an authenticator that is already
+	// known whether or not it still works. The sign-in path has to refuse a
+	// revoked row itself.
+	GetAdminCredentialByID(ctx context.Context, tenantID, rpID string, credentialID []byte) (*AdminCredential, error)
+
+	// GetAdminCredential reads one row by its own identifier, for the
+	// withdrawal form.
+	GetAdminCredential(ctx context.Context, tenantID, id string) (*AdminCredential, error)
+
+	// ListAdminCredentials returns the passkeys enrolled for one
+	// administrative token, oldest first.
+	ListAdminCredentials(ctx context.Context, tenantID, adminTokenID string, includeRevoked bool) ([]*AdminCredential, error)
+
+	// CountActiveAdminCredentials counts the passkeys of one administrative
+	// token that have not been withdrawn.
+	//
+	// It is what admin.passkey_required consults. The requirement is scoped to
+	// a token that actually holds a passkey, so a token with none can still
+	// sign in by pasting it, which is what keeps a freshly bootstrapped
+	// administrator from being locked out by the setting.
+	CountActiveAdminCredentials(ctx context.Context, tenantID, adminTokenID string) (int, error)
+
+	// RevokeAdminCredential withdraws one passkey. It is final, and there is
+	// no matching restore, for the reason RevokeCredential has none.
+	RevokeAdminCredential(ctx context.Context, tenantID, id, reason string, at time.Time) error
+
+	// TouchAdminCredential, MarkAdminCredentialCloneWarning and
+	// AdvanceAdminCredentialSignCount are the three writes a completed
+	// assertion makes to the credential it used. They carry exactly the
+	// contracts of TouchCredential, MarkCloneWarning and AdvanceSignCount,
+	// including the compare-and-swap that makes ErrStaleWrite the answer to a
+	// replayed assertion, because the ceremony layer drives both credential
+	// families through one piece of bookkeeping.
+	TouchAdminCredential(ctx context.Context, tenantID, id string, usedAt time.Time) error
+	MarkAdminCredentialCloneWarning(ctx context.Context, tenantID, id string) error
+	AdvanceAdminCredentialSignCount(ctx context.Context, tenantID, id string, expectedPrev, next uint32, usedAt time.Time) error
+
+	// CreateAdminChallenge stores the state of an in-flight console ceremony.
+	CreateAdminChallenge(ctx context.Context, c *AdminChallenge) error
+
+	// ConsumeAdminChallenge is ConsumeChallenge over the console's own
+	// challenge table, with the same atomicity and the same refusal to
+	// distinguish an unknown challenge from an expired or spent one.
+	//
+	// It cannot see a row created by CreateChallenge, and ConsumeChallenge
+	// cannot see a row created here. That is what stops a console ceremony
+	// being completed through a subject route, or the reverse.
+	ConsumeAdminChallenge(ctx context.Context, tenantID, id string, now time.Time) (*AdminChallenge, error)
 }
 
 // TOTPStore manages time-based one-time password seeds.
@@ -379,6 +452,13 @@ type ChallengeStore interface {
 	ConsumeChallenge(ctx context.Context, tenantID, id string, now time.Time) (*Challenge, error)
 
 	// DeleteExpiredChallenges is called by the janitor.
+	//
+	// It collects the console's ceremony state as well as the subject's, and
+	// reports the two together. The console keeps its challenges in a separate
+	// relation so that neither ceremony can be completed through the other's
+	// route, and a second sweep for a second ephemeral table would be a second
+	// thing to schedule, to time out and to explain, for no property the one
+	// sweep does not already have.
 	DeleteExpiredChallenges(ctx context.Context, before time.Time) (int64, error)
 }
 
@@ -448,6 +528,16 @@ type AuthnStore interface {
 
 	CreateAdminToken(ctx context.Context, t *AdminToken) error
 	GetAdminTokenBySelector(ctx context.Context, selector string) (*AdminToken, error)
+
+	// GetAdminTokenByID reads a token by its own identifier, within a tenant.
+	//
+	// The console's passkey sign-in needs it: the credential names the token it
+	// belongs to, and the role and the usability of that token, not anything on
+	// the credential, decide what the resulting session may do. The tenant is
+	// an input here rather than a result, unlike the selector lookup, because
+	// the caller already knows which deployment it is serving and a credential
+	// naming a token from another one must find nothing.
+	GetAdminTokenByID(ctx context.Context, tenantID, id string) (*AdminToken, error)
 	ListAdminTokens(ctx context.Context, tenantID string) ([]*AdminToken, error)
 	RevokeAdminToken(ctx context.Context, tenantID, id string, at time.Time) error
 

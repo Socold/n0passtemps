@@ -670,6 +670,57 @@ during an incident.
 
 These limits apply to every attacker above and are easy to overlook.
 
+### The console's passkeys close the pasted secret, and not much else
+
+The administration interface accepts a passkey in place of the administrative
+token, over a credential space of its own; see
+[ADR 0017](adr/0017-administrative-sign-in-with-webauthn.md).
+
+What that closes is narrow and worth naming exactly. It removes the long-lived
+bearer token from a form field, and with it the browser form history that field
+fed, the password manager entry nobody audits, the terminal scrollback the token
+was copied out of, and the reading of it over an operator's shoulder. It removes
+the credential from the wire on the sign-in request, since what travels is a
+signature over a server-chosen challenge that is good once. It also makes a
+console sign-in phishing-resistant in the way every subject sign-in already is:
+the authenticator signs over the origin, so a page on a lookalike host obtains
+nothing a genuine sign-in would accept. With `admin.passkey_required` the token
+stops being accepted in the form at all once that administrator holds a key.
+
+What it does not close:
+
+- **`/admin/v1` is unchanged.** The bearer token is still the credential for the
+  API, because its caller is a script with no authenticator to touch. An
+  attacker who obtains a token has everything that token's role carries, exactly
+  as before. Enrolling a passkey neither revokes the token nor narrows it.
+- **The bearer token still exists, and must.** It is how the first
+  administrator exists ([ADR 0014](adr/0014-bootstrap-by-explicit-command.md))
+  and the way back in when a key is lost.
+  `admin.passkey_required` is per token, not per deployment, so a token with no
+  passkey is always accepted. That floor is what stops the setting locking a
+  deployment out, and it is also the thing to reason about: whoever can run
+  `-bootstrap-admin -force` on the host can mint a fresh token, and that token
+  can be pasted. Nothing here narrows attacker 9, the operator themselves.
+- **A compromised operator device is still a compromised console.** The session
+  cookie the ceremony produces is the same cookie a pasted token produces, with
+  the same lifetime; a key with a resident credential that has been left
+  unlocked is a key that signs in. Withdrawing the credential is final and
+  immediate, and is the answer.
+- **It is not a second factor.** A passkey replaces the token for that
+  administrator; it is not required in addition to it. What it proves depends on
+  the authenticator, which is why user verification is required on this route
+  whatever `webauthn.user_verification` says: without it, a found key would open
+  the console with nothing else needed.
+- **The separation from subject credentials is a property of this code, not of
+  WebAuthn.** Both spaces share one relying party identifier, so a browser will
+  show an administrator's key and a user's key in the same prompt. What keeps
+  them apart is that the rows live in different tables, that the user handles
+  are derived under different domain separators, and that neither registration
+  will store an identifier the other already holds. A future change that merged
+  the two tables, or reused the handle construction, would make every enrolled
+  user an administrator, and the two cross-use tests in
+  `internal/webauthn/admin_test.go` exist to fail loudly if one does.
+
 ### `zeroize` is best-effort
 
 `zeroize.Bytes` overwrites a slice and reads it back through a constant-time

@@ -182,6 +182,7 @@ func applyEnv(cfg *Config) error {
 	dur("ADMIN_SESSION_TTL", &cfg.Admin.SessionTTL)
 	boolean("ADMIN_SESSION_COOKIE_SECURE", &cfg.Admin.SessionCookieSecure)
 	list("ADMIN_IP_ALLOW_LIST", &cfg.Admin.IPAllowList)
+	boolean("ADMIN_PASSKEY_REQUIRED", &cfg.Admin.PasskeyRequired)
 
 	str("LOGGING_LEVEL", &cfg.Logging.Level)
 	str("LOGGING_FORMAT", &cfg.Logging.Format)

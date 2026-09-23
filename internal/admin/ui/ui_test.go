@@ -24,6 +24,7 @@ import (
 	"github.com/Socold/n0passtemps/internal/store/sqlite"
 	"github.com/Socold/n0passtemps/internal/subject"
 	"github.com/Socold/n0passtemps/internal/throttle"
+	"github.com/Socold/n0passtemps/internal/webauthn"
 )
 
 // testKEK is a single-version key provider.
@@ -81,7 +82,11 @@ type harness struct {
 const testTenantID = "default"
 
 // newHarness builds a handler over a migrated database with one tenant.
-func newHarness(t *testing.T) *harness {
+//
+// tune adjusts the configuration before anything is built, so a test that needs
+// a setting the default does not carry says so in one line rather than
+// assembling its own handler and drifting from this one.
+func newHarness(t *testing.T, tune ...func(*config.Config)) *harness {
 	t.Helper()
 
 	t.Setenv("N0PASSTEMPS_TEST_PEPPER", strings.Repeat("ab", 32))
@@ -112,6 +117,16 @@ func newHarness(t *testing.T) *harness {
 	// Throttling is left off so that a test which makes several failed sign-in
 	// attempts is not locked out by an earlier one.
 	cfg.Throttle.Enabled = false
+	// The relying party the console's own passkeys are enrolled against. It is
+	// the same one the public surface uses, because the identifier and the
+	// origins are one deployment-wide fact; what keeps the credentials apart is
+	// the table each lives in.
+	cfg.WebAuthn.RPID = "console.example.test"
+	cfg.WebAuthn.Origins = []string{"https://console.example.test"}
+
+	for _, fn := range tune {
+		fn(&cfg)
+	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	clk := newClock()
@@ -122,6 +137,11 @@ func newHarness(t *testing.T) *harness {
 	}
 	t.Cleanup(subjects.Close)
 
+	rp, err := webauthn.New(cfg.WebAuthn, st, clk.now)
+	if err != nil {
+		t.Fatalf("relying party: %v", err)
+	}
+
 	h, err := New(Deps{
 		Store:    st,
 		Recorder: audit.NewRecorder(st, log),
@@ -130,6 +150,7 @@ func newHarness(t *testing.T) *harness {
 		Clock:    clk.now,
 		Limiter:  throttle.New(st, cfg.Throttle, clk.now),
 		Subjects: subjects,
+		WebAuthn: rp,
 	})
 	if err != nil {
 		t.Fatalf("new handler: %v", err)

@@ -61,7 +61,7 @@ key material in memory. Everything else is derived.
 | `cmd/n0passtemps-server` | The entrypoint: parses seven flags, loads the configuration, opens the keyring and the store, provisions the tenant, builds every service, starts the janitor and serves. With `-bootstrap-admin` it creates the first administrative tokens, as many as `-admins` says, prints each once and exits without serving; the long-running path never writes a token and only warns when no administrator exists. See [ADR 0014](adr/0014-bootstrap-by-explicit-command.md) | everything |
 | `cmd/n0passtemps-wizard` | Generates the keyring, the signing key and the pepper, writes a configuration, and validates one. Nothing it does is required | `config`, `kek`, `assertion` |
 | `internal/janitor` | The six periodic sweeps, in process and behind a deployment-wide sweep lock so that several replicas do not each repeat them, and the keyring age check that raises `kek.rotation_overdue` | `config`, `store`, `audit`, `alerts` |
-| `internal/admin/ui` | The server-rendered interface, embedded, mounted at `/admin` | `config`, `store`, `audit`, `subject`, `throttle` |
+| `internal/admin/ui` | The server-rendered interface, embedded, mounted at `/admin` | `config`, `store`, `audit`, `subject`, `throttle`, `webauthn` |
 | `internal/config` | Loads defaults, the TOML file and the environment; validates once at startup | `go-toml/v2` |
 | `internal/api` | The HTTP surface: routing, middleware, problem responses, both handler sets | everything below |
 | `internal/rbac` | Decides what an administrative role may do | `internal/store` |

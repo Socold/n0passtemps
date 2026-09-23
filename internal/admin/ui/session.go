@@ -369,7 +369,9 @@ func (h *Handler) handleSignInForm(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/", http.StatusSeeOther)
 		return
 	}
-	h.render(w, r, http.StatusOK, "signin", h.newPage(r, nil, "Sign in"))
+	pd := h.newPage(r, nil, "Sign in")
+	pd.Data = signInData{PasskeyOffered: h.passkeysOffered()}
+	h.render(w, r, http.StatusOK, "signin", pd)
 }
 
 // handleSignInSubmit verifies a pasted administrative token and mints a session.
@@ -425,6 +427,21 @@ func (h *Handler) handleSignInSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A deployment may require the passkey once this token has one. The refusal
+	// is deliberately not the fixed one above: the token verified, so there is
+	// nothing left to learn from being told why, and an operator who has just
+	// pasted a working token needs to be told to use their key rather than left
+	// to conclude the token has been withdrawn. The attempt is still counted
+	// and still audited, because a run of them from one address is worth
+	// seeing whatever the reason.
+	if h.passkeyRequiredFor(r, tok) {
+		h.recordSignInAttempt(r, dims, true)
+		h.auditSignInFailure(w, r, ip, "this deployment requires the passkey enrolled for this token")
+		h.renderSignInRefusal(w, r, "This administrator signs in with a passkey. "+
+			"Use the passkey button rather than the token.")
+		return
+	}
+
 	value, sess, err := h.sessions.mint(now, tok, h.idleTTL, h.absoluteTTL)
 	if err != nil {
 		h.deps.Logger.ErrorContext(r.Context(), "adminui: session not created", slog.Any("error", err))
@@ -456,6 +473,12 @@ func (h *Handler) handleSignInSubmit(w http.ResponseWriter, r *http.Request) {
 		Detail: map[string]any{
 			"role":    string(sess.Role),
 			"surface": "administration interface",
+			// Which of the two ways in was used. The console mints one kind of
+			// session from either, so the entry is the only place the
+			// difference survives, and an operator reviewing who signed in
+			// with a pasted token after passkeys were rolled out has nowhere
+			// else to look.
+			"method": "sign-in token",
 		},
 	})
 
