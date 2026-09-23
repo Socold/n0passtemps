@@ -157,7 +157,9 @@ func runSetup(args []string) error {
 		return fmt.Errorf("create temporary file: %w", err)
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	// A removal that fails leaves a temporary file behind and changes nothing
+	// about the validation this function performs.
+	defer func() { _ = os.Remove(tmpName) }()
 	if _, err := tmp.WriteString(cfgBody); err != nil {
 		// The write already failed and the file is removed by the deferred
 		// call above, so a close error adds nothing.

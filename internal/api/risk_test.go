@@ -72,14 +72,14 @@ func verifiedClaims(t *testing.T, h *harness, token string) *assertion.Claims {
 	if !ok || len(keys) == 0 {
 		t.Fatalf("the jwks document carries no key: %s", doc.Raw)
 	}
-	jwk := keys[0].(map[string]any)
-	raw, err := base64.RawURLEncoding.DecodeString(jwk["x"].(string))
+	jwk := asObject(t, keys[0], "keys[0]", "")
+	raw, err := base64.RawURLEncoding.DecodeString(asString(t, jwk["x"], "jwk.x"))
 	if err != nil {
 		t.Fatalf("decode jwk: %v", err)
 	}
 
 	verifier := assertion.NewVerifier(
-		map[string]ed25519.PublicKey{jwk["kid"].(string): raw},
+		map[string]ed25519.PublicKey{asString(t, jwk["kid"], "jwk.kid"): raw},
 		h.cfg.Assertion.Issuer, h.cfg.Assertion.AllowedClockSkew.Duration)
 
 	claims, err := verifier.Verify(token, h.harnessAPIKeyID(t))
@@ -143,7 +143,7 @@ func reasonsOf(t *testing.T, value any) []string {
 	}
 	out := make([]string, 0, len(list))
 	for _, v := range list {
-		out = append(out, v.(string))
+		out = append(out, asString(t, v, "reason"))
 	}
 	return out
 }
@@ -239,7 +239,7 @@ func TestRecoveryRedemptionCarriesItsReason(t *testing.T) {
 	h := newHarness(t)
 	h.do(http.MethodPost, "/v1/subjects", h.apiKey, map[string]any{"subject_ref": "user-1"})
 	issued := h.do(http.MethodPost, "/v1/recovery/user-1/issue", h.apiKey, nil)
-	code := issued.Body["codes"].([]any)[0].(string)
+	code := asString(t, issued.list(t, "codes")[0], "codes[0]")
 
 	res := h.do(http.MethodPost, "/v1/recovery/user-1/consume", h.apiKey,
 		map[string]any{"code": code})
@@ -269,7 +269,7 @@ func TestRecoveryRedemptionCarriesItsReason(t *testing.T) {
 	if logged["level"] != string(claims.Risk.Level) {
 		t.Errorf("the audit entry says %v and the claim says %s", logged["level"], claims.Risk.Level)
 	}
-	if int(logged["score"].(float64)) != claims.Risk.Score {
+	if int(asNumber(t, logged["score"], "risk.score")) != claims.Risk.Score {
 		t.Errorf("the audit entry scores %v and the claim %d", logged["score"], claims.Risk.Score)
 	}
 	if got := reasonsOf(t, logged["reasons"]); len(got) != len(claims.Risk.Reasons) {
@@ -365,7 +365,7 @@ func TestRiskDisabledLeavesNoTraceAtAll(t *testing.T) {
 	h := newHarness(t, func(c *config.Config) { c.Risk.Enabled = false })
 	h.do(http.MethodPost, "/v1/subjects", h.apiKey, map[string]any{"subject_ref": "user-1"})
 	issued := h.do(http.MethodPost, "/v1/recovery/user-1/issue", h.apiKey, nil)
-	code := issued.Body["codes"].([]any)[0].(string)
+	code := asString(t, issued.list(t, "codes")[0], "codes[0]")
 
 	res := h.do(http.MethodPost, "/v1/recovery/user-1/consume", h.apiKey,
 		map[string]any{"code": code})
@@ -406,7 +406,7 @@ func TestRiskNeverRefusesAnAuthentication(t *testing.T) {
 
 	h.do(http.MethodPost, "/v1/subjects", h.apiKey, map[string]any{"subject_ref": "user-1"})
 	issued := h.do(http.MethodPost, "/v1/recovery/user-1/issue", h.apiKey, nil)
-	codes := issued.Body["codes"].([]any)
+	codes := issued.list(t, "codes")
 
 	// Failures against both the subject and the network first, and a dormant
 	// credential, so that as many reasons as this path can reach do reach.
@@ -417,7 +417,7 @@ func TestRiskNeverRefusesAnAuthentication(t *testing.T) {
 	}
 
 	res := h.do(http.MethodPost, "/v1/recovery/user-1/consume", h.apiKey,
-		map[string]any{"code": codes[0].(string)})
+		map[string]any{"code": asString(t, codes[0], "codes[0]")})
 	if res.Status != http.StatusOK {
 		t.Fatalf("a high-risk redemption was refused with %d; the service must report "+
 			"risk and never refuse on it. Body: %s", res.Status, res.Raw)
@@ -450,7 +450,7 @@ func TestHighRiskRaisesAnAlert(t *testing.T) {
 	h := newHarness(t)
 	h.do(http.MethodPost, "/v1/subjects", h.apiKey, map[string]any{"subject_ref": "user-1"})
 	issued := h.do(http.MethodPost, "/v1/recovery/user-1/issue", h.apiKey, nil)
-	codes := issued.Body["codes"].([]any)
+	codes := issued.list(t, "codes")
 
 	// recovery_code_used together with failures against the subject and the
 	// network reaches the high threshold on the shipped defaults. This is the
@@ -462,7 +462,7 @@ func TestHighRiskRaisesAnAlert(t *testing.T) {
 
 	for i := range 2 {
 		res := h.do(http.MethodPost, "/v1/recovery/user-1/consume", h.apiKey,
-			map[string]any{"code": codes[i].(string)})
+			map[string]any{"code": asString(t, codes[i], "codes[i]")})
 		if res.Status != http.StatusOK {
 			t.Fatalf("consume %d = %d; body: %s", i, res.Status, res.Raw)
 		}
@@ -493,7 +493,7 @@ func TestHighRiskRaisesAnAlert(t *testing.T) {
 	other.do(http.MethodPost, "/v1/subjects", other.apiKey, map[string]any{"subject_ref": "user-2"})
 	batch := other.do(http.MethodPost, "/v1/recovery/user-2/issue", other.apiKey, nil)
 	clean := other.do(http.MethodPost, "/v1/recovery/user-2/consume", other.apiKey,
-		map[string]any{"code": batch.Body["codes"].([]any)[0].(string)})
+		map[string]any{"code": asString(t, batch.list(t, "codes")[0], "codes[0]")})
 	if got := clean.Body["risk_level"]; got != string(risk.LevelElevated) {
 		t.Fatalf("a lone redemption = %v, want %q", got, risk.LevelElevated)
 	}

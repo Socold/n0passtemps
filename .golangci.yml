@@ -58,6 +58,17 @@ linters:
       # than merely being assigned to the blank identifier. Checking it here as
       # well reported the same lines a second time with no reason attached.
       check-blank: false
+      # database/sql documents Rows.Close as returning the error encountered
+      # during iteration, which is the same error Rows.Err reports. Every
+      # deferred Close in this repository sits in a function that checks Err
+      # after the loop, which is where a truncated result set is caught and
+      # turned into a returned error. Wrapping each of those Close calls in a
+      # closure to discard an error that has already been reported would add
+      # fourteen closures that say nothing. This exclusion was granted after
+      # checking that all fourteen sites do have the matching Err check, and it
+      # is worth re-checking if the count moves.
+      exclude-functions:
+        - (*database/sql.Rows).Close
 
     govet:
       enable:
@@ -184,11 +195,13 @@ linters:
         linters:
           - nilerr
 
-      # The chain verifier pages, so its rows.Close calls sit on the error
-      # paths of a loop body. "defer" there would stack one close per page
-      # until the function returned, which is the bug this rule exists to
-      # prevent rather than the fix for it.
-      - path: ^internal/store/sqlite/audit\.go$
+      # Both of these open a result set inside a loop, so their rows.Close
+      # calls sit on the error paths of the loop body. "defer" there would
+      # stack one close per iteration until the function returned, which is
+      # the bug this rule exists to prevent rather than the fix for it. The
+      # chain verifier pages; the backup census walks one sealed column at a
+      # time.
+      - path: ^(internal/store/sqlite/audit|cmd/n0passtemps-wizard/verify)\.go$
         linters:
           - sqlclosecheck
 

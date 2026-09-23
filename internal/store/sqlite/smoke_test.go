@@ -12,7 +12,7 @@ func TestMigrateSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	ctx := context.Background()
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatal(err)

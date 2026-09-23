@@ -1274,7 +1274,11 @@ func TestDiscoverableAssertionRefusesAMismatchedUserHandle(t *testing.T) {
 		t.Fatal(err)
 	}
 	bobHandle := userHandleOf(t, bob.ID)
-	body["response"].(map[string]any)["userHandle"] = base64.RawURLEncoding.EncodeToString(bobHandle)
+	inner, ok := body["response"].(map[string]any)
+	if !ok {
+		t.Fatalf("the authenticator's response has no object under \"response\": %T", body["response"])
+	}
+	inner["userHandle"] = base64.RawURLEncoding.EncodeToString(bobHandle)
 	tampered, err := json.Marshal(body)
 	if err != nil {
 		t.Fatal(err)

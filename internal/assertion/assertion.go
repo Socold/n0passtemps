@@ -175,7 +175,15 @@ type joseHeader struct {
 
 // Issuer signs assertions with one Ed25519 key.
 type Issuer struct {
-	priv   ed25519.PrivateKey
+	priv ed25519.PrivateKey
+
+	// pub is derived once, in NewIssuer, where a key that is not ed25519 can
+	// still be reported as an error. Deriving it again in the getter would
+	// mean an unchecked type assertion on a path that has no way to fail
+	// safely, so the invariant is established where it can be refused and
+	// read everywhere else.
+	pub ed25519.PublicKey
+
 	issuer string
 	ttl    time.Duration
 	skew   time.Duration
@@ -221,6 +229,7 @@ func NewIssuer(priv ed25519.PrivateKey, issuer string, ttl, skew time.Duration) 
 
 	return &Issuer{
 		priv:   priv,
+		pub:    pub,
 		issuer: issuer,
 		ttl:    ttl,
 		skew:   skew,
@@ -237,7 +246,7 @@ func (i *Issuer) KeyID() string { return i.kid }
 
 // PublicKey returns the verification key matching the signing key.
 func (i *Issuer) PublicKey() ed25519.PublicKey {
-	return i.priv.Public().(ed25519.PublicKey)
+	return i.pub
 }
 
 // IssueOption sets an optional claim on an assertion.

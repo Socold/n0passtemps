@@ -30,7 +30,7 @@ func mintKeyOverHTTP(t *testing.T, h *harness, body map[string]any) (id, tok str
 	if res.Status != http.StatusCreated {
 		t.Fatalf("mint = %d; body: %s", res.Status, res.Raw)
 	}
-	return res.Body["api_key"].(map[string]any)["id"].(string), res.str(t, "token")
+	return asString(t, res.obj(t, "api_key")["id"], "api_key.id"), res.str(t, "token")
 }
 
 // mintExpiringAdminToken writes an administrative token with an expiry
@@ -108,7 +108,7 @@ func TestRotatedAPIKeyOverlapClosesItself(t *testing.T) {
 		t.Fatalf("rotate = %d, want 201; body: %s", res.Status, res.Raw)
 	}
 	newKey := res.str(t, "token")
-	successor := res.Body["api_key"].(map[string]any)
+	successor := res.obj(t, "api_key")
 
 	// Name and scopes carry over, and the successor is a different credential.
 	if successor["name"] != "billing" {
@@ -241,7 +241,7 @@ func TestRotationNeverExtendsTheKeyBeingRotated(t *testing.T) {
 	if res.Body["no_expiry"] != false {
 		t.Error("no_expiry is true although expires_in_days was given")
 	}
-	successor := res.Body["api_key"].(map[string]any)
+	successor := res.obj(t, "api_key")
 	if got, want := instant(t, successor, "expires_at"), h.clock.now().AddDate(0, 0, 90); !got.Equal(want) {
 		t.Errorf("successor expires_at = %v, want %v", got, want)
 	}
@@ -283,13 +283,13 @@ func TestRotationGraceIsBoundedPerRequest(t *testing.T) {
 
 	// None of the refusals minted anything or touched the predecessor.
 	listing := h.do(http.MethodGet, "/admin/v1/api-keys", full, nil)
-	for _, raw := range listing.Body["api_keys"].([]any) {
-		entry := raw.(map[string]any)
+	for _, raw := range listing.list(t, "api_keys") {
+		entry := asObject(t, raw, "entry", "")
 		if entry["id"] == oldID && entry["expires_at"] != nil {
 			t.Errorf("a refused rotation bounded the predecessor: %v", entry["expires_at"])
 		}
 	}
-	if n := len(listing.Body["api_keys"].([]any)); n != 2 {
+	if n := len(listing.list(t, "api_keys")); n != 2 {
 		t.Errorf("%d keys listed, want the harness key and the minted one", n)
 	}
 	if len(h.auditEntries(audit.EventAPIKeyRotated)) != 0 {
@@ -303,7 +303,7 @@ func TestRotationGraceIsBoundedPerRequest(t *testing.T) {
 	if atMax.Status != http.StatusCreated {
 		t.Fatalf("grace at the maximum = %d; body: %s", atMax.Status, atMax.Raw)
 	}
-	successorID := atMax.Body["api_key"].(map[string]any)["id"].(string)
+	successorID := asString(t, atMax.obj(t, "api_key")["id"], "api_key.id")
 	byDefault := h.do(http.MethodPost, "/admin/v1/api-keys/"+successorID+"/rotate", full, nil)
 	if byDefault.Status != http.StatusCreated {
 		t.Fatalf("rotate with the configured grace = %d; body: %s", byDefault.Status, byDefault.Raw)
@@ -386,7 +386,7 @@ func TestEveryRoleRotatesItsOwnToken(t *testing.T) {
 			t.Fatalf("%s rotating itself = %d, want 201; body: %s", role, res.Status, res.Raw)
 		}
 		newTok := res.str(t, "token")
-		successor := res.Body["admin_token"].(map[string]any)
+		successor := res.obj(t, "admin_token")
 		if successor["role"] != string(role) {
 			t.Errorf("successor role = %v, want %s; rotation must change no authority", successor["role"], role)
 		}
@@ -474,10 +474,10 @@ func TestNobodyRotatesAnotherAdministratorsToken(t *testing.T) {
 
 	listing := h.do(http.MethodGet, "/admin/v1/admin-tokens", full, nil)
 	var auditorID string
-	for _, raw := range listing.Body["admin_tokens"].([]any) {
-		entry := raw.(map[string]any)
+	for _, raw := range listing.list(t, "admin_tokens") {
+		entry := asObject(t, raw, "entry", "")
 		if entry["role"] == string(store.RoleAuditor) {
-			auditorID = entry["id"].(string)
+			auditorID = asString(t, entry["id"], "entry.id")
 		}
 	}
 	if auditorID == "" {
@@ -520,7 +520,7 @@ func TestSelfRotationCannotOutliveTheTokenItReplaces(t *testing.T) {
 	if res.Status != http.StatusCreated {
 		t.Fatalf("rotate = %d; body: %s", res.Status, res.Raw)
 	}
-	successor := res.Body["admin_token"].(map[string]any)
+	successor := res.obj(t, "admin_token")
 	if got := instant(t, successor, "expires_at"); !got.Equal(ownExpiry) {
 		t.Errorf("successor expires_at = %v, want the inherited %v", got, ownExpiry)
 	}
@@ -536,7 +536,7 @@ func TestSelfRotationCannotOutliveTheTokenItReplaces(t *testing.T) {
 	if shorter.Status != http.StatusCreated {
 		t.Fatalf("rotating to a shorter life = %d; body: %s", shorter.Status, shorter.Raw)
 	}
-	got := instant(t, shorter.Body["admin_token"].(map[string]any), "expires_at")
+	got := instant(t, shorter.obj(t, "admin_token"), "expires_at")
 	if want := h.clock.now().AddDate(0, 0, 3); !got.Equal(want) {
 		t.Errorf("successor expires_at = %v, want %v", got, want)
 	}
@@ -561,7 +561,7 @@ func TestRotationLeavesTheLastAdministratorGuardAlone(t *testing.T) {
 		t.Fatalf("the sole full administrator could not rotate itself: %d; body: %s", res.Status, res.Raw)
 	}
 	newTok := res.str(t, "token")
-	successorID := res.Body["admin_token"].(map[string]any)["id"].(string)
+	successorID := asString(t, res.obj(t, "admin_token")["id"], "admin_token.id")
 
 	if st := adminWorks(h, newTok); st != http.StatusOK {
 		t.Fatalf("the deployment has no working full administrator: %d", st)
@@ -595,15 +595,15 @@ func TestLastAdministratorGuardLooksPastTheRotationGrace(t *testing.T) {
 
 	listing := h.do(http.MethodGet, "/admin/v1/admin-tokens", successor, nil)
 	var successorID, predecessorID string
-	for _, raw := range listing.Body["admin_tokens"].([]any) {
-		e := raw.(map[string]any)
+	for _, raw := range listing.list(t, "admin_tokens") {
+		e := asObject(t, raw, "entry", "")
 		if e["role"] != string(store.RoleFull) {
 			continue
 		}
 		if e["expires_at"] == nil {
-			successorID = e["id"].(string)
+			successorID = asString(t, e["id"], "e.id")
 		} else {
-			predecessorID = e["id"].(string)
+			predecessorID = asString(t, e["id"], "e.id")
 		}
 	}
 	if successorID == "" || predecessorID == "" {

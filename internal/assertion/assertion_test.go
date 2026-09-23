@@ -633,11 +633,11 @@ func TestJWKS(t *testing.T) {
 	}
 
 	// A verifier built from the published document must accept a fresh token.
-	x, err := base64.RawURLEncoding.DecodeString(k["x"].(string))
+	x, err := base64.RawURLEncoding.DecodeString(jwkString(t, k, "x"))
 	if err != nil {
 		t.Fatalf("decode x: %v", err)
 	}
-	v := NewVerifier(map[string]ed25519.PublicKey{k["kid"].(string): ed25519.PublicKey(x)}, testIssuer, testSkew)
+	v := NewVerifier(map[string]ed25519.PublicKey{jwkString(t, k, "kid"): ed25519.PublicKey(x)}, testIssuer, testSkew)
 	v.now = func() time.Time { return fixedNow.Add(time.Second) }
 
 	token, _, err := iss.Issue(testSubject, "", testAudience, []Factor{FactorRecoveryCode}, nil)
@@ -1016,4 +1016,19 @@ func TestTokenWithNoRiskClaimStillVerifies(t *testing.T) {
 	if _, _, err := iss.Issue(testSubject, "", testAudience, []Factor{FactorTOTP}, nil, nil); err != nil {
 		t.Errorf("Issue with a nil option: %v", err)
 	}
+}
+
+// jwkString reads one member of a published JWK as a string.
+//
+// The members are read back out of a JSON document, so their types are not
+// guaranteed by the compiler. Asserting inline would fail a malformed document
+// with a panic naming an interface conversion, which says nothing about which
+// member was wrong.
+func jwkString(t *testing.T, jwk map[string]any, member string) string {
+	t.Helper()
+	v, ok := jwk[member].(string)
+	if !ok {
+		t.Fatalf("JWK member %q is %T, want a string", member, jwk[member])
+	}
+	return v
 }

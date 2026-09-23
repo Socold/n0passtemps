@@ -21,11 +21,11 @@ func queueErasure(t *testing.T, h *harness, subjectID string) (string, map[strin
 		t.Fatalf("queueing = %d %v; body: %s", res.Status, res.Body["type"], res.Raw)
 	}
 	queue := h.do(http.MethodGet, "/admin/v1/approvals", h.admin[store.RoleFull], nil)
-	pending := queue.Body["approvals"].([]any)
+	pending := queue.list(t, "approvals")
 	if len(pending) != 1 {
 		t.Fatalf("queue holds %d requests, want 1", len(pending))
 	}
-	return pending[0].(map[string]any)["id"].(string), body
+	return asString(t, asObject(t, pending[0], "pending[0]", "")["id"], "pending[0].id"), body
 }
 
 // TestApprovedOperationRunsWhenRedeemed is the test for the defect where an
@@ -109,7 +109,7 @@ func TestApprovalIsSpentOnceUnderConcurrency(t *testing.T) {
 		t.Fatalf("queueing = %d", res.Status)
 	}
 	queue := h.do(http.MethodGet, "/admin/v1/approvals", requester, nil)
-	approvalID := queue.Body["approvals"].([]any)[0].(map[string]any)["id"].(string)
+	approvalID := asString(t, asObject(t, queue.list(t, "approvals")[0], "approvals[0]", queue.Raw)["id"], "approvals[0].id")
 	approver := h.mintAdminToken("approver", store.RoleFull)
 	h.do(http.MethodPost, "/admin/v1/approvals/"+approvalID+"/approve", approver, nil)
 

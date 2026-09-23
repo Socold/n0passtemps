@@ -94,7 +94,7 @@ func TestRevokeAllRevokesEveryFactor(t *testing.T) {
 	if issued.Status != http.StatusCreated {
 		t.Fatalf("reissue = %d; body: %s", issued.Status, issued.Raw)
 	}
-	codes := int(issued.Body["count"].(float64))
+	codes := int(issued.num(t, "count"))
 	if codes == 0 {
 		t.Fatal("no recovery codes were issued, so the test would prove nothing about them")
 	}
@@ -231,15 +231,15 @@ func TestRevokeAllIsHeldForASecondAdministrator(t *testing.T) {
 	}
 
 	queue := h.do(http.MethodGet, "/admin/v1/approvals", requester, nil)
-	pending := queue.Body["approvals"].([]any)
+	pending := queue.list(t, "approvals")
 	if len(pending) != 1 {
 		t.Fatalf("queue holds %d requests, want 1", len(pending))
 	}
-	queued := pending[0].(map[string]any)
+	queued := asObject(t, pending[0], "pending[0]", "")
 	if queued["operation"] != "credential.revoke_bulk" {
 		t.Errorf("queued operation = %v", queued["operation"])
 	}
-	approvalID := queued["id"].(string)
+	approvalID := asString(t, queued["id"], "queued.id")
 
 	approver := h.mintAdminToken("approver", store.RoleFull)
 	if res := h.do(http.MethodPost, "/admin/v1/approvals/"+approvalID+"/approve", approver, nil); res.Status != http.StatusOK {

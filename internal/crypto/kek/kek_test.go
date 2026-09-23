@@ -66,7 +66,7 @@ func TestFileProviderLoadsValidKeyring(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a well-formed, owner-only keyring must load: %v", err)
 	}
-	defer p.Close()
+	defer closeKeyring(t, p)
 
 	if p.Path() != path {
 		t.Errorf("Path() = %q, want %q", p.Path(), path)
@@ -110,7 +110,7 @@ func TestReturnedKeysAreCopies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	defer p.Close()
+	defer closeKeyring(t, p)
 
 	cases := []struct {
 		name string
@@ -169,11 +169,11 @@ func TestFileProviderPermissions(t *testing.T) {
 				if err != nil {
 					t.Fatalf("mode %#o grants nothing to group or other and must be accepted: %v", tc.mode, err)
 				}
-				p.Close()
+				closeKeyring(t, p)
 				return
 			}
 			if err == nil {
-				p.Close()
+				closeKeyring(t, p)
 				t.Fatalf("keyring with mode %#o loaded: a KEK readable beyond the service user must be refused", tc.mode)
 			}
 			// Guard against passing for an unrelated reason.
@@ -313,11 +313,11 @@ func TestFileProviderDataDirPlacement(t *testing.T) {
 				if err != nil {
 					t.Fatalf("keyring outside every data dir must load: %v", err)
 				}
-				p.Close()
+				closeKeyring(t, p)
 				return
 			}
 			if err == nil {
-				p.Close()
+				closeKeyring(t, p)
 				t.Fatal("keyring stored with the data it protects was loaded; it must be refused")
 			}
 			if !strings.Contains(err.Error(), "is inside the data directory") {
@@ -379,7 +379,7 @@ func TestMalformedKeyringIsRefused(t *testing.T) {
 				writeFile(t, path, []byte(tc.doc), 0o600)
 				p, err := LoadFileProvider(path)
 				if err == nil {
-					p.Close()
+					closeKeyring(t, p)
 				}
 				check(t, err)
 			})
@@ -387,7 +387,7 @@ func TestMalformedKeyringIsRefused(t *testing.T) {
 				t.Setenv(testEnvVar, tc.doc)
 				p, err := LoadEnvProvider(testEnvVar)
 				if err == nil {
-					p.Close()
+					closeKeyring(t, p)
 				}
 				check(t, err)
 			})
@@ -450,7 +450,7 @@ func TestEnvProviderParsesAndUnsetsVariable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadEnvProvider on a valid document: %v", err)
 	}
-	defer p.Close()
+	defer closeKeyring(t, p)
 
 	// Left in place, the keyring would be inherited by every child process
 	// and stay readable through /proc/<pid>/environ.
@@ -522,5 +522,17 @@ func TestNonCanonicalVersionsAreRefused(t *testing.T) {
 			t.Errorf("key version %q was accepted; only the canonical decimal form "+
 				"may name a key, and versions start at 1", version)
 		}
+	}
+}
+
+// closeKeyring closes a provider and fails the test if it could not.
+//
+// Close is what zeroizes the key material, so a discarded error would leave
+// the rest of a test asserting against a provider that still holds keys in
+// memory, which is the one thing these tests exist to rule out.
+func closeKeyring(t *testing.T, p interface{ Close() error }) {
+	t.Helper()
+	if err := p.Close(); err != nil {
+		t.Errorf("close keyring: %v", err)
 	}
 }

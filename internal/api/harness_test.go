@@ -292,7 +292,7 @@ func (h *harness) doWith(method, path, bearer string, body any, headers map[stri
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	raw, err := io.ReadAll(res.Body)
 	if err != nil {
@@ -320,6 +320,79 @@ func (h *harness) auditEntries(eventType string) []*store.AuditEntry {
 }
 
 // str pulls a string out of a decoded body, failing the test when absent.
+// The bodies these accessors read are decoded JSON, so their shapes are not
+// guaranteed by the compiler. Asserting inline fails a changed shape with a
+// panic naming an interface conversion, which says nothing about which field
+// moved; these say which, and print the body.
+
+// obj reads a JSON object field.
+func (r response) obj(t *testing.T, key string) map[string]any {
+	t.Helper()
+	v, ok := r.Body[key]
+	if !ok {
+		t.Fatalf("response has no %q field: %s", key, r.Raw)
+	}
+	return asObject(t, v, key, r.Raw)
+}
+
+// list reads a JSON array field.
+func (r response) list(t *testing.T, key string) []any {
+	t.Helper()
+	v, ok := r.Body[key]
+	if !ok {
+		t.Fatalf("response has no %q field: %s", key, r.Raw)
+	}
+	l, ok := v.([]any)
+	if !ok {
+		t.Fatalf("field %q is %T, not an array: %s", key, v, r.Raw)
+	}
+	return l
+}
+
+// num reads a JSON number field, which decodes as a float64.
+func (r response) num(t *testing.T, key string) float64 {
+	t.Helper()
+	v, ok := r.Body[key]
+	if !ok {
+		t.Fatalf("response has no %q field: %s", key, r.Raw)
+	}
+	n, ok := v.(float64)
+	if !ok {
+		t.Fatalf("field %q is %T, not a number: %s", key, v, r.Raw)
+	}
+	return n
+}
+
+// asObject narrows one decoded value, for elements read out of an array.
+func asObject(t *testing.T, v any, what, raw string) map[string]any {
+	t.Helper()
+	m, ok := v.(map[string]any)
+	if !ok {
+		t.Fatalf("%s is %T, not an object: %s", what, v, raw)
+	}
+	return m
+}
+
+// asNumber narrows one decoded value. JSON numbers decode as float64.
+func asNumber(t *testing.T, v any, what string) float64 {
+	t.Helper()
+	n, ok := v.(float64)
+	if !ok {
+		t.Fatalf("%s is %T, not a number", what, v)
+	}
+	return n
+}
+
+// asString narrows one decoded value, for members read out of an element.
+func asString(t *testing.T, v any, what string) string {
+	t.Helper()
+	s, ok := v.(string)
+	if !ok {
+		t.Fatalf("%s is %T, not a string", what, v)
+	}
+	return s
+}
+
 func (r response) str(t *testing.T, key string) string {
 	t.Helper()
 	v, ok := r.Body[key]

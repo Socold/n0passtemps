@@ -255,7 +255,7 @@ func TestFormEncodedBodyIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	if res.StatusCode != http.StatusUnsupportedMediaType {
 		t.Errorf("status = %d, want 415", res.StatusCode)
@@ -385,7 +385,7 @@ func TestRecoveryCodeIsSingleUse(t *testing.T) {
 	if !ok || len(codes) != h.cfg.Recovery.CodeCount {
 		t.Fatalf("issued %v codes, want %d", len(codes), h.cfg.Recovery.CodeCount)
 	}
-	code := codes[0].(string)
+	code := asString(t, codes[0], "codes[0]")
 
 	first := h.do(http.MethodPost, "/v1/recovery/user-1/consume", h.apiKey, map[string]any{"code": code})
 	if first.Status != http.StatusOK {
@@ -410,7 +410,7 @@ func TestRecoveryIssueRetiresThePreviousBatch(t *testing.T) {
 	h.do(http.MethodPost, "/v1/subjects", h.apiKey, map[string]any{"subject_ref": "user-1"})
 
 	first := h.do(http.MethodPost, "/v1/recovery/user-1/issue", h.apiKey, nil)
-	old := first.Body["codes"].([]any)[0].(string)
+	old := asString(t, first.list(t, "codes")[0], "codes[0]")
 
 	h.do(http.MethodPost, "/v1/recovery/user-1/issue", h.apiKey, nil)
 
@@ -428,7 +428,7 @@ func TestRecoveryCodeFromAnotherSubjectIsRefused(t *testing.T) {
 	h.do(http.MethodPost, "/v1/subjects", h.apiKey, map[string]any{"subject_ref": "user-2"})
 
 	issued := h.do(http.MethodPost, "/v1/recovery/user-1/issue", h.apiKey, nil)
-	code := issued.Body["codes"].([]any)[0].(string)
+	code := asString(t, issued.list(t, "codes")[0], "codes[0]")
 
 	res := h.do(http.MethodPost, "/v1/recovery/user-2/consume", h.apiKey, map[string]any{"code": code})
 	if res.Status != http.StatusUnauthorized {
@@ -557,7 +557,7 @@ func TestRequestIDIsSanitised(t *testing.T) {
 			// net/http refuses some of these outright, which is also a pass.
 			continue
 		}
-		res.Body.Close()
+		_ = res.Body.Close()
 
 		echoed := res.Header.Get(RequestIDHeader)
 		if echoed == hostile {

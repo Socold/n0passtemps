@@ -162,9 +162,9 @@ func TestLastFullAdministratorCannotBeRevoked(t *testing.T) {
 
 	var fullID string
 	for _, raw := range list {
-		entry := raw.(map[string]any)
+		entry := asObject(t, raw, "entry", "")
 		if entry["role"] == string(store.RoleFull) {
-			fullID = entry["id"].(string)
+			fullID = asString(t, entry["id"], "entry.id")
 			break
 		}
 	}
@@ -218,14 +218,14 @@ func TestMintedTokenIsShownOnceAndWorks(t *testing.T) {
 	}
 
 	// Revoking it stops it working.
-	keys := listing.Body["api_keys"].([]any)
+	keys := listing.list(t, "api_keys")
 	// The harness mints its own key during setup, so the lookup is by the
 	// distinctive name rather than by position.
 	var keyID string
 	for _, raw := range keys {
-		entry := raw.(map[string]any)
+		entry := asObject(t, raw, "entry", "")
 		if entry["name"] == "minted-for-revocation" {
-			keyID = entry["id"].(string)
+			keyID = asString(t, entry["id"], "entry.id")
 		}
 	}
 	if keyID == "" {
@@ -274,11 +274,11 @@ func TestDualApprovalHoldsSensitiveOperations(t *testing.T) {
 	if queue.Status != http.StatusOK {
 		t.Fatalf("queue status = %d", queue.Status)
 	}
-	pending := queue.Body["approvals"].([]any)
+	pending := queue.list(t, "approvals")
 	if len(pending) != 1 {
 		t.Fatalf("queue holds %d requests, want 1: %s", len(pending), queue.Raw)
 	}
-	approvalID := pending[0].(map[string]any)["id"].(string)
+	approvalID := asString(t, asObject(t, pending[0], "pending[0]", "")["id"], "pending[0].id")
 
 	// The administrator who raised it cannot approve it. A two-administrator
 	// rule one administrator can satisfy alone is not a control.

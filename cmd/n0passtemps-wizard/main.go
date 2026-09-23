@@ -148,10 +148,22 @@ func writeFile(path string, content []byte, mode os.FileMode, force bool) error 
 	if err != nil {
 		return fmt.Errorf("create %s: %w", path, err)
 	}
-	defer f.Close()
 
 	if _, err := f.Write(content); err != nil {
+		// The write already failed, so a close error would be the same fault
+		// reported twice and the file is incomplete either way.
+		_ = f.Close()
 		return fmt.Errorf("write %s: %w", path, err)
+	}
+
+	// Checked, not deferred. What this function writes is a keyring, a signing
+	// key or a configuration file, and a close that fails is how a short file
+	// comes to exist: the bytes were accepted by the kernel and never reached
+	// the disk. Discarding that error would leave the operator with an artefact
+	// that looks written and does not open, which is the failure the verify
+	// subcommand exists to catch long afterwards.
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", path, err)
 	}
 	return nil
 }

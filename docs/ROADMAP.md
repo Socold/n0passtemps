@@ -283,24 +283,23 @@ be burned down deliberately instead of drifting.
 
 The pinned linter could not run at all until 1.1.0: `v2.6.0` cannot read the
 export data of the toolchain this project builds with, so every `make lint`
-ended with one `typecheck` error and no analysis. With the pin moved and three
-genuine misconfigurations corrected, the correctness linters report nothing.
-What remains is 430 findings from the budget linters, which accumulated in code
-written while nothing was checking it:
+ended with one `typecheck` error and no analysis. With the pin moved and the
+misconfigurations corrected, the correctness linters report nothing and the
+`errcheck` backlog has been cleared. What remains is 413 findings from the
+budget linters, which accumulated in code written while nothing was checking
+it:
 
 | Linter | Count | What it is |
 |---|---|---|
-| `govet` (`shadow`) | 141 | A nested `err` shadowing an outer one. Idiomatic in most cases, and the check is famously noisy, but it is also how a handled error becomes an unhandled one |
-| `lll` | 97 | Lines past 120 columns |
-| `errcheck` | 81 | Unchecked error returns, 63 of them in tests. These are the ones worth reading individually: the rest is formatting, this is not |
-| `gocritic` | 69 | Diagnostic, style and performance suggestions |
-| `revive` | 30 | Mostly missing doc comments on methods with unexported receivers |
-| `gocyclo` | 12 | Functions past 15 branches |
+| `govet` (`shadow`) | 165 | A nested `err` shadowing an outer one. Idiomatic in most cases, and the check is famously noisy, but it is also how a handled error becomes an unhandled one |
+| `lll` | 119 | Lines past 120 columns |
+| `gocritic` | 82 | Diagnostic, style and performance suggestions |
+| `revive` | 33 | Mostly missing doc comments on methods with unexported receivers |
+| `gocyclo` | 14 | Functions past 15 branches |
 
-None is a defect today. They were not fixed in the same change that made the
-linter run, because a mechanical pass over 430 sites across nearly every file
-would bury the three real fixes it shipped alongside, and a diff nobody can
-review is not an improvement.
+None is a defect today, and none of them is `errcheck`, which was the one
+category worth reading line by line. Clearing it turned up two real faults and
+one class of false positive, all recorded in the changelog.
 
 `make lint` is deliberately not wired into CI while this stands. Wiring it in is
 the exit criterion, not the starting point: the backlog goes to zero first, and

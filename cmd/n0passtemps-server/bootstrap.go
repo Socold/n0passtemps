@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"time"
@@ -160,7 +161,16 @@ func bootstrapAdmin(ctx context.Context, cfg *config.Config, st store.Store, rec
 			"has been lost", count)
 	}
 
-	fmt.Fprintln(os.Stdout)
+	// The tokens are minted, stored as a digest and audited before they are
+	// printed, so a write that fails silently leaves the deployment with a
+	// full administrator nobody holds while the command still exits zero. The
+	// operator would discover it the first time they tried to administer
+	// anything, and redirecting this output to a file on a full disk is enough
+	// to cause it. Every write to stdout is therefore checked, once, at the
+	// end.
+	out := &checkedWriter{w: os.Stdout}
+
+	out.printf("\n")
 	for i := 1; i <= n; i++ {
 		display, admin, err := mintBootstrapToken(ctx, cfg, st, fmt.Sprintf("bootstrap-%d", i))
 		if err != nil {
@@ -181,9 +191,16 @@ func bootstrapAdmin(ctx context.Context, cfg *config.Config, st store.Store, rec
 		}); err != nil {
 			return fmt.Errorf("audit bootstrap administrator: %w", err)
 		}
-		fmt.Fprintf(os.Stdout, "%s  %s\n", admin.Name, display)
+		out.printf("%s  %s\n", admin.Name, display)
 	}
-	fmt.Fprintln(os.Stdout)
+	out.printf("\n")
+
+	if err := out.err; err != nil {
+		return fmt.Errorf("%d administrative token(s) were minted but could not all be "+
+			"displayed: %w. Only a digest of each is stored, so the ones that did not "+
+			"reach the output are lost and the deployment now has administrators nobody "+
+			"holds. Re-run with -force once the output is working", n, err)
+	}
 
 	fmt.Fprint(os.Stderr,
 		"Each token is shown once. Only a digest is stored, so none can be displayed\n"+
@@ -215,4 +232,24 @@ func warnIfNoAdministrator(ctx context.Context, cfg *config.Config, st store.Sto
 		hint += " -admins 2"
 	}
 	log.WarnContext(ctx, "no administrator exists yet; create the first with: "+hint)
+}
+
+// checkedWriter writes and remembers the first failure.
+//
+// It exists so that printing a credential that cannot be printed again is not
+// a silent no-op. Checking each call at its site would put five error branches
+// between a caller and what the function is for; checking once at the end says
+// the same thing and reads.
+type checkedWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (c *checkedWriter) printf(format string, args ...any) {
+	if c.err != nil {
+		// The first failure is the one worth reporting. Anything after it is
+		// the same broken output saying so again.
+		return
+	}
+	_, c.err = fmt.Fprintf(c.w, format, args...)
 }
