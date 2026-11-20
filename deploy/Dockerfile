@@ -11,7 +11,7 @@
 # an ARG because Dependabot reads FROM lines only. It is what moves these pins
 # (the docker entry in .github/dependabot.yml), and with them the patch releases
 # of the toolchain, so a pin it could not see would simply go stale.
-FROM golang:1.27-alpine@sha256:4cb7ac979db5fcc41cae44b2227ba5ab8a51e8807f40d9ba4dee20a0ad960b5b AS builder
+FROM golang:1.27-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS builder
 
 WORKDIR /src
 
