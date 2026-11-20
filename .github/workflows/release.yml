@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.27.1"
+  GO_VERSION: "1.27.4"
   # Written out in lower case rather than derived from github.repository: a
   # registry path must be lower case, and the owner name is not.
   IMAGE_NAME: ghcr.io/socold/n0passtemps
